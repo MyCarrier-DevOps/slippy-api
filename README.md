@@ -134,6 +134,23 @@ All configuration is via environment variables. No config files, no Vault.
 
 > Caching is automatically enabled when `DRAGONFLY_HOST` is set. If the Dragonfly ping fails at startup, caching is disabled gracefully and the API falls through to ClickHouse directly.
 
+### OpenTelemetry
+
+The API initialises the OpenTelemetry SDK at startup when `OTEL_EXPORTER_OTLP_ENDPOINT` is set. Both traces and metrics are exported.
+
+| Variable | Description | Default |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Collector endpoint (enables SDK when set) | _(disabled)_ |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | Export protocol: `grpc` or `http/protobuf` | `grpc` |
+| `OTEL_SERVICE_NAME` | Service name in traces/metrics | `slippy-api` |
+| `OTEL_SDK_DISABLED` | Disable SDK entirely | `false` |
+| `OTEL_RESOURCE_ATTRIBUTES_NODE_NAME` | Kubernetes node name | _(empty)_ |
+| `OTEL_RESOURCE_ATTRIBUTES_POD_NAME` | Kubernetes pod name | _(empty)_ |
+| `OTEL_RESOURCE_ATTRIBUTES_POD_NAMESPACE` | Kubernetes pod namespace | _(empty)_ |
+| `OTEL_RESOURCE_ATTRIBUTES_POD_UID` | Kubernetes pod UID | _(empty)_ |
+
+The `OTEL_RESOURCE_ATTRIBUTES_*` variables are typically injected via the Kubernetes downward API and appear as resource attributes on all exported telemetry. When deploying with the `mycarrier-helm` chart, these are set automatically.
+
 ## Project Structure
 
 ```
@@ -166,6 +183,9 @@ slippy-api/                          # Repository root
         ├── middleware/
         │   ├── auth.go              # Bearer token auth middleware
         │   └── auth_test.go
+        ├── telemetry/
+        │   ├── telemetry.go         # OTel SDK init (traces + metrics)
+        │   └── telemetry_test.go
         └── e2e/
             └── e2e_test.go          # Full-stack e2e with testcontainers Redis
 ```
@@ -242,7 +262,14 @@ docker run -p 8080:8080 \
 - **huma v2 + humago**: Code-first API framework with auto-generated OpenAPI 3.1 spec. Uses Go's standard library `net/http.ServeMux` via the humago adapter — no Gin, no Echo.
 - **Bearer auth with constant-time comparison**: Prevents timing attacks. Operations without a `security` declaration (e.g., `/health`) pass through unauthenticated.
 - **Cache decorator pattern**: `CachedSlipReader` wraps any `SlipReader` transparently. Caching is opt-in via environment variables and degrades gracefully if Dragonfly is unavailable.
-- **OpenTelemetry**: All HTTP requests are instrumented via `otelhttp` for distributed tracing.
+- **OpenTelemetry**: Full SDK initialisation with traces and metrics via OTLP (gRPC or HTTP). Every layer creates properly-parented spans that waterfall correctly in a trace viewer:
+  - **HTTP** — `otelhttp.NewHandler` creates the root request span
+  - **Auth** — `auth.validateAPIKey` records scheme, operation, and outcome
+  - **Handler** — `handler.*` spans capture operation parameters and results
+  - **Cache** — `cache.*` spans show cache system, operation, and hit/miss status
+  - **ClickHouse** — `clickhouse.*` spans record `db.system`, operation, and query parameters
+
+  The SDK is configured entirely through standard `OTEL_*` environment variables.
 - **Graceful shutdown**: `SIGINT`/`SIGTERM` triggers a 15-second graceful shutdown window.
 - **No Vault**: All secrets are passed via environment variables, suitable for Kubernetes secret injection.
 
@@ -253,6 +280,8 @@ docker run -p 8080:8080 \
 | [huma/v2](https://github.com/danielgtaylor/huma) | REST API framework with OpenAPI 3.1 |
 | [go-redis/v9](https://github.com/redis/go-redis) | Dragonfly/Redis client |
 | [otelhttp](https://pkg.go.dev/go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp) | OpenTelemetry HTTP instrumentation |
+| [otlptracegrpc / otlptracehttp](https://pkg.go.dev/go.opentelemetry.io/otel/exporters/otlp/otlptrace) | OTLP trace exporters (gRPC and HTTP) |
+| [otlpmetricgrpc / otlpmetrichttp](https://pkg.go.dev/go.opentelemetry.io/otel/exporters/otlp/otlpmetric) | OTLP metric exporters (gRPC and HTTP) |
 | [goLibMyCarrier/slippy](https://github.com/MyCarrier-DevOps/goLibMyCarrier) | ClickHouse-backed routing slip store |
 | [goLibMyCarrier/clickhouse](https://github.com/MyCarrier-DevOps/goLibMyCarrier) | ClickHouse configuration and connectivity |
 | [testcontainers-go](https://github.com/testcontainers/testcontainers-go) | Container-based e2e testing (test only) |
