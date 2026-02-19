@@ -1,0 +1,130 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/danielgtaylor/huma/v2/adapters/humago"
+	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+
+	"github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse"
+	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
+
+	"github.com/MyCarrier-DevOps/slippy-api/internal/config"
+	"github.com/MyCarrier-DevOps/slippy-api/internal/domain"
+	"github.com/MyCarrier-DevOps/slippy-api/internal/handler"
+	"github.com/MyCarrier-DevOps/slippy-api/internal/infrastructure"
+	"github.com/MyCarrier-DevOps/slippy-api/internal/middleware"
+)
+
+func main() {
+	if err := run(); err != nil {
+		log.Fatalf("fatal: %v", err)
+	}
+}
+
+// run wires up all components and starts the HTTP server with graceful shutdown.
+func run() error {
+	// --- Configuration ---
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+
+	// --- ClickHouse store ---
+	chCfg, err := clickhouse.ClickhouseLoadConfig()
+	if err != nil {
+		return fmt.Errorf("clickhouse config: %w", err)
+	}
+	store, err := slippy.NewClickHouseStoreFromConfig(chCfg, slippy.ClickHouseStoreOptions{
+		SkipMigrations: true, // read-only API — no schema changes
+	})
+	if err != nil {
+		return fmt.Errorf("clickhouse store: %w", err)
+	}
+	defer store.Close()
+
+	// Adapt the read+write store to our read-only interface.
+	adapter := infrastructure.NewSlipStoreAdapter(store)
+
+	// --- Optional Dragonfly/Redis cache ---
+	var reader domain.SlipReader = adapter
+	if cfg.CacheEnabled() {
+		rdb := redis.NewClient(&redis.Options{
+			Addr:     fmt.Sprintf("%s:%d", cfg.DragonflyHost, cfg.DragonflyPort),
+			Password: cfg.DragonflyPassword,
+		})
+		// Verify connectivity at startup.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := rdb.Ping(ctx).Err(); err != nil {
+			log.Printf("warning: dragonfly ping failed, caching disabled: %v", err)
+		} else {
+			reader = infrastructure.NewCachedSlipReader(adapter, rdb, cfg.CacheTTL)
+		}
+	}
+
+	// --- Huma API ---
+	mux := http.NewServeMux()
+	apiConfig := huma.DefaultConfig("Slippy API", "1.0.0")
+	apiConfig.Info.Description = "Read-only API for CI/CD routing slips"
+
+	// Define the API key security scheme used by protected operations.
+	apiConfig.Components.SecuritySchemes = map[string]*huma.SecurityScheme{
+		"apiKey": {
+			Type:   "http",
+			Scheme: "bearer",
+		},
+	}
+
+	api := humago.New(mux, apiConfig)
+
+	// Register authentication middleware.
+	api.UseMiddleware(middleware.NewAPIKeyAuth(cfg.APIKey))
+
+	// Register routes.
+	handler.RegisterHealthRoutes(api)
+	h := handler.NewSlipHandler(reader)
+	handler.RegisterRoutes(api, h)
+
+	// --- HTTP Server with OTel instrumentation ---
+	otelHandler := otelhttp.NewHandler(mux, "slippy-api")
+	srv := &http.Server{
+		Addr:              fmt.Sprintf(":%d", cfg.Port),
+		Handler:           otelHandler,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	// --- Graceful shutdown ---
+	errCh := make(chan error, 1)
+	go func() {
+		log.Printf("listening on :%d", cfg.Port)
+		errCh <- srv.ListenAndServe()
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	select {
+	case sig := <-quit:
+		log.Printf("received %s, shutting down", sig)
+	case err := <-errCh:
+		return fmt.Errorf("server: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		return fmt.Errorf("shutdown: %w", err)
+	}
+	log.Println("server stopped")
+	return nil
+}

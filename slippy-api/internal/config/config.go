@@ -1,0 +1,88 @@
+package config
+
+import (
+	"fmt"
+	"os"
+	"strconv"
+	"time"
+)
+
+// Config holds all application configuration loaded from environment variables.
+type Config struct {
+	// Port is the HTTP server listen port (default: 8080)
+	Port int
+
+	// APIKey is the bearer token required for authenticated endpoints
+	APIKey string
+
+	// DragonflyHost is the Dragonfly/Redis host address
+	DragonflyHost string
+
+	// DragonflyPort is the Dragonfly/Redis port (default: 6379)
+	DragonflyPort int
+
+	// DragonflyPassword is the Dragonfly/Redis password (optional)
+	DragonflyPassword string
+
+	// CacheTTL is how long cached query results live (default: 10m)
+	CacheTTL time.Duration
+}
+
+// Load reads configuration from environment variables.
+// Required: SLIPPY_API_KEY
+// Optional: PORT, DRAGONFLY_HOST, DRAGONFLY_PORT, DRAGONFLY_PASSWORD, CACHE_TTL
+func Load() (*Config, error) {
+	cfg := &Config{
+		Port:          8080,
+		DragonflyPort: 6379,
+		CacheTTL:      10 * time.Minute,
+	}
+
+	// Required
+	cfg.APIKey = os.Getenv("SLIPPY_API_KEY")
+	if cfg.APIKey == "" {
+		return nil, fmt.Errorf("SLIPPY_API_KEY is required")
+	}
+
+	// Optional: PORT
+	if v := os.Getenv("PORT"); v != "" {
+		port, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("PORT must be a valid integer: %w", err)
+		}
+		cfg.Port = port
+	}
+
+	// Optional: DRAGONFLY_HOST
+	if v := os.Getenv("DRAGONFLY_HOST"); v != "" {
+		cfg.DragonflyHost = v
+	}
+
+	// Optional: DRAGONFLY_PORT
+	if v := os.Getenv("DRAGONFLY_PORT"); v != "" {
+		port, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("DRAGONFLY_PORT must be a valid integer: %w", err)
+		}
+		cfg.DragonflyPort = port
+	}
+
+	// Optional: DRAGONFLY_PASSWORD
+	cfg.DragonflyPassword = os.Getenv("DRAGONFLY_PASSWORD")
+
+	// Optional: CACHE_TTL (Go duration string, e.g. "5m", "15m")
+	if v := os.Getenv("CACHE_TTL"); v != "" {
+		ttl, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("CACHE_TTL must be a valid duration (e.g. 10m): %w", err)
+		}
+		cfg.CacheTTL = ttl
+	}
+
+	return cfg, nil
+}
+
+// CacheEnabled returns true if Dragonfly configuration is provided.
+func (c *Config) CacheEnabled() bool {
+	return c.DragonflyHost != ""
+}
