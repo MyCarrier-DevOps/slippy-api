@@ -1,4 +1,4 @@
-FROM harbor.mycarrier.tech/proxy-cache/golang:1.25.6 AS builder
+FROM harbor.mycarrier.tech/proxy-cache/golang:1.26 AS builder
 WORKDIR /app
 COPY ./go.mod ./go.sum ./
 RUN go mod download
