@@ -31,6 +31,67 @@ func main() {
 	}
 }
 
+// buildHandler creates the fully-wired HTTP handler with auth, routes, and
+// OpenTelemetry instrumentation. This is extracted from run() for testability.
+func buildHandler(cfg *config.Config, reader domain.SlipReader) http.Handler {
+	mux := http.NewServeMux()
+	apiConfig := huma.DefaultConfig("Slippy API", "1.0.0")
+	apiConfig.Info.Description = "Read-only API for CI/CD routing slips"
+
+	// Define the API key security scheme used by protected operations.
+	apiConfig.Components.SecuritySchemes = map[string]*huma.SecurityScheme{
+		"apiKey": {
+			Type:   "http",
+			Scheme: "bearer",
+		},
+	}
+
+	api := humago.New(mux, apiConfig)
+
+	// Register authentication middleware.
+	api.UseMiddleware(middleware.NewAPIKeyAuth(cfg.APIKey))
+
+	// Register routes.
+	handler.RegisterHealthRoutes(api)
+	h := handler.NewSlipHandler(reader)
+	handler.RegisterRoutes(api, h)
+
+	// Wrap with OpenTelemetry instrumentation.
+	return otelhttp.NewHandler(mux, "slippy-api")
+}
+
+// redisDial is the default factory for creating Redis clients.
+// Extracted as a variable so tests can verify the connectCache path without
+// requiring a real Redis instance.
+var redisDial = func(opts *redis.Options) redis.Cmdable {
+	return redis.NewClient(opts)
+}
+
+// connectCache optionally wraps reader with a Dragonfly/Redis caching layer.
+// If caching is not enabled in cfg, or the Redis ping fails, the original reader
+// is returned unchanged. The dial function creates the Redis client.
+func connectCache(
+	cfg *config.Config,
+	reader domain.SlipReader,
+	dial func(*redis.Options) redis.Cmdable,
+) domain.SlipReader {
+	if !cfg.CacheEnabled() {
+		return reader
+	}
+	rdb := dial(&redis.Options{
+		Addr:     fmt.Sprintf("%s:%d", cfg.DragonflyHost, cfg.DragonflyPort),
+		Password: cfg.DragonflyPassword,
+	})
+	// Verify connectivity at startup.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := rdb.Ping(ctx).Err(); err != nil {
+		log.Printf("warning: dragonfly ping failed, caching disabled: %v", err)
+		return reader
+	}
+	return infrastructure.NewCachedSlipReader(reader, rdb, cfg.CacheTTL)
+}
+
 // run wires up all components and starts the HTTP server with graceful shutdown.
 func run() error {
 	// --- Configuration ---
@@ -56,47 +117,10 @@ func run() error {
 	adapter := infrastructure.NewSlipStoreAdapter(store)
 
 	// --- Optional Dragonfly/Redis cache ---
-	var reader domain.SlipReader = adapter
-	if cfg.CacheEnabled() {
-		rdb := redis.NewClient(&redis.Options{
-			Addr:     fmt.Sprintf("%s:%d", cfg.DragonflyHost, cfg.DragonflyPort),
-			Password: cfg.DragonflyPassword,
-		})
-		// Verify connectivity at startup.
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := rdb.Ping(ctx).Err(); err != nil {
-			log.Printf("warning: dragonfly ping failed, caching disabled: %v", err)
-		} else {
-			reader = infrastructure.NewCachedSlipReader(adapter, rdb, cfg.CacheTTL)
-		}
-	}
+	reader := connectCache(cfg, adapter, redisDial)
 
-	// --- Huma API ---
-	mux := http.NewServeMux()
-	apiConfig := huma.DefaultConfig("Slippy API", "1.0.0")
-	apiConfig.Info.Description = "Read-only API for CI/CD routing slips"
-
-	// Define the API key security scheme used by protected operations.
-	apiConfig.Components.SecuritySchemes = map[string]*huma.SecurityScheme{
-		"apiKey": {
-			Type:   "http",
-			Scheme: "bearer",
-		},
-	}
-
-	api := humago.New(mux, apiConfig)
-
-	// Register authentication middleware.
-	api.UseMiddleware(middleware.NewAPIKeyAuth(cfg.APIKey))
-
-	// Register routes.
-	handler.RegisterHealthRoutes(api)
-	h := handler.NewSlipHandler(reader)
-	handler.RegisterRoutes(api, h)
-
-	// --- HTTP Server with OTel instrumentation ---
-	otelHandler := otelhttp.NewHandler(mux, "slippy-api")
+	// --- HTTP Server ---
+	otelHandler := buildHandler(cfg, reader)
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
 		Handler:           otelHandler,
