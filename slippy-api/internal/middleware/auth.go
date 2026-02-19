@@ -7,7 +7,14 @@ import (
 	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// authTracerName is the instrumentation scope for authentication operations.
+const authTracerName = "slippy-api/auth"
 
 // NewAPIKeyAuth returns a huma middleware that validates Bearer tokens against the
 // configured API key using constant-time comparison. Operations that declare a
@@ -20,17 +27,33 @@ func NewAPIKeyAuth(apiKey string) func(ctx huma.Context, next func(huma.Context)
 			return
 		}
 
+		// Start a span for the authentication check.
+		reqCtx := ctx.Context()
+		_, span := otel.Tracer(authTracerName).Start(reqCtx, "auth.validateAPIKey",
+			trace.WithAttributes(
+				attribute.String("auth.scheme", "bearer"),
+				attribute.String("auth.operation", ctx.Operation().OperationID),
+			),
+		)
+		defer span.End()
+
 		token := extractBearerToken(ctx.Header("Authorization"))
 		if token == "" {
+			span.SetAttributes(attribute.String("auth.result", "missing_token"))
+			span.SetStatus(codes.Error, "missing or malformed Authorization header")
 			writeError(ctx, http.StatusUnauthorized, "missing or malformed Authorization header")
 			return
 		}
 
 		if subtle.ConstantTimeCompare([]byte(token), []byte(apiKey)) != 1 {
+			span.SetAttributes(attribute.String("auth.result", "invalid_token"))
+			span.SetStatus(codes.Error, "invalid API key")
 			writeError(ctx, http.StatusForbidden, "invalid API key")
 			return
 		}
 
+		span.SetAttributes(attribute.String("auth.result", "success"))
+		span.SetStatus(codes.Ok, "")
 		next(ctx)
 	}
 }
