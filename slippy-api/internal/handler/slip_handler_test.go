@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -36,7 +37,12 @@ func (m *mockReader) LoadByCommit(ctx context.Context, repo, sha string) (*domai
 func (m *mockReader) FindByCommits(ctx context.Context, repo string, commits []string) (*domain.Slip, string, error) {
 	return m.findByCommitsFn(ctx, repo, commits)
 }
-func (m *mockReader) FindAllByCommits(ctx context.Context, repo string, commits []string) ([]domain.SlipWithCommit, error) {
+
+func (m *mockReader) FindAllByCommits(
+	ctx context.Context,
+	repo string,
+	commits []string,
+) ([]domain.SlipWithCommit, error) {
 	return m.findAllByCommitsFn(ctx, repo, commits)
 }
 
@@ -202,4 +208,164 @@ func TestMapError_GenericError(t *testing.T) {
 	var he huma.StatusError
 	require.ErrorAs(t, err, &he)
 	assert.Equal(t, http.StatusInternalServerError, he.GetStatus())
+}
+
+func TestMapError_InvalidRepository(t *testing.T) {
+	err := mapError(slippy.ErrInvalidRepository)
+	var he huma.StatusError
+	require.ErrorAs(t, err, &he)
+	assert.Equal(t, http.StatusBadRequest, he.GetStatus())
+}
+
+func TestGetSlip_InternalError(t *testing.T) {
+	mock := &mockReader{
+		loadFn: func(_ context.Context, id string) (*domain.Slip, error) {
+			return nil, errors.New("clickhouse timeout")
+		},
+	}
+
+	handler := setupTestAPI(mock)
+	req := httptest.NewRequest(http.MethodGet, "/slips/abc-123", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+func TestGetSlip_InvalidCorrelationID(t *testing.T) {
+	mock := &mockReader{
+		loadFn: func(_ context.Context, id string) (*domain.Slip, error) {
+			return nil, slippy.ErrInvalidCorrelationID
+		},
+	}
+
+	handler := setupTestAPI(mock)
+	req := httptest.NewRequest(http.MethodGet, "/slips/bad-id!", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestGetSlipByCommit_NotFound(t *testing.T) {
+	mock := &mockReader{
+		loadByCommitFn: func(_ context.Context, repo, sha string) (*domain.Slip, error) {
+			return nil, slippy.ErrSlipNotFound
+		},
+	}
+
+	handler := setupTestAPI(mock)
+	req := httptest.NewRequest(http.MethodGet, "/slips/by-commit/org/repo/deadbeef", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestGetSlipByCommit_InvalidRepository(t *testing.T) {
+	mock := &mockReader{
+		loadByCommitFn: func(_ context.Context, repo, sha string) (*domain.Slip, error) {
+			return nil, slippy.ErrInvalidRepository
+		},
+	}
+
+	handler := setupTestAPI(mock)
+	req := httptest.NewRequest(http.MethodGet, "/slips/by-commit/bad/repo/sha", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestGetSlipByCommit_InternalError(t *testing.T) {
+	mock := &mockReader{
+		loadByCommitFn: func(_ context.Context, repo, sha string) (*domain.Slip, error) {
+			return nil, errors.New("network error")
+		},
+	}
+
+	handler := setupTestAPI(mock)
+	req := httptest.NewRequest(http.MethodGet, "/slips/by-commit/org/repo/sha", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+func TestFindByCommits_InternalError(t *testing.T) {
+	mock := &mockReader{
+		findByCommitsFn: func(_ context.Context, repo string, commits []string) (*domain.Slip, string, error) {
+			return nil, "", errors.New("db timeout")
+		},
+	}
+
+	handler := setupTestAPI(mock)
+	body := `{"repository":"org/repo","commits":["c1"]}`
+	req := httptest.NewRequest(http.MethodPost, "/slips/find-by-commits", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+func TestFindAllByCommits_NotFound(t *testing.T) {
+	mock := &mockReader{
+		findAllByCommitsFn: func(_ context.Context, repo string, commits []string) ([]domain.SlipWithCommit, error) {
+			return nil, slippy.ErrSlipNotFound
+		},
+	}
+
+	handler := setupTestAPI(mock)
+	body := `{"repository":"org/repo","commits":["c1"]}`
+	req := httptest.NewRequest(http.MethodPost, "/slips/find-all-by-commits", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestFindAllByCommits_InternalError(t *testing.T) {
+	mock := &mockReader{
+		findAllByCommitsFn: func(_ context.Context, repo string, commits []string) ([]domain.SlipWithCommit, error) {
+			return nil, errors.New("connection lost")
+		},
+	}
+
+	handler := setupTestAPI(mock)
+	body := `{"repository":"org/repo","commits":["c1"]}`
+	req := httptest.NewRequest(http.MethodPost, "/slips/find-all-by-commits", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+func TestFindAllByCommits_EmptyResult(t *testing.T) {
+	mock := &mockReader{
+		findAllByCommitsFn: func(_ context.Context, repo string, commits []string) ([]domain.SlipWithCommit, error) {
+			return []domain.SlipWithCommit{}, nil
+		},
+	}
+
+	handler := setupTestAPI(mock)
+	body := `{"repository":"org/repo","commits":["c1"]}`
+	req := httptest.NewRequest(http.MethodPost, "/slips/find-all-by-commits", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var items []FindAllByCommitsItem
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&items))
+	assert.Empty(t, items)
+}
+
+func TestNewSlipHandler(t *testing.T) {
+	mock := &mockReader{}
+	h := NewSlipHandler(mock)
+	assert.NotNil(t, h)
 }

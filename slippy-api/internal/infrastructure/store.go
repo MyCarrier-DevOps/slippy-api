@@ -31,11 +31,19 @@ func (a *SlipStoreAdapter) LoadByCommit(ctx context.Context, repository, commitS
 	return a.store.LoadByCommit(ctx, repository, commitSHA)
 }
 
-func (a *SlipStoreAdapter) FindByCommits(ctx context.Context, repository string, commits []string) (*domain.Slip, string, error) {
+func (a *SlipStoreAdapter) FindByCommits(
+	ctx context.Context,
+	repository string,
+	commits []string,
+) (*domain.Slip, string, error) {
 	return a.store.FindByCommits(ctx, repository, commits)
 }
 
-func (a *SlipStoreAdapter) FindAllByCommits(ctx context.Context, repository string, commits []string) ([]domain.SlipWithCommit, error) {
+func (a *SlipStoreAdapter) FindAllByCommits(
+	ctx context.Context,
+	repository string,
+	commits []string,
+) ([]domain.SlipWithCommit, error) {
 	return a.store.FindAllByCommits(ctx, repository, commits)
 }
 

@@ -37,8 +37,8 @@ type GetSlipOutput struct {
 // GetSlipByCommitInput captures owner/repo/commitSHA path segments.
 // The repository is reconstructed as "owner/repo" in the handler.
 type GetSlipByCommitInput struct {
-	Owner     string `path:"owner" doc:"Repository owner (e.g. 'org')"`
-	Repo      string `path:"repo" doc:"Repository name (e.g. 'my-service')"`
+	Owner     string `path:"owner"     doc:"Repository owner (e.g. 'org')"`
+	Repo      string `path:"repo"      doc:"Repository name (e.g. 'my-service')"`
 	CommitSHA string `path:"commitSHA" doc:"Git commit SHA"`
 }
 
@@ -139,7 +139,10 @@ func (h *SlipHandler) findByCommits(ctx context.Context, input *FindByCommitsInp
 	return out, nil
 }
 
-func (h *SlipHandler) findAllByCommits(ctx context.Context, input *FindByCommitsInput) (*FindAllByCommitsOutput, error) {
+func (h *SlipHandler) findAllByCommits(
+	ctx context.Context,
+	input *FindByCommitsInput,
+) (*FindAllByCommitsOutput, error) {
 	results, err := h.reader.FindAllByCommits(ctx, input.Body.Repository, input.Body.Commits)
 	if err != nil {
 		return nil, mapError(err)

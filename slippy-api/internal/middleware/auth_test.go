@@ -124,3 +124,80 @@ func TestAuthMiddleware_PublicEndpoint(t *testing.T) {
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&body))
 	assert.Equal(t, "public", body["message"])
 }
+
+func TestAuthMiddleware_EmptyBearerToken(t *testing.T) {
+	handler := setupAuthTestAPI("test-secret-key")
+
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set("Authorization", "Bearer ")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	// Empty token after "Bearer " should be rejected
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+func TestAuthMiddleware_CaseSensitiveBearer(t *testing.T) {
+	handler := setupAuthTestAPI("test-secret-key")
+
+	// "bearer" lowercase — should fail as extractBearerToken checks "Bearer " prefix
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set("Authorization", "bearer test-secret-key")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+func TestAuthMiddleware_ResponseBody(t *testing.T) {
+	handler := setupAuthTestAPI("test-secret-key")
+
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+
+	// Verify error response body is valid JSON with expected fields
+	var errBody map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&errBody))
+	assert.Equal(t, float64(401), errBody["status"])
+	assert.Contains(t, errBody["title"], "missing")
+}
+
+func TestAuthMiddleware_ForbiddenResponseBody(t *testing.T) {
+	handler := setupAuthTestAPI("test-secret-key")
+
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set("Authorization", "Bearer wrong-key")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+
+	var errBody map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&errBody))
+	assert.Equal(t, float64(403), errBody["status"])
+	assert.Contains(t, errBody["title"], "invalid")
+}
+
+func TestExtractBearerToken(t *testing.T) {
+	tests := []struct {
+		name     string
+		header   string
+		expected string
+	}{
+		{"valid", "Bearer my-token", "my-token"},
+		{"empty header", "", ""},
+		{"missing prefix", "my-token", ""},
+		{"basic auth", "Basic abc123", ""},
+		{"bearer lowercase", "bearer my-token", ""},
+		{"only prefix", "Bearer ", ""},
+		{"extra whitespace", "Bearer   my-token  ", "my-token"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, extractBearerToken(tt.header))
+		})
+	}
+}

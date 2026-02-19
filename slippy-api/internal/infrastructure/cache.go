@@ -48,10 +48,18 @@ func (c *CachedSlipReader) LoadByCommit(ctx context.Context, repository, commitS
 	return c.reader.LoadByCommit(ctx, repository, commitSHA)
 }
 
-func (c *CachedSlipReader) FindByCommits(ctx context.Context, repository string, commits []string) (*domain.Slip, string, error) {
+func (c *CachedSlipReader) FindByCommits(
+	ctx context.Context,
+	repository string,
+	commits []string,
+) (*domain.Slip, string, error) {
 	return c.reader.FindByCommits(ctx, repository, commits)
 }
 
-func (c *CachedSlipReader) FindAllByCommits(ctx context.Context, repository string, commits []string) ([]domain.SlipWithCommit, error) {
+func (c *CachedSlipReader) FindAllByCommits(
+	ctx context.Context,
+	repository string,
+	commits []string,
+) ([]domain.SlipWithCommit, error) {
 	return c.reader.FindAllByCommits(ctx, repository, commits)
 }

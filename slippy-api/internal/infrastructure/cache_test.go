@@ -29,44 +29,37 @@ func (m *mockSlipReader) LoadByCommit(ctx context.Context, repo, sha string) (*d
 	return m.loadByCommitFn(ctx, repo, sha)
 }
 
-func (m *mockSlipReader) FindByCommits(ctx context.Context, repo string, commits []string) (*domain.Slip, string, error) {
+func (m *mockSlipReader) FindByCommits(
+	ctx context.Context,
+	repo string,
+	commits []string,
+) (*domain.Slip, string, error) {
 	return m.findByCommitsFn(ctx, repo, commits)
 }
 
-func (m *mockSlipReader) FindAllByCommits(ctx context.Context, repo string, commits []string) ([]domain.SlipWithCommit, error) {
+func (m *mockSlipReader) FindAllByCommits(
+	ctx context.Context,
+	repo string,
+	commits []string,
+) ([]domain.SlipWithCommit, error) {
 	return m.findAllByCommitsFn(ctx, repo, commits)
 }
 
-// --- Mock Redis Cmdable for testing ---
+// --- CachedSlipReader Unit Tests ---
 
-type mockRedisClient struct {
-	store map[string][]byte
+func TestNewCachedSlipReader(t *testing.T) {
+	mock := &mockSlipReader{}
+	// Verify constructor doesn't panic and returns non-nil
+	// We pass nil for redis.Cmdable since we're just testing construction
+	cached := NewCachedSlipReader(mock, nil, 10*time.Minute)
+	assert.NotNil(t, cached)
 }
 
-func newMockRedisClient() *mockRedisClient {
-	return &mockRedisClient{store: make(map[string][]byte)}
+func TestNewCachedSlipReader_ZeroTTL(t *testing.T) {
+	mock := &mockSlipReader{}
+	cached := NewCachedSlipReader(mock, nil, 0)
+	assert.NotNil(t, cached)
 }
-
-// mockStringCmd implements redis.Cmdable's Get return value.
-type mockStringCmd struct {
-	val []byte
-	err error
-}
-
-func (c *mockStringCmd) Bytes() ([]byte, error) { return c.val, c.err }
-func (c *mockStringCmd) String() string          { return string(c.val) }
-func (c *mockStringCmd) Result() (string, error) { return string(c.val), c.err }
-
-// mockStatusCmd implements redis.Cmdable's Set return value.
-type mockStatusCmd struct{}
-
-func (c *mockStatusCmd) Err() error      { return nil }
-func (c *mockStatusCmd) String() string  { return "OK" }
-func (c *mockStatusCmd) Result() (string, error) { return "OK", nil }
-
-// Note: We can't easily mock redis.Cmdable because it has ~200 methods.
-// Instead, we test cache behavior through integration-style tests with miniredis.
-// For unit tests, we verify the decorator delegates correctly using a simple approach.
 
 func TestCachedSlipReader_LoadDelegates(t *testing.T) {
 	expectedSlip := &domain.Slip{CorrelationID: "abc-123"}
@@ -77,10 +70,24 @@ func TestCachedSlipReader_LoadDelegates(t *testing.T) {
 		},
 	}
 
-	// Load delegates directly — test without cache layer
-	slip, err := mock.Load(context.Background(), "abc-123")
+	cached := NewCachedSlipReader(mock, nil, 10*time.Minute)
+	slip, err := cached.Load(context.Background(), "abc-123")
 	require.NoError(t, err)
 	assert.Equal(t, expectedSlip, slip)
+}
+
+func TestCachedSlipReader_LoadDelegatesError(t *testing.T) {
+	mock := &mockSlipReader{
+		loadFn: func(_ context.Context, id string) (*domain.Slip, error) {
+			return nil, errors.New("store unavailable")
+		},
+	}
+
+	cached := NewCachedSlipReader(mock, nil, 10*time.Minute)
+	slip, err := cached.Load(context.Background(), "abc-123")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "store unavailable")
+	assert.Nil(t, slip)
 }
 
 func TestCachedSlipReader_LoadByCommitDelegates(t *testing.T) {
@@ -93,12 +100,26 @@ func TestCachedSlipReader_LoadByCommitDelegates(t *testing.T) {
 		},
 	}
 
-	slip, err := mock.LoadByCommit(context.Background(), "org/repo", "abc123")
+	cached := NewCachedSlipReader(mock, nil, 10*time.Minute)
+	slip, err := cached.LoadByCommit(context.Background(), "org/repo", "abc123")
 	require.NoError(t, err)
 	assert.Equal(t, expectedSlip, slip)
 }
 
-func TestCachedSlipReader_FindByCommitsCallsReader(t *testing.T) {
+func TestCachedSlipReader_LoadByCommitDelegatesError(t *testing.T) {
+	mock := &mockSlipReader{
+		loadByCommitFn: func(_ context.Context, repo, sha string) (*domain.Slip, error) {
+			return nil, errors.New("timeout")
+		},
+	}
+
+	cached := NewCachedSlipReader(mock, nil, 10*time.Minute)
+	slip, err := cached.LoadByCommit(context.Background(), "org/repo", "sha")
+	assert.Error(t, err)
+	assert.Nil(t, slip)
+}
+
+func TestCachedSlipReader_FindByCommitsDelegates(t *testing.T) {
 	callCount := 0
 	expectedSlip := &domain.Slip{CorrelationID: "xyz-789"}
 	mock := &mockSlipReader{
@@ -108,15 +129,29 @@ func TestCachedSlipReader_FindByCommitsCallsReader(t *testing.T) {
 		},
 	}
 
-	// Without cache, verify the reader is called
-	slip, commit, err := mock.FindByCommits(context.Background(), "org/repo", []string{"commit-1", "commit-2"})
+	cached := NewCachedSlipReader(mock, nil, 10*time.Minute)
+	slip, commit, err := cached.FindByCommits(context.Background(), "org/repo", []string{"commit-1", "commit-2"})
 	require.NoError(t, err)
 	assert.Equal(t, expectedSlip, slip)
 	assert.Equal(t, "commit-1", commit)
 	assert.Equal(t, 1, callCount)
 }
 
-func TestCachedSlipReader_FindAllByCommitsCallsReader(t *testing.T) {
+func TestCachedSlipReader_FindByCommitsPropagatesError(t *testing.T) {
+	mock := &mockSlipReader{
+		findByCommitsFn: func(_ context.Context, repo string, commits []string) (*domain.Slip, string, error) {
+			return nil, "", errors.New("store error")
+		},
+	}
+
+	cached := NewCachedSlipReader(mock, nil, 10*time.Minute)
+	slip, commit, err := cached.FindByCommits(context.Background(), "org/repo", []string{"c1"})
+	assert.Error(t, err)
+	assert.Nil(t, slip)
+	assert.Empty(t, commit)
+}
+
+func TestCachedSlipReader_FindAllByCommitsDelegates(t *testing.T) {
 	callCount := 0
 	expectedResults := []domain.SlipWithCommit{
 		{Slip: &domain.Slip{CorrelationID: "a"}, MatchedCommit: "c1"},
@@ -129,34 +164,57 @@ func TestCachedSlipReader_FindAllByCommitsCallsReader(t *testing.T) {
 		},
 	}
 
-	results, err := mock.FindAllByCommits(context.Background(), "org/repo", []string{"c1", "c2"})
+	cached := NewCachedSlipReader(mock, nil, 10*time.Minute)
+	results, err := cached.FindAllByCommits(context.Background(), "org/repo", []string{"c1", "c2"})
 	require.NoError(t, err)
 	assert.Len(t, results, 2)
 	assert.Equal(t, 1, callCount)
 }
 
-func TestCachedSlipReader_FindByCommitsPropagatesError(t *testing.T) {
+func TestCachedSlipReader_FindAllByCommitsPropagatesError(t *testing.T) {
 	mock := &mockSlipReader{
-		findByCommitsFn: func(_ context.Context, repo string, commits []string) (*domain.Slip, string, error) {
-			return nil, "", errors.New("store error")
+		findAllByCommitsFn: func(_ context.Context, repo string, commits []string) ([]domain.SlipWithCommit, error) {
+			return nil, errors.New("connection reset")
 		},
 	}
 
-	slip, commit, err := mock.FindByCommits(context.Background(), "org/repo", []string{"c1"})
+	cached := NewCachedSlipReader(mock, nil, 10*time.Minute)
+	results, err := cached.FindAllByCommits(context.Background(), "org/repo", []string{"c1"})
 	assert.Error(t, err)
-	assert.Nil(t, slip)
-	assert.Empty(t, commit)
+	assert.Nil(t, results)
 }
+
+func TestCachedSlipReader_FindAllByCommits_EmptyResult(t *testing.T) {
+	mock := &mockSlipReader{
+		findAllByCommitsFn: func(_ context.Context, repo string, commits []string) ([]domain.SlipWithCommit, error) {
+			return []domain.SlipWithCommit{}, nil
+		},
+	}
+
+	cached := NewCachedSlipReader(mock, nil, 10*time.Minute)
+	results, err := cached.FindAllByCommits(context.Background(), "org/repo", []string{"c1"})
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
+// --- CacheKey Unit Tests ---
 
 func TestCacheKey(t *testing.T) {
 	key := cacheKey("find", "org/repo", []string{"abc", "def"})
 	assert.Equal(t, "slippy:find:org/repo:abc,def", key)
 }
 
-func TestNewCachedSlipReader(t *testing.T) {
-	mock := &mockSlipReader{}
-	// Verify constructor doesn't panic and returns non-nil
-	// We pass nil for redis.Cmdable since we're just testing construction
-	cached := NewCachedSlipReader(mock, nil, 10*time.Minute)
-	assert.NotNil(t, cached)
+func TestCacheKey_SingleCommit(t *testing.T) {
+	key := cacheKey("load", "org/repo", []string{"abc123"})
+	assert.Equal(t, "slippy:load:org/repo:abc123", key)
+}
+
+func TestCacheKey_EmptyCommits(t *testing.T) {
+	key := cacheKey("find", "org/repo", []string{})
+	assert.Equal(t, "slippy:find:org/repo:", key)
+}
+
+func TestCacheKey_SpecialCharacters(t *testing.T) {
+	key := cacheKey("find", "org/my-repo", []string{"abc/def", "ghi"})
+	assert.Equal(t, "slippy:find:org/my-repo:abc/def,ghi", key)
 }
