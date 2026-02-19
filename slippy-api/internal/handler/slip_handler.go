@@ -6,11 +6,18 @@ import (
 	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
 
 	"github.com/MyCarrier-DevOps/slippy-api/internal/domain"
 )
+
+// handlerTracerName is the instrumentation scope for handler operations.
+const handlerTracerName = "slippy-api/handler"
 
 // SlipHandler holds dependencies for slip route handlers.
 type SlipHandler struct {
@@ -112,27 +119,57 @@ func RegisterRoutes(api huma.API, h *SlipHandler) {
 // --- Handlers ------------------------------------------------------------
 
 func (h *SlipHandler) getSlip(ctx context.Context, input *GetSlipInput) (*GetSlipOutput, error) {
+	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.getSlip",
+		trace.WithAttributes(
+			attribute.String("slip.correlation_id", input.CorrelationID),
+		),
+	)
+	defer span.End()
+
 	slip, err := h.reader.Load(ctx, input.CorrelationID)
 	if err != nil {
+		recordHandlerError(span, err)
 		return nil, mapError(err)
 	}
+	span.SetStatus(codes.Ok, "")
 	return &GetSlipOutput{Body: slip}, nil
 }
 
 func (h *SlipHandler) getSlipByCommit(ctx context.Context, input *GetSlipByCommitInput) (*GetSlipOutput, error) {
 	repository := input.Owner + "/" + input.Repo
+	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.getSlipByCommit",
+		trace.WithAttributes(
+			attribute.String("slip.repository", repository),
+			attribute.String("slip.commit_sha", input.CommitSHA),
+		),
+	)
+	defer span.End()
+
 	slip, err := h.reader.LoadByCommit(ctx, repository, input.CommitSHA)
 	if err != nil {
+		recordHandlerError(span, err)
 		return nil, mapError(err)
 	}
+	span.SetStatus(codes.Ok, "")
 	return &GetSlipOutput{Body: slip}, nil
 }
 
 func (h *SlipHandler) findByCommits(ctx context.Context, input *FindByCommitsInput) (*FindByCommitsOutput, error) {
+	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.findByCommits",
+		trace.WithAttributes(
+			attribute.String("slip.repository", input.Body.Repository),
+			attribute.Int("slip.commits_count", len(input.Body.Commits)),
+		),
+	)
+	defer span.End()
+
 	slip, commit, err := h.reader.FindByCommits(ctx, input.Body.Repository, input.Body.Commits)
 	if err != nil {
+		recordHandlerError(span, err)
 		return nil, mapError(err)
 	}
+	span.SetAttributes(attribute.String("slip.matched_commit", commit))
+	span.SetStatus(codes.Ok, "")
 	out := &FindByCommitsOutput{}
 	out.Body.Slip = slip
 	out.Body.MatchedCommit = commit
@@ -143,10 +180,21 @@ func (h *SlipHandler) findAllByCommits(
 	ctx context.Context,
 	input *FindByCommitsInput,
 ) (*FindAllByCommitsOutput, error) {
+	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.findAllByCommits",
+		trace.WithAttributes(
+			attribute.String("slip.repository", input.Body.Repository),
+			attribute.Int("slip.commits_count", len(input.Body.Commits)),
+		),
+	)
+	defer span.End()
+
 	results, err := h.reader.FindAllByCommits(ctx, input.Body.Repository, input.Body.Commits)
 	if err != nil {
+		recordHandlerError(span, err)
 		return nil, mapError(err)
 	}
+	span.SetAttributes(attribute.Int("slip.results_count", len(results)))
+	span.SetStatus(codes.Ok, "")
 	items := make([]FindAllByCommitsItem, len(results))
 	for i, r := range results {
 		items[i] = FindAllByCommitsItem{
@@ -158,6 +206,12 @@ func (h *SlipHandler) findAllByCommits(
 }
 
 // --- Error Mapping -------------------------------------------------------
+
+// recordHandlerError records an error on the handler span.
+func recordHandlerError(span trace.Span, err error) {
+	span.RecordError(err)
+	span.SetStatus(codes.Error, err.Error())
+}
 
 // mapError converts domain/store errors to huma status errors.
 func mapError(err error) error {
