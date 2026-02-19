@@ -23,6 +23,7 @@ import (
 	"github.com/MyCarrier-DevOps/slippy-api/internal/handler"
 	"github.com/MyCarrier-DevOps/slippy-api/internal/infrastructure"
 	"github.com/MyCarrier-DevOps/slippy-api/internal/middleware"
+	"github.com/MyCarrier-DevOps/slippy-api/internal/telemetry"
 )
 
 func main() {
@@ -94,6 +95,19 @@ func connectCache(
 
 // run wires up all components and starts the HTTP server with graceful shutdown.
 func run() error {
+	// --- OpenTelemetry ---
+	otelShutdown, err := telemetry.Init(context.Background())
+	if err != nil {
+		return fmt.Errorf("otel: %w", err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := otelShutdown(ctx); err != nil {
+			log.Printf("warning: otel shutdown: %v", err)
+		}
+	}()
+
 	// --- Configuration ---
 	cfg, err := config.Load()
 	if err != nil {
