@@ -137,7 +137,7 @@ func run() error {
 		return fmt.Errorf("clickhouse store: %w", err)
 	}
 	defer store.Close()
-	log.Printf("clickhouse store connected (db=%s)", chCfg.Database)
+	log.Printf("clickhouse store connected")
 
 	// Adapt the read+write store to our read-only interface.
 	adapter := infrastructure.NewSlipStoreAdapter(store)
