@@ -246,6 +246,7 @@ func clearRunEnv(t *testing.T) {
 		"CACHE_TTL",
 		"CLICKHOUSE_HOSTNAME", "CLICKHOUSE_PORT", "CLICKHOUSE_USERNAME",
 		"CLICKHOUSE_PASSWORD", "CLICKHOUSE_DATABASE", "CLICKHOUSE_SKIP_VERIFY",
+		"SLIPPY_PIPELINE_CONFIG",
 	} {
 		t.Setenv(key, "")
 		os.Unsetenv(key)
@@ -260,11 +261,24 @@ func TestRun_MissingAPIKey(t *testing.T) {
 	assert.Contains(t, err.Error(), "config:")
 }
 
-func TestRun_MissingClickhouseConfig(t *testing.T) {
+func TestRun_MissingPipelineConfig(t *testing.T) {
 	clearRunEnv(t)
 	t.Setenv("SLIPPY_API_KEY", "test-key")
 
-	// config.Load() succeeds, but ClickhouseLoadConfig() will fail
+	// config.Load() succeeds, but LoadPipelineConfig() will fail
+	// because SLIPPY_PIPELINE_CONFIG is not set
+	err := run()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pipeline config:")
+}
+
+func TestRun_MissingClickhouseConfig(t *testing.T) {
+	clearRunEnv(t)
+	t.Setenv("SLIPPY_API_KEY", "test-key")
+	// Provide a valid inline pipeline config so we get past the pipeline step
+	t.Setenv("SLIPPY_PIPELINE_CONFIG", `{"version":"1.0","name":"test","steps":[{"name":"build","description":"build"}]}`)
+
+	// config.Load() and pipeline config succeed, but ClickhouseLoadConfig() will fail
 	// because CLICKHOUSE_HOSTNAME is required
 	err := run()
 	require.Error(t, err)

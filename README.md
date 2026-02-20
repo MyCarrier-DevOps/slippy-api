@@ -115,6 +115,7 @@ All configuration is via environment variables. No config files, no Vault.
 | Variable | Description | Example |
 |---|---|---|
 | `SLIPPY_API_KEY` | Bearer token for API authentication | `my-secret-key` |
+| `SLIPPY_PIPELINE_CONFIG` | Pipeline configuration (file path or inline JSON) | `/config/pipeline.json` |
 | `CLICKHOUSE_HOSTNAME` | ClickHouse server hostname | `clickhouse.example.com` |
 | `CLICKHOUSE_USERNAME` | ClickHouse username | `slippy` |
 | `CLICKHOUSE_PASSWORD` | ClickHouse password | `***` |
