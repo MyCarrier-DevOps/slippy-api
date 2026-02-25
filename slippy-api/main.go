@@ -34,7 +34,8 @@ func main() {
 
 // buildHandler creates the fully-wired HTTP handler with auth, routes, and
 // OpenTelemetry instrumentation. This is extracted from run() for testability.
-func buildHandler(cfg *config.Config, reader domain.SlipReader) http.Handler {
+// The imageTagReader is optional — if nil, the image-tags endpoint is not registered.
+func buildHandler(cfg *config.Config, reader domain.SlipReader, imageTagReader domain.ImageTagReader) http.Handler {
 	mux := http.NewServeMux()
 	apiConfig := huma.DefaultConfig("Slippy API", "1.0.0")
 	apiConfig.Info.Description = "Read-only API for CI/CD routing slips"
@@ -56,6 +57,12 @@ func buildHandler(cfg *config.Config, reader domain.SlipReader) http.Handler {
 	handler.RegisterHealthRoutes(api)
 	h := handler.NewSlipHandler(reader)
 	handler.RegisterRoutes(api, h)
+
+	// Register image tag routes when a reader is available.
+	if imageTagReader != nil {
+		ith := handler.NewImageTagHandler(imageTagReader)
+		handler.RegisterImageTagRoutes(api, ith)
+	}
 
 	// Wrap with OpenTelemetry instrumentation.
 	return otelhttp.NewHandler(mux, "slippy-api")
@@ -145,8 +152,13 @@ func run() error {
 	// --- Optional Dragonfly/Redis cache ---
 	reader := connectCache(cfg, adapter, redisDial)
 
+	// --- BuildInfo reader for image tag resolution ---
+	// Uses the same ClickHouse session as the slip store to query ci.buildinfo
+	// and ci.repoproperties without opening a second connection.
+	imageTagReader := infrastructure.NewBuildInfoReader(store.Session(), reader)
+
 	// --- HTTP Server ---
-	otelHandler := buildHandler(cfg, reader)
+	otelHandler := buildHandler(cfg, reader, imageTagReader)
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
 		Handler:           otelHandler,

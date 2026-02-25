@@ -65,7 +65,7 @@ func TestBuildHandler_HealthEndpoint(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader)
+	h := buildHandler(cfg, reader, nil)
 	require.NotNil(t, h)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -83,7 +83,7 @@ func TestBuildHandler_AuthRequired(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader)
+	h := buildHandler(cfg, reader, nil)
 
 	// Request without auth header should be rejected
 	req := httptest.NewRequest(http.MethodGet, "/slips/test-corr-001", nil)
@@ -96,7 +96,7 @@ func TestBuildHandler_AuthSuccess(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader)
+	h := buildHandler(cfg, reader, nil)
 
 	// Request with valid auth header should succeed
 	req := httptest.NewRequest(http.MethodGet, "/slips/test-corr-001", nil)
@@ -114,7 +114,7 @@ func TestBuildHandler_OpenAPISpec(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader)
+	h := buildHandler(cfg, reader, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
 	w := httptest.NewRecorder()
