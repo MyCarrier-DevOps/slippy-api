@@ -3,8 +3,8 @@ module github.com/MyCarrier-DevOps/slippy-api
 go 1.26
 
 require (
-	github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse v1.3.62
-	github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.62
+	github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse v1.3.63
+	github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.63
 	github.com/danielgtaylor/huma/v2 v2.36.0
 	github.com/redis/go-redis/v9 v9.7.3
 	github.com/stretchr/testify v1.11.1
@@ -17,6 +17,7 @@ require (
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.19.0
 	go.opentelemetry.io/otel/sdk v1.40.0
 	go.opentelemetry.io/otel/sdk/metric v1.40.0
+	go.opentelemetry.io/otel/trace v1.40.0
 )
 
 require (
@@ -25,9 +26,9 @@ require (
 	github.com/ClickHouse/ch-go v0.70.0 // indirect
 	github.com/ClickHouse/clickhouse-go/v2 v2.42.0 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
-	github.com/MyCarrier-DevOps/goLibMyCarrier/clickhousemigrator v1.3.57 // indirect
-	github.com/MyCarrier-DevOps/goLibMyCarrier/github v1.3.57 // indirect
-	github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.62 // indirect
+	github.com/MyCarrier-DevOps/goLibMyCarrier/clickhousemigrator v1.3.63 // indirect
+	github.com/MyCarrier-DevOps/goLibMyCarrier/github v1.3.63 // indirect
+	github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.63 // indirect
 	github.com/ProtonMail/go-crypto v1.3.0 // indirect
 	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/bradleyfalzon/ghinstallation/v2 v2.17.0 // indirect
@@ -55,7 +56,7 @@ require (
 	github.com/go-faster/errors v0.7.1 // indirect
 	github.com/go-git/gcfg v1.5.1-0.20230307220236-3a3c6141e376 // indirect
 	github.com/go-git/go-billy/v5 v5.7.0 // indirect
-	github.com/go-git/go-git/v5 v5.16.4 // indirect
+	github.com/go-git/go-git/v5 v5.16.5 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
@@ -64,7 +65,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/google/go-github/v75 v75.0.0 // indirect
-	github.com/google/go-github/v79 v79.0.0 // indirect
+	github.com/google/go-github/v82 v82.0.0 // indirect
 	github.com/google/go-querystring v1.2.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.7 // indirect
@@ -115,7 +116,6 @@ require (
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.40.0 // indirect
 	go.opentelemetry.io/otel/metric v1.40.0 // indirect
-	go.opentelemetry.io/otel/trace v1.40.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.9.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.1 // indirect
