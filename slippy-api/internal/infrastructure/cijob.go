@@ -3,6 +3,7 @@ package infrastructure
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +18,12 @@ import (
 )
 
 const cijobTracerName = "slippy-api/cijob"
+
+// rowHashExpr is the ClickHouse expression used as a tiebreaker for cursor
+// pagination when multiple rows share the same timestamp.
+const rowHashExpr = "cityHash64(Level, Service, Component, Cluster, Cloud, " +
+	"Environment, Namespace, Message, CiJobInstance, CiJobType, " +
+	"BuildRepository, BuildImage, BuildBranch)"
 
 // CIJobLogStore queries CI job logs from the observability.ciJob ClickHouse table.
 type CIJobLogStore struct {
@@ -82,18 +89,22 @@ func (s *CIJobLogStore) QueryLogs(
 	args := []any{ch.Named("correlationId", q.CorrelationID)}
 
 	if q.Cursor != "" {
-		cursorTime, parseErr := time.Parse(time.RFC3339Nano, q.Cursor)
+		cursorTime, cursorHash, parseErr := parseCursor(q.Cursor)
 		if parseErr != nil {
 			span.RecordError(parseErr)
 			span.SetStatus(codes.Error, "invalid cursor")
 			return nil, fmt.Errorf("%w: %w", domain.ErrInvalidCursor, parseErr)
 		}
 		if q.Sort == domain.SortAsc {
-			conditions = append(conditions, "Timestamp > {cursor:DateTime64(9, 'UTC')}")
+			conditions = append(conditions,
+				fmt.Sprintf("(Timestamp > {cursor:DateTime64(9, 'UTC')} OR "+
+					"(Timestamp = {cursor:DateTime64(9, 'UTC')} AND %s > {cursorHash:UInt64}))", rowHashExpr))
 		} else {
-			conditions = append(conditions, "Timestamp < {cursor:DateTime64(9, 'UTC')}")
+			conditions = append(conditions,
+				fmt.Sprintf("(Timestamp < {cursor:DateTime64(9, 'UTC')} OR "+
+					"(Timestamp = {cursor:DateTime64(9, 'UTC')} AND %s < {cursorHash:UInt64}))", rowHashExpr))
 		}
-		args = append(args, ch.Named("cursor", cursorTime))
+		args = append(args, ch.Named("cursor", cursorTime), ch.Named("cursorHash", cursorHash))
 	}
 
 	for _, f := range buildColumnFilters(q) {
@@ -111,12 +122,15 @@ func (s *CIJobLogStore) QueryLogs(
 	query := fmt.Sprintf(
 		`SELECT Timestamp, Level, Service, Component, Cluster, Cloud, Environment,
 		        Namespace, Message, CiJobInstance, CiJobType,
-		        BuildRepository, BuildImage, BuildBranch
+		        BuildRepository, BuildImage, BuildBranch,
+		        %s AS row_hash
 		FROM observability.ciJob
 		WHERE %s
-		ORDER BY Timestamp %s
+		ORDER BY Timestamp %s, row_hash %s
 		LIMIT {fetchLimit:UInt32}`,
+		rowHashExpr,
 		strings.Join(conditions, " AND "),
+		sortDir,
 		sortDir,
 	)
 	args = append(args, ch.Named("fetchLimit", uint32(fetchLimit)))
@@ -141,6 +155,7 @@ func (s *CIJobLogStore) QueryLogs(
 			&entry.Cluster, &entry.Cloud, &entry.Environment, &entry.Namespace,
 			&entry.Message, &entry.CIJobInstance, &entry.CIJobType,
 			&entry.BuildRepository, &entry.BuildImage, &entry.BuildBranch,
+			&entry.RowHash,
 		); scanErr != nil {
 			return nil, fmt.Errorf("failed to scan ci job log row: %w", scanErr)
 		}
@@ -155,7 +170,8 @@ func (s *CIJobLogStore) QueryLogs(
 
 	if len(logs) > q.Limit {
 		logs = logs[:q.Limit]
-		result.NextCursor = logs[len(logs)-1].Timestamp.Format(time.RFC3339Nano)
+		last := logs[len(logs)-1]
+		result.NextCursor = encodeCursor(last.Timestamp, last.RowHash)
 	}
 
 	result.Logs = logs
@@ -164,4 +180,26 @@ func (s *CIJobLogStore) QueryLogs(
 	span.SetAttributes(attribute.Int("log.result_count", result.Count))
 	span.SetStatus(codes.Ok, "")
 	return result, nil
+}
+
+// encodeCursor produces a composite cursor string "RFC3339Nano|hash".
+func encodeCursor(ts time.Time, hash uint64) string {
+	return ts.Format(time.RFC3339Nano) + "|" + strconv.FormatUint(hash, 10)
+}
+
+// parseCursor splits a "RFC3339Nano|hash" cursor into its components.
+func parseCursor(cursor string) (time.Time, uint64, error) {
+	parts := strings.SplitN(cursor, "|", 2)
+	if len(parts) != 2 {
+		return time.Time{}, 0, fmt.Errorf("cursor must be in 'timestamp|hash' format")
+	}
+	ts, err := time.Parse(time.RFC3339Nano, parts[0])
+	if err != nil {
+		return time.Time{}, 0, fmt.Errorf("invalid cursor timestamp: %w", err)
+	}
+	hash, err := strconv.ParseUint(parts[1], 10, 64)
+	if err != nil {
+		return time.Time{}, 0, fmt.Errorf("invalid cursor hash: %w", err)
+	}
+	return ts, hash, nil
 }

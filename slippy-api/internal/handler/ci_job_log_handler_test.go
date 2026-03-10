@@ -87,7 +87,7 @@ func TestGetLogs_Success(t *testing.T) {
 
 func TestGetLogs_WithNextPage(t *testing.T) {
 	ts := time.Date(2026, 3, 10, 12, 0, 0, 0, time.UTC)
-	cursor := ts.Format(time.RFC3339Nano)
+	cursor := ts.Format(time.RFC3339Nano) + "|12345"
 
 	mock := &mockCIJobLogReader{
 		queryLogsFn: func(_ context.Context, _ *domain.CIJobLogQuery) (*domain.CIJobLogResult, error) {

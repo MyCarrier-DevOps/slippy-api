@@ -33,13 +33,14 @@ type CIJobLog struct {
 	BuildRepository string    `json:"build_repository"`
 	BuildImage      string    `json:"build_image"`
 	BuildBranch     string    `json:"build_branch"`
+	RowHash         uint64    `json:"-"`
 }
 
 // CIJobLogQuery defines parameters for querying CI job logs.
 type CIJobLogQuery struct {
 	CorrelationID string
 	Limit         int
-	Cursor        string // RFC3339Nano timestamp from previous page
+	Cursor        string // "timestamp|hash" from previous page
 	Sort          SortOrder
 
 	// Column filters (exact match, applied when non-empty)

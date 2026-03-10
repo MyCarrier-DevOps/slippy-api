@@ -66,6 +66,7 @@ func TestQueryLogs_BasicSuccess(t *testing.T) {
 						"repo1",
 						"img1",
 						"main",
+						uint64(111),
 					},
 					{
 						ts2,
@@ -82,6 +83,7 @@ func TestQueryLogs_BasicSuccess(t *testing.T) {
 						"repo2",
 						"img2",
 						"feature",
+						uint64(222),
 					},
 				}),
 			}, nil
@@ -106,17 +108,18 @@ func TestQueryLogs_BasicSuccess(t *testing.T) {
 }
 
 func TestQueryLogs_WithCursorDesc(t *testing.T) {
-	cursorStr := "2026-03-10T12:00:00Z"
+	cursorStr := "2026-03-10T12:00:00Z|999"
 	ts := time.Date(2026, 3, 10, 11, 0, 0, 0, time.UTC)
 
 	session := &clickhousetest.MockSession{
 		QueryWithArgsFunc: func(_ context.Context, query string, _ ...any) (ch.Rows, error) {
 			assert.Contains(t, query, "Timestamp < {cursor:DateTime64(9, 'UTC')}")
+			assert.Contains(t, query, "{cursorHash:UInt64}")
 			assert.Contains(t, query, "ORDER BY Timestamp DESC")
 			return &clickhousetest.MockRows{
 				NextData: []bool{true},
 				ScanFunc: scannerFor([][]any{
-					{ts, "WARN", "svc", "comp", "cl", "az", "stg", "ns", "msg", "inst", "job", "repo", "img", "dev"},
+					{ts, "WARN", "svc", "comp", "cl", "az", "stg", "ns", "msg", "inst", "job", "repo", "img", "dev", uint64(100)},
 				}),
 			}, nil
 		},
@@ -136,17 +139,18 @@ func TestQueryLogs_WithCursorDesc(t *testing.T) {
 }
 
 func TestQueryLogs_WithCursorAsc(t *testing.T) {
-	cursorStr := "2026-03-10T10:00:00Z"
+	cursorStr := "2026-03-10T10:00:00Z|500"
 	ts := time.Date(2026, 3, 10, 11, 0, 0, 0, time.UTC)
 
 	session := &clickhousetest.MockSession{
 		QueryWithArgsFunc: func(_ context.Context, query string, _ ...any) (ch.Rows, error) {
 			assert.Contains(t, query, "Timestamp > {cursor:DateTime64(9, 'UTC')}")
+			assert.Contains(t, query, "{cursorHash:UInt64}")
 			assert.Contains(t, query, "ORDER BY Timestamp ASC")
 			return &clickhousetest.MockRows{
 				NextData: []bool{true},
 				ScanFunc: scannerFor([][]any{
-					{ts, "INFO", "svc", "comp", "cl", "az", "stg", "ns", "msg", "inst", "job", "repo", "img", "dev"},
+					{ts, "INFO", "svc", "comp", "cl", "az", "stg", "ns", "msg", "inst", "job", "repo", "img", "dev", uint64(100)},
 				}),
 			}, nil
 		},
@@ -206,6 +210,7 @@ func TestQueryLogs_WithFilters(t *testing.T) {
 						"repo",
 						"img",
 						"main",
+						uint64(300),
 					},
 				}),
 			}, nil
@@ -245,9 +250,9 @@ func TestQueryLogs_NextPageDetected(t *testing.T) {
 			return &clickhousetest.MockRows{
 				NextData: []bool{true, true, true},
 				ScanFunc: scannerFor([][]any{
-					{ts1, "INFO", "s", "c", "cl", "az", "p", "n", "m1", "i", "j", "r", "im", "b"},
-					{ts2, "INFO", "s", "c", "cl", "az", "p", "n", "m2", "i", "j", "r", "im", "b"},
-					{ts3, "INFO", "s", "c", "cl", "az", "p", "n", "m3", "i", "j", "r", "im", "b"},
+					{ts1, "INFO", "s", "c", "cl", "az", "p", "n", "m1", "i", "j", "r", "im", "b", uint64(10)},
+					{ts2, "INFO", "s", "c", "cl", "az", "p", "n", "m2", "i", "j", "r", "im", "b", uint64(20)},
+					{ts3, "INFO", "s", "c", "cl", "az", "p", "n", "m3", "i", "j", "r", "im", "b", uint64(30)},
 				}),
 			}, nil
 		},
@@ -263,7 +268,7 @@ func TestQueryLogs_NextPageDetected(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, result.Count)
 	require.Len(t, result.Logs, 2)
-	assert.Equal(t, ts2.Format(time.RFC3339Nano), result.NextCursor)
+	assert.Equal(t, encodeCursor(ts2, 20), result.NextCursor)
 	// The third (extra) row should be trimmed
 	assert.Equal(t, "m1", result.Logs[0].Message)
 	assert.Equal(t, "m2", result.Logs[1].Message)
@@ -359,6 +364,7 @@ func TestQueryLogs_AllFiltersApplied(t *testing.T) {
 						"repo",
 						"img",
 						"main",
+						uint64(400),
 					},
 				}),
 			}, nil
@@ -401,4 +407,65 @@ func TestBuildColumnFilters_OnlyNonEmpty(t *testing.T) {
 	assert.Equal(t, "ERROR", filters[0].value)
 	assert.Equal(t, "Cloud", filters[1].column)
 	assert.Equal(t, "aws", filters[1].value)
+}
+
+func TestQueryLogs_TimestampTieBreaker(t *testing.T) {
+	// All three rows share the same timestamp — the row hash tiebreaker ensures
+	// no rows are lost during cursor pagination.
+	ts := time.Date(2026, 3, 10, 12, 0, 0, 0, time.UTC)
+
+	session := &clickhousetest.MockSession{
+		QueryWithArgsFunc: func(_ context.Context, _ string, _ ...any) (ch.Rows, error) {
+			return &clickhousetest.MockRows{
+				NextData: []bool{true, true, true},
+				ScanFunc: scannerFor([][]any{
+					{ts, "INFO", "s", "c", "cl", "az", "p", "n", "m1", "i", "j", "r", "im", "b", uint64(300)},
+					{ts, "INFO", "s", "c", "cl", "az", "p", "n", "m2", "i", "j", "r", "im", "b", uint64(200)},
+					{ts, "INFO", "s", "c", "cl", "az", "p", "n", "m3", "i", "j", "r", "im", "b", uint64(100)},
+				}),
+			}, nil
+		},
+	}
+
+	store := NewCIJobLogStore(session)
+	result, err := store.QueryLogs(context.Background(), &domain.CIJobLogQuery{
+		CorrelationID: "corr-tie",
+		Limit:         2,
+		Sort:          domain.SortDesc,
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, 2, result.Count)
+	require.Len(t, result.Logs, 2)
+	// Cursor should include both timestamp and hash for the tiebreaker
+	assert.Equal(t, encodeCursor(ts, 200), result.NextCursor)
+	assert.Equal(t, "m1", result.Logs[0].Message)
+	assert.Equal(t, "m2", result.Logs[1].Message)
+}
+
+func TestParseCursor_Valid(t *testing.T) {
+	ts := time.Date(2026, 3, 10, 12, 0, 0, 0, time.UTC)
+	cursor := encodeCursor(ts, 42)
+
+	gotTS, gotHash, err := parseCursor(cursor)
+	require.NoError(t, err)
+	assert.Equal(t, ts, gotTS)
+	assert.Equal(t, uint64(42), gotHash)
+}
+
+func TestParseCursor_Invalid(t *testing.T) {
+	tests := []struct {
+		name   string
+		cursor string
+	}{
+		{"no separator", "2026-03-10T12:00:00Z"},
+		{"bad timestamp", "not-a-time|42"},
+		{"bad hash", "2026-03-10T12:00:00Z|xyz"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := parseCursor(tt.cursor)
+			require.Error(t, err)
+		})
+	}
 }
