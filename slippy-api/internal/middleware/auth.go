@@ -3,6 +3,7 @@ package middleware
 import (
 	"crypto/subtle"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 
@@ -64,7 +65,7 @@ func writeError(ctx huma.Context, status int, msg string) {
 	ctx.SetHeader("Content-Type", "application/json")
 	body := fmt.Sprintf(`{"status":%d,"title":%q}`, status, msg)
 	if _, writeErr := ctx.BodyWriter().Write([]byte(body)); writeErr != nil {
-		ctx.SetStatus(http.StatusInternalServerError)
+		log.Printf("warning: failed to write error response: %v", writeErr)
 	}
 }
 
