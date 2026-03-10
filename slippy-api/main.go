@@ -149,8 +149,12 @@ func run() error {
 	// Adapt the read+write store to our read-only interface.
 	adapter := infrastructure.NewSlipStoreAdapter(store)
 
+	// Fork-aware decorator: falls back to cross-repo commit lookup
+	// when the caller provides a fork name but the slip is stored under the parent.
+	forkAware := infrastructure.NewForkAwareSlipReader(adapter, store.Session(), chCfg.ChDatabase)
+
 	// --- Optional Dragonfly/Redis cache ---
-	reader := connectCache(cfg, adapter, redisDial)
+	reader := connectCache(cfg, forkAware, redisDial)
 
 	// --- BuildInfo reader for image tag resolution ---
 	// Uses the same ClickHouse session as the slip store to query ci.buildinfo
