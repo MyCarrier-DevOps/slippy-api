@@ -34,8 +34,13 @@ func main() {
 
 // buildHandler creates the fully-wired HTTP handler with auth, routes, and
 // OpenTelemetry instrumentation. This is extracted from run() for testability.
-// The imageTagReader is optional — if nil, the image-tags endpoint is not registered.
-func buildHandler(cfg *config.Config, reader domain.SlipReader, imageTagReader domain.ImageTagReader) http.Handler {
+// The imageTagReader and ciJobLogReader are optional — if nil, their endpoints are not registered.
+func buildHandler(
+	cfg *config.Config,
+	reader domain.SlipReader,
+	imageTagReader domain.ImageTagReader,
+	ciJobLogReader domain.CIJobLogReader,
+) http.Handler {
 	mux := http.NewServeMux()
 	apiConfig := huma.DefaultConfig("Slippy API", "1.0.0")
 	apiConfig.Info.Description = "Read-only API for CI/CD routing slips"
@@ -62,6 +67,12 @@ func buildHandler(cfg *config.Config, reader domain.SlipReader, imageTagReader d
 	if imageTagReader != nil {
 		ith := handler.NewImageTagHandler(imageTagReader)
 		handler.RegisterImageTagRoutes(api, ith)
+	}
+
+	// Register CI job log routes when a reader is available.
+	if ciJobLogReader != nil {
+		clh := handler.NewCIJobLogHandler(ciJobLogReader)
+		handler.RegisterCIJobLogRoutes(api, clh)
 	}
 
 	// Wrap with OpenTelemetry instrumentation.
@@ -165,8 +176,12 @@ func run() error {
 	// and ci.repoproperties without opening a second connection.
 	imageTagReader := infrastructure.NewBuildInfoReader(store.Session(), reader)
 
+	// --- CI Job Log reader ---
+	// Uses the same ClickHouse session to query observability.ciJob.
+	ciJobLogReader := infrastructure.NewCIJobLogStore(store.Session())
+
 	// --- HTTP Server ---
-	otelHandler := buildHandler(cfg, reader, imageTagReader)
+	otelHandler := buildHandler(cfg, reader, imageTagReader, ciJobLogReader)
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
 		Handler:           otelHandler,
