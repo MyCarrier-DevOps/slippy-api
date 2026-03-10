@@ -264,6 +264,6 @@ func TestBuildNextPageURL_EncodesSpecialCharacters(t *testing.T) {
 	result := buildNextPageURL(input, cursor)
 	// Correlation ID should be path-escaped
 	assert.Contains(t, result, "/logs/corr%2Fspecial%20chars?")
-	// Message should be query-escaped
-	assert.Contains(t, result, "message=error")
+	// Message should be fully query-escaped (colon → %3A, spaces → +)
+	assert.Contains(t, result, "message=error%3A+something+went+wrong")
 }
