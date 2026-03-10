@@ -2,7 +2,6 @@ package infrastructure
 
 import (
 	"context"
-	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -37,14 +36,6 @@ func NewCachedSlipReader(reader domain.SlipReader, client redis.Cmdable, ttl tim
 
 // Compile-time interface compliance check.
 var _ domain.SlipReader = (*CachedSlipReader)(nil)
-
-// cacheKey builds a deterministic cache key for a given operation.
-func cacheKey(operation, repository string, commits []string) string {
-	return "slippy:" + operation + ":" + repository + ":" + strings.Join(commits, ",")
-}
-
-// Reference cacheKey to satisfy the unused linter until cache-hit logic is added.
-var _ = cacheKey
 
 // ---------------------------------------------------------------------------
 // SlipReader delegation — cache logic will be layered on in a later iteration.

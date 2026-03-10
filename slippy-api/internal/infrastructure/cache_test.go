@@ -197,24 +197,4 @@ func TestCachedSlipReader_FindAllByCommits_EmptyResult(t *testing.T) {
 	assert.Empty(t, results)
 }
 
-// --- CacheKey Unit Tests ---
 
-func TestCacheKey(t *testing.T) {
-	key := cacheKey("find", "org/repo", []string{"abc", "def"})
-	assert.Equal(t, "slippy:find:org/repo:abc,def", key)
-}
-
-func TestCacheKey_SingleCommit(t *testing.T) {
-	key := cacheKey("load", "org/repo", []string{"abc123"})
-	assert.Equal(t, "slippy:load:org/repo:abc123", key)
-}
-
-func TestCacheKey_EmptyCommits(t *testing.T) {
-	key := cacheKey("find", "org/repo", []string{})
-	assert.Equal(t, "slippy:find:org/repo:", key)
-}
-
-func TestCacheKey_SpecialCharacters(t *testing.T) {
-	key := cacheKey("find", "org/my-repo", []string{"abc/def", "ghi"})
-	assert.Equal(t, "slippy:find:org/my-repo:abc/def,ghi", key)
-}
