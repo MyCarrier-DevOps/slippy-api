@@ -144,8 +144,8 @@ func (b *BuildInfoReader) queryBuildScope(
 
 	if rows.Next() {
 		var buildScope string
-		if err := rows.Scan(&buildScope); err != nil {
-			return "", fmt.Errorf("failed to scan build_scope: %w", err)
+		if scanErr := rows.Scan(&buildScope); scanErr != nil {
+			return "", fmt.Errorf("failed to scan build_scope: %w", scanErr)
 		}
 		// Validate the value; default to "all" for unknown values.
 		if buildScope != domain.BuildScopeAll && buildScope != domain.BuildScopeModified {
@@ -154,8 +154,8 @@ func (b *BuildInfoReader) queryBuildScope(
 		return buildScope, nil
 	}
 
-	if err := rows.Err(); err != nil {
-		return "", fmt.Errorf("error iterating ci.repoproperties rows: %w", err)
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return "", fmt.Errorf("error iterating ci.repoproperties rows: %w", rowsErr)
 	}
 
 	// No row found — default to "all" (safest assumption).
@@ -190,8 +190,8 @@ func (b *BuildInfoReader) queryBuildInfo(
 	result := make(map[string]string)
 	for rows.Next() {
 		var component, imageTag string
-		if err := rows.Scan(&component, &imageTag); err != nil {
-			return nil, fmt.Errorf("failed to scan ci.buildinfo row: %w", err)
+		if scanErr := rows.Scan(&component, &imageTag); scanErr != nil {
+			return nil, fmt.Errorf("failed to scan ci.buildinfo row: %w", scanErr)
 		}
 		result[component] = imageTag
 	}
