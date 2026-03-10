@@ -276,7 +276,10 @@ func TestRun_MissingClickhouseConfig(t *testing.T) {
 	clearRunEnv(t)
 	t.Setenv("SLIPPY_API_KEY", "test-key")
 	// Provide a valid inline pipeline config so we get past the pipeline step
-	t.Setenv("SLIPPY_PIPELINE_CONFIG", `{"version":"1.0","name":"test","steps":[{"name":"build","description":"build"}]}`)
+	t.Setenv(
+		"SLIPPY_PIPELINE_CONFIG",
+		`{"version":"1.0","name":"test","steps":[{"name":"build","description":"build"}]}`,
+	)
 
 	// config.Load() and pipeline config succeed, but ClickhouseLoadConfig() will fail
 	// because CLICKHOUSE_HOSTNAME is required

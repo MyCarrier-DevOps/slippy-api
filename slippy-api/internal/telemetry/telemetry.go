@@ -70,10 +70,7 @@ func Init(ctx context.Context) (Shutdown, error) {
 	}
 
 	// Build a resource describing this service instance.
-	res, err := buildResource(ctx)
-	if err != nil {
-		return noopShutdown, fmt.Errorf("otel resource: %w", err)
-	}
+	res := buildResource()
 
 	// Strip scheme and detect TLS for the raw endpoint address.
 	addr, secure := parseEndpoint(endpoint)
@@ -92,7 +89,9 @@ func Init(ctx context.Context) (Shutdown, error) {
 	metricExp, err := newMetricExporter(ctx, protocol, addr, secure)
 	if err != nil {
 		// Trace is already initialised — best-effort: shut it down and return error.
-		_ = tp.Shutdown(ctx)
+		if shutdownErr := tp.Shutdown(ctx); shutdownErr != nil {
+			log.Printf("warning: otel trace provider shutdown: %v", shutdownErr)
+		}
 		return noopShutdown, fmt.Errorf("otel metric exporter: %w", err)
 	}
 	mp := sdkmetric.NewMeterProvider(
@@ -121,7 +120,7 @@ func noopShutdown(_ context.Context) error { return nil }
 
 // buildResource creates an OTel resource with the service name and any
 // extra Kubernetes attributes injected by the Helm chart.
-func buildResource(ctx context.Context) (*resource.Resource, error) {
+func buildResource() *resource.Resource {
 	serviceName := os.Getenv("OTEL_SERVICE_NAME")
 	if serviceName == "" {
 		serviceName = defaultServiceName
@@ -144,7 +143,7 @@ func buildResource(ctx context.Context) (*resource.Resource, error) {
 		}
 	}
 
-	return resource.NewWithAttributes("", attrs...), nil
+	return resource.NewWithAttributes("", attrs...)
 }
 
 // parseEndpoint strips the scheme from the endpoint and returns the bare

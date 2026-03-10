@@ -39,11 +39,19 @@ func (m *mockSlipStore) LoadByCommit(ctx context.Context, repo, sha string) (*sl
 	return m.loadByCommitFn(ctx, repo, sha)
 }
 
-func (m *mockSlipStore) FindByCommits(ctx context.Context, repo string, commits []string) (*slippy.Slip, string, error) {
+func (m *mockSlipStore) FindByCommits(
+	ctx context.Context,
+	repo string,
+	commits []string,
+) (*slippy.Slip, string, error) {
 	return m.findByCommitsFn(ctx, repo, commits)
 }
 
-func (m *mockSlipStore) FindAllByCommits(ctx context.Context, repo string, commits []string) ([]slippy.SlipWithCommit, error) {
+func (m *mockSlipStore) FindAllByCommits(
+	ctx context.Context,
+	repo string,
+	commits []string,
+) ([]slippy.SlipWithCommit, error) {
 	return m.findAllByCommitsFn(ctx, repo, commits)
 }
 
@@ -87,7 +95,11 @@ func (m *mockSlipStore) UpdateStepWithHistory(
 	return nil
 }
 
-func (m *mockSlipStore) UpdateComponentStatus(ctx context.Context, id, comp, stepType string, status slippy.StepStatus) error {
+func (m *mockSlipStore) UpdateComponentStatus(
+	ctx context.Context,
+	id, comp, stepType string,
+	status slippy.StepStatus,
+) error {
 	if m.updateComponentFn != nil {
 		return m.updateComponentFn(ctx, id, comp, stepType, status)
 	}

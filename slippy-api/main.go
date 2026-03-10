@@ -143,7 +143,11 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("clickhouse store: %w", err)
 	}
-	defer store.Close()
+	defer func() {
+		if closeErr := store.Close(); closeErr != nil {
+			log.Printf("warning: clickhouse store close: %v", closeErr)
+		}
+	}()
 	log.Printf("clickhouse store connected")
 
 	// Adapt the read+write store to our read-only interface.

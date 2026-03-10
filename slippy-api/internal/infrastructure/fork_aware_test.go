@@ -32,11 +32,19 @@ func (m *forkAwareMockReader) LoadByCommit(ctx context.Context, repo, sha string
 	return m.loadByCommitFn(ctx, repo, sha)
 }
 
-func (m *forkAwareMockReader) FindByCommits(ctx context.Context, repo string, commits []string) (*domain.Slip, string, error) {
+func (m *forkAwareMockReader) FindByCommits(
+	ctx context.Context,
+	repo string,
+	commits []string,
+) (*domain.Slip, string, error) {
 	return m.findByCommitsFn(ctx, repo, commits)
 }
 
-func (m *forkAwareMockReader) FindAllByCommits(ctx context.Context, repo string, commits []string) ([]domain.SlipWithCommit, error) {
+func (m *forkAwareMockReader) FindAllByCommits(
+	ctx context.Context,
+	repo string,
+	commits []string,
+) ([]domain.SlipWithCommit, error) {
 	return m.findAllByCommitsFn(ctx, repo, commits)
 }
 

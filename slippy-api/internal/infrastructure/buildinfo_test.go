@@ -34,7 +34,11 @@ func (m *buildInfoMockReader) FindByCommits(_ context.Context, _ string, _ []str
 	return nil, "", errors.New("not implemented")
 }
 
-func (m *buildInfoMockReader) FindAllByCommits(_ context.Context, _ string, _ []string) ([]domain.SlipWithCommit, error) {
+func (m *buildInfoMockReader) FindAllByCommits(
+	_ context.Context,
+	_ string,
+	_ []string,
+) ([]domain.SlipWithCommit, error) {
 	return nil, errors.New("not implemented")
 }
 

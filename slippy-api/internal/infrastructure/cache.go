@@ -43,6 +43,9 @@ func cacheKey(operation, repository string, commits []string) string {
 	return "slippy:" + operation + ":" + repository + ":" + strings.Join(commits, ",")
 }
 
+// Reference cacheKey to satisfy the unused linter until cache-hit logic is added.
+var _ = cacheKey
+
 // ---------------------------------------------------------------------------
 // SlipReader delegation — cache logic will be layered on in a later iteration.
 // ---------------------------------------------------------------------------
@@ -93,7 +96,7 @@ func (c *CachedSlipReader) FindByCommits(
 	ctx context.Context,
 	repository string,
 	commits []string,
-) (*domain.Slip, string, error) {
+) (foundSlip *domain.Slip, matchedCommit string, err error) {
 	ctx, span := otel.Tracer(cacheTracerName).Start(ctx, "cache.FindByCommits",
 		trace.WithAttributes(
 			attribute.String("cache.system", "dragonfly"),

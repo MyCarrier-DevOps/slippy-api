@@ -17,11 +17,12 @@ import (
 	"github.com/stretchr/testify/require"
 	tcredis "github.com/testcontainers/testcontainers-go/modules/redis"
 
-	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
 	"github.com/MyCarrier-DevOps/slippy-api/internal/domain"
 	"github.com/MyCarrier-DevOps/slippy-api/internal/handler"
 	"github.com/MyCarrier-DevOps/slippy-api/internal/infrastructure"
 	"github.com/MyCarrier-DevOps/slippy-api/internal/middleware"
+
+	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
 )
 
 // inMemorySlipReader is a simple in-memory implementation of domain.SlipReader
@@ -55,7 +56,11 @@ func (r *inMemorySlipReader) LoadByCommit(_ context.Context, repository, commitS
 	return nil, slippy.ErrSlipNotFound
 }
 
-func (r *inMemorySlipReader) FindByCommits(_ context.Context, repository string, commits []string) (*domain.Slip, string, error) {
+func (r *inMemorySlipReader) FindByCommits(
+	_ context.Context,
+	repository string,
+	commits []string,
+) (*domain.Slip, string, error) {
 	for _, c := range commits {
 		for _, s := range r.slips {
 			if s.Repository == repository && s.CommitSHA == c {
@@ -66,7 +71,11 @@ func (r *inMemorySlipReader) FindByCommits(_ context.Context, repository string,
 	return nil, "", slippy.ErrSlipNotFound
 }
 
-func (r *inMemorySlipReader) FindAllByCommits(_ context.Context, repository string, commits []string) ([]domain.SlipWithCommit, error) {
+func (r *inMemorySlipReader) FindAllByCommits(
+	_ context.Context,
+	repository string,
+	commits []string,
+) ([]domain.SlipWithCommit, error) {
 	var results []domain.SlipWithCommit
 	for _, c := range commits {
 		for _, s := range r.slips {
