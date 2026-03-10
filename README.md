@@ -27,8 +27,8 @@ The application follows Clean Architecture with clear dependency boundaries:
 
 | Layer | Package | Responsibility |
 |---|---|---|
-| **Domain** | `internal/domain` | `SlipReader` interface, type aliases for upstream `Slip`/`SlipWithCommit` |
-| **Infrastructure** | `internal/infrastructure` | `SlipStoreAdapter` (read-only adapter over `slippy.SlipStore`), `CachedSlipReader` (Dragonfly/Redis decorator) |
+| **Domain** | `internal/domain` | `SlipReader` / `ImageTagReader` / `CIJobLogReader` interfaces, type aliases for upstream `Slip`/`SlipWithCommit` |
+| **Infrastructure** | `internal/infrastructure` | `SlipStoreAdapter` (read-only adapter), `ForkAwareSlipReader` (cross-repo fallback), `CachedSlipReader` (Dragonfly/Redis decorator), `BuildInfoReader` (image tag resolution), `CIJobLogStore` (CI job log queries) |
 | **Handler** | `internal/handler` | HTTP route registration, request/response types, error mapping |
 | **Middleware** | `internal/middleware` | Bearer token authentication with constant-time comparison |
 | **Config** | `internal/config` | Environment variable loading and validation |
@@ -36,7 +36,7 @@ The application follows Clean Architecture with clear dependency boundaries:
 
 ## API Endpoints
 
-All `/slips/*` endpoints require a `Bearer` token in the `Authorization` header.
+All endpoints except `/health`, `/openapi.json`, and `/docs` require a `Bearer` token in the `Authorization` header.
 
 | Method | Path | Description |
 |---|---|---|
@@ -45,6 +45,8 @@ All `/slips/*` endpoints require a `Bearer` token in the `Authorization` header.
 | `GET` | `/slips/by-commit/{owner}/{repo}/{commitSHA}` | Get a routing slip by repository and commit SHA |
 | `POST` | `/slips/find-by-commits` | Find the first matching slip for an ordered list of commits |
 | `POST` | `/slips/find-all-by-commits` | Find all matching slips for a list of commits |
+| `GET` | `/slips/{correlationID}/image-tags` | Resolve per-component image tags for a routing slip |
+| `GET` | `/logs/{correlationID}` | Query CI job logs with cursor pagination and per-column filtering |
 | `GET` | `/openapi.json` | Auto-generated OpenAPI 3.1 specification |
 | `GET` | `/docs` | Interactive API documentation (Stoplight Elements) |
 
@@ -87,11 +89,55 @@ curl -X POST -H "Authorization: Bearer $API_KEY" \
 }
 ```
 
+**GET /slips/{correlationID}/image-tags**
+
+```bash
+curl -H "Authorization: Bearer $API_KEY" \
+  https://slippy-api.example.com/slips/abc-123-def/image-tags
+```
+
+```json
+{
+  "build_scope": "modified",
+  "tags": {
+    "my-service": "26.10.a1b2c3d",
+    "my-worker": "26.10.d4e5f6a"
+  }
+}
+```
+
+**GET /logs/{correlationID}**
+
+```bash
+curl -H "Authorization: Bearer $API_KEY" \
+  'https://slippy-api.example.com/logs/abc-123-def?limit=50&sort=desc&level=ERROR'
+```
+
+```json
+{
+  "items": [
+    {
+      "timestamp": "2026-03-10T12:00:00.123456789Z",
+      "correlation_id": "abc-123-def",
+      "level": "ERROR",
+      "message": "build failed: exit code 1",
+      "service": "ci-runner",
+      "component": "build",
+      "...": "..."
+    }
+  ],
+  "next_page": "/logs/abc-123-def?limit=50&sort=desc&level=ERROR&cursor=2026-03-10T12%3A00%3A00.123456789Z%7C12345678901234",
+  "count": 50
+}
+```
+
+Supported query filters: `level`, `service`, `component`, `cluster`, `cloud`, `environment`, `namespace`, `message`, `ci_job_instance`, `ci_job_type`, `build_repository`, `build_image`, `build_branch`. Page size is controlled via `limit` (1–1000, default 100). Sort order via `sort` (`asc` or `desc`, default `desc`). Pagination uses an opaque `cursor` returned in `next_page`.
+
 ### Error Responses
 
 | Status | Condition |
 |---|---|
-| `400` | Invalid correlation ID or invalid repository format |
+| `400` | Invalid correlation ID, invalid repository format, or invalid cursor |
 | `401` | Missing or malformed `Authorization` header |
 | `403` | Invalid API key |
 | `404` | Slip not found |
@@ -170,15 +216,27 @@ slippy-api/                          # Repository root
         │   ├── config.go            # Environment variable loading
         │   └── config_test.go
         ├── domain/
+        │   ├── ci_job_log.go        # CIJobLogReader interface, log query/result types
+        │   ├── image_tag.go         # ImageTagReader interface, ImageTagResult type
         │   └── slip.go              # SlipReader interface, type aliases
         ├── handler/
-        │   ├── health.go            # GET /health
+        │   ├── ci_job_log_handler.go     # GET /logs/{correlationID}
+        │   ├── ci_job_log_handler_test.go
+        │   ├── health.go                # GET /health
         │   ├── health_test.go
-        │   ├── slip_handler.go      # Slip CRUD routes + error mapping
+        │   ├── image_tag_handler.go      # GET /slips/{correlationID}/image-tags
+        │   ├── image_tag_handler_test.go
+        │   ├── slip_handler.go          # Slip CRUD routes + error mapping
         │   └── slip_handler_test.go
         ├── infrastructure/
+        │   ├── buildinfo.go         # BuildInfoReader (image tags from ci.buildinfo)
+        │   ├── buildinfo_test.go
         │   ├── cache.go             # CachedSlipReader (Dragonfly decorator)
         │   ├── cache_test.go
+        │   ├── cijob.go             # CIJobLogStore (observability.ciJob queries)
+        │   ├── cijob_test.go
+        │   ├── fork_aware.go        # ForkAwareSlipReader (cross-repo fallback)
+        │   ├── fork_aware_test.go
         │   ├── store.go             # SlipStoreAdapter (read-only adapter)
         │   └── store_test.go
         ├── middleware/
@@ -186,7 +244,8 @@ slippy-api/                          # Repository root
         │   └── auth_test.go
         ├── telemetry/
         │   ├── telemetry.go         # OTel SDK init (traces + metrics)
-        │   └── telemetry_test.go
+        │   ├── telemetry_test.go
+        │   └── testutil.go          # Shared test helpers for OTel
         └── e2e/
             └── e2e_test.go          # Full-stack e2e with testcontainers Redis
 ```
@@ -260,6 +319,8 @@ docker run -p 8080:8080 \
 ## Key Design Decisions
 
 - **Read-only**: The API only exposes read operations. The `SlipStoreAdapter` enforces this by adapting the upstream read+write `SlipStore` to the narrow `SlipReader` interface.
+- **Fork-aware commit lookups**: `ForkAwareSlipReader` decorator handles forked repository queries by falling back to a commit-SHA-only lookup when the initial repository-scoped query returns `ErrSlipNotFound`, then retrying with the resolved repository name.
+- **Cursor pagination with composite cursor**: The `/logs` endpoint uses a `timestamp|cityHash64` composite cursor to guarantee no data loss when multiple rows share the same nanosecond timestamp. Uses `LIMIT n+1` peek to determine next-page existence without a separate COUNT query.
 - **huma v2 + humago**: Code-first API framework with auto-generated OpenAPI 3.1 spec. Uses Go's standard library `net/http.ServeMux` via the humago adapter — no Gin, no Echo.
 - **Bearer auth with constant-time comparison**: Prevents timing attacks. Operations without a `security` declaration (e.g., `/health`) pass through unauthenticated.
 - **Cache decorator pattern**: `CachedSlipReader` wraps any `SlipReader` transparently. Caching is opt-in via environment variables and degrades gracefully if Dragonfly is unavailable.
