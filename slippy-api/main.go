@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse"
+	"github.com/MyCarrier-DevOps/goLibMyCarrier/logger"
 	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
 
 	"github.com/MyCarrier-DevOps/slippy-api/internal/config"
@@ -174,8 +175,30 @@ func run() error {
 	// when the caller provides a fork name but the slip is stored under the parent.
 	forkAware := infrastructure.NewForkAwareSlipReader(adapter, store.Session(), slipDatabase)
 
+	// --- Optional GitHub ancestry resolution ---
+	// When a commit doesn't have a routing slip, walk backwards through commit
+	// history via the GitHub GraphQL API to find an ancestor that does.
+	var slipReader domain.SlipReader = forkAware
+	if cfg.GitHubEnabled() {
+		ghCfg := slippy.GitHubConfig{
+			AppID:         cfg.GitHubAppID,
+			PrivateKey:    cfg.GitHubPrivateKey,
+			EnterpriseURL: cfg.GitHubEnterpriseURL,
+		}
+		ghClient, ghErr := slippy.NewGitHubClient(ghCfg, logger.NewStdLogger(false))
+		if ghErr != nil {
+			log.Printf("warning: github client creation failed, ancestry resolution disabled: %v", ghErr)
+		} else {
+			slippyClient := slippy.NewClientWithDependencies(store, ghClient, slippy.Config{
+				AncestryDepth: cfg.AncestryDepth,
+			})
+			slipReader = infrastructure.NewSlipResolverAdapter(slippyClient, forkAware)
+			log.Printf("github ancestry resolution enabled (depth=%d)", cfg.AncestryDepth)
+		}
+	}
+
 	// --- Optional Dragonfly/Redis cache ---
-	reader := connectCache(cfg, forkAware, redisDial)
+	reader := connectCache(cfg, slipReader, redisDial)
 
 	// --- BuildInfo reader for image tag resolution ---
 	// Uses the same ClickHouse session as the slip store to query ci.buildinfo

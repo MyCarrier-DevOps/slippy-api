@@ -16,6 +16,8 @@ func clearEnv(t *testing.T) {
 		"SLIPPY_API_KEY", "PORT",
 		"DRAGONFLY_HOST", "DRAGONFLY_PORT", "DRAGONFLY_PASSWORD",
 		"CACHE_TTL",
+		"SLIPPY_GITHUB_APP_ID", "SLIPPY_GITHUB_APP_PRIVATE_KEY",
+		"SLIPPY_GITHUB_ENTERPRISE_URL", "SLIPPY_ANCESTRY_DEPTH",
 	} {
 		t.Setenv(key, "")
 		os.Unsetenv(key)
@@ -43,6 +45,10 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, 6379, cfg.DragonflyPort)
 	assert.Equal(t, "", cfg.DragonflyPassword)
 	assert.Equal(t, 10*time.Minute, cfg.CacheTTL)
+	assert.Equal(t, int64(0), cfg.GitHubAppID)
+	assert.Equal(t, "", cfg.GitHubPrivateKey)
+	assert.Equal(t, "", cfg.GitHubEnterpriseURL)
+	assert.Equal(t, 25, cfg.AncestryDepth)
 }
 
 func TestLoad_AllValues(t *testing.T) {
@@ -110,4 +116,71 @@ func TestCacheEnabled(t *testing.T) {
 			assert.Equal(t, tt.expected, cfg.CacheEnabled())
 		})
 	}
+}
+
+func TestGitHubEnabled(t *testing.T) {
+	tests := []struct {
+		name       string
+		appID      int64
+		privateKey string
+		expected   bool
+	}{
+		{"enabled when both set", 12345, "-----BEGIN RSA PRIVATE KEY-----", true},
+		{"disabled when appID zero", 0, "some-key", false},
+		{"disabled when key empty", 12345, "", false},
+		{"disabled when both empty", 0, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{GitHubAppID: tt.appID, GitHubPrivateKey: tt.privateKey}
+			assert.Equal(t, tt.expected, cfg.GitHubEnabled())
+		})
+	}
+}
+
+func TestLoad_GitHubConfig(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("SLIPPY_API_KEY", "key")
+	t.Setenv("SLIPPY_GITHUB_APP_ID", "12345")
+	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "test-key-pem")
+	t.Setenv("SLIPPY_GITHUB_ENTERPRISE_URL", "https://github.example.com")
+	t.Setenv("SLIPPY_ANCESTRY_DEPTH", "50")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	assert.Equal(t, int64(12345), cfg.GitHubAppID)
+	assert.Equal(t, "test-key-pem", cfg.GitHubPrivateKey)
+	assert.Equal(t, "https://github.example.com", cfg.GitHubEnterpriseURL)
+	assert.Equal(t, 50, cfg.AncestryDepth)
+}
+
+func TestLoad_InvalidGitHubAppID(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("SLIPPY_API_KEY", "key")
+	t.Setenv("SLIPPY_GITHUB_APP_ID", "not-a-number")
+
+	cfg, err := Load()
+	assert.Nil(t, cfg)
+	assert.ErrorContains(t, err, "SLIPPY_GITHUB_APP_ID must be a valid integer")
+}
+
+func TestLoad_InvalidAncestryDepth(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("SLIPPY_API_KEY", "key")
+	t.Setenv("SLIPPY_ANCESTRY_DEPTH", "abc")
+
+	cfg, err := Load()
+	assert.Nil(t, cfg)
+	assert.ErrorContains(t, err, "SLIPPY_ANCESTRY_DEPTH must be a valid integer")
+}
+
+func TestLoad_AncestryDepthTooSmall(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("SLIPPY_API_KEY", "key")
+	t.Setenv("SLIPPY_ANCESTRY_DEPTH", "0")
+
+	cfg, err := Load()
+	assert.Nil(t, cfg)
+	assert.ErrorContains(t, err, "SLIPPY_ANCESTRY_DEPTH must be at least 1")
 }
