@@ -147,9 +147,15 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("clickhouse config: %w", err)
 	}
+	// slipDatabase is the ClickHouse database containing routing_slips.
+	// The upstream slippy library defaults to "ci" when Database is empty;
+	// we set it explicitly so the fork-aware decorator queries the same database.
+	const slipDatabase = "ci"
+
 	store, err := slippy.NewClickHouseStoreFromConfig(chCfg, slippy.ClickHouseStoreOptions{
 		SkipMigrations: true, // read-only API — no schema changes
 		PipelineConfig: pipelineCfg,
+		Database:       slipDatabase,
 	})
 	if err != nil {
 		return fmt.Errorf("clickhouse store: %w", err)
@@ -166,7 +172,7 @@ func run() error {
 
 	// Fork-aware decorator: falls back to cross-repo commit lookup
 	// when the caller provides a fork name but the slip is stored under the parent.
-	forkAware := infrastructure.NewForkAwareSlipReader(adapter, store.Session(), chCfg.ChDatabase)
+	forkAware := infrastructure.NewForkAwareSlipReader(adapter, store.Session(), slipDatabase)
 
 	// --- Optional Dragonfly/Redis cache ---
 	reader := connectCache(cfg, forkAware, redisDial)

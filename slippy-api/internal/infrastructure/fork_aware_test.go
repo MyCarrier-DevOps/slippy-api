@@ -177,6 +177,29 @@ func TestForkAware_LoadByCommit_ResolveSameRepoReturnsOriginalError(t *testing.T
 	assert.Nil(t, slip)
 }
 
+func TestForkAware_LoadByCommit_ResolveSameRepoDifferentCaseReturnsOriginalError(t *testing.T) {
+	reader := &forkAwareMockReader{
+		loadByCommitFn: func(_ context.Context, repo, sha string) (*domain.Slip, error) {
+			return nil, slippy.ErrSlipNotFound
+		},
+	}
+
+	session := &clickhousetest.MockSession{
+		QueryRowFunc: func(_ context.Context, query string, args ...any) ch.Row {
+			// Resolves to the same repo with different casing — skip retry since
+			// upstream already uses case-insensitive matching.
+			return &clickhousetest.MockRow{
+				ScanData: []any{"Org/Repo"},
+			}
+		},
+	}
+
+	fa := NewForkAwareSlipReader(reader, session, "ci")
+	slip, err := fa.LoadByCommit(context.Background(), "org/repo", "sha123")
+	assert.ErrorIs(t, err, slippy.ErrSlipNotFound)
+	assert.Nil(t, slip)
+}
+
 // --- FindByCommits ---
 
 func TestForkAware_FindByCommits_DirectHit(t *testing.T) {
@@ -271,6 +294,29 @@ func TestForkAware_FindByCommits_ResolveEmptyReturnsOriginalError(t *testing.T) 
 		QueryWithArgsFunc: func(_ context.Context, query string, args ...any) (ch.Rows, error) {
 			return &clickhousetest.MockRows{
 				NextData: []bool{},
+			}, nil
+		},
+	}
+
+	fa := NewForkAwareSlipReader(reader, session, "ci")
+	slip, commit, err := fa.FindByCommits(context.Background(), "fork-user/repo", []string{"c1"})
+	assert.ErrorIs(t, err, slippy.ErrSlipNotFound)
+	assert.Nil(t, slip)
+	assert.Empty(t, commit)
+}
+
+func TestForkAware_FindByCommits_ResolveSameRepoDifferentCaseSkipsRetry(t *testing.T) {
+	reader := &forkAwareMockReader{
+		findByCommitsFn: func(_ context.Context, repo string, commits []string) (*domain.Slip, string, error) {
+			return nil, "", slippy.ErrSlipNotFound
+		},
+	}
+
+	session := &clickhousetest.MockSession{
+		QueryWithArgsFunc: func(_ context.Context, query string, args ...any) (ch.Rows, error) {
+			return &clickhousetest.MockRows{
+				NextData: []bool{true},
+				ScanData: [][]any{{"Fork-User/Repo"}},
 			}, nil
 		},
 	}
@@ -380,6 +426,28 @@ func TestForkAware_FindAllByCommits_ResolveEmptyReturnsEmpty(t *testing.T) {
 		QueryWithArgsFunc: func(_ context.Context, query string, args ...any) (ch.Rows, error) {
 			return &clickhousetest.MockRows{
 				NextData: []bool{},
+			}, nil
+		},
+	}
+
+	fa := NewForkAwareSlipReader(reader, session, "ci")
+	results, err := fa.FindAllByCommits(context.Background(), "fork-user/repo", []string{"c1"})
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
+func TestForkAware_FindAllByCommits_ResolveSameRepoDifferentCaseSkipsRetry(t *testing.T) {
+	reader := &forkAwareMockReader{
+		findAllByCommitsFn: func(_ context.Context, repo string, commits []string) ([]domain.SlipWithCommit, error) {
+			return nil, nil
+		},
+	}
+
+	session := &clickhousetest.MockSession{
+		QueryWithArgsFunc: func(_ context.Context, query string, args ...any) (ch.Rows, error) {
+			return &clickhousetest.MockRows{
+				NextData: []bool{true},
+				ScanData: [][]any{{"Fork-User/Repo"}},
 			}, nil
 		},
 	}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -63,13 +65,23 @@ func (f *ForkAwareSlipReader) LoadByCommit(ctx context.Context, repository, comm
 	)
 	defer span.End()
 
+	slog.InfoContext(ctx, "fork-aware fallback: resolving repository for commit",
+		"repository", repository, "commit_sha", commitSHA)
+
 	actualRepo, resolveErr := f.resolveRepository(ctx, commitSHA)
 	if resolveErr != nil {
+		slog.WarnContext(ctx, "fork-aware fallback: resolve query failed",
+			"commit_sha", commitSHA, "error", resolveErr)
 		span.SetStatus(codes.Unset, "no cross-repo match")
 		return nil, err
 	}
 
-	if actualRepo == repository {
+	slog.InfoContext(ctx, "fork-aware fallback: resolved repository",
+		"input_repository", repository, "resolved_repository", actualRepo)
+
+	if strings.EqualFold(actualRepo, repository) {
+		slog.InfoContext(ctx, "fork-aware fallback: resolved same repository, skipping retry",
+			"repository", repository)
 		span.SetStatus(codes.Unset, "same repository")
 		return nil, err
 	}
@@ -77,10 +89,14 @@ func (f *ForkAwareSlipReader) LoadByCommit(ctx context.Context, repository, comm
 	span.SetAttributes(attribute.String("slip.resolved_repository", actualRepo))
 	slip, retryErr := f.reader.LoadByCommit(ctx, actualRepo, commitSHA)
 	if retryErr != nil {
+		slog.WarnContext(ctx, "fork-aware fallback: retry with resolved repository failed",
+			"resolved_repository", actualRepo, "error", retryErr)
 		span.RecordError(retryErr)
 		span.SetStatus(codes.Error, retryErr.Error())
 		return nil, retryErr
 	}
+	slog.InfoContext(ctx, "fork-aware fallback: resolved via fork fallback",
+		"input_repository", repository, "resolved_repository", actualRepo)
 	span.SetStatus(codes.Ok, "resolved via fork fallback")
 	return slip, nil
 }
@@ -103,24 +119,38 @@ func (f *ForkAwareSlipReader) FindByCommits(
 	)
 	defer span.End()
 
+	slog.InfoContext(ctx, "fork-aware fallback: resolving repositories for commits",
+		"repository", repository, "commits_count", len(commits))
+
 	repos, resolveErr := f.resolveRepositories(ctx, commits)
 	if resolveErr != nil || len(repos) == 0 {
+		slog.WarnContext(ctx, "fork-aware fallback: no repositories resolved",
+			"error", resolveErr, "repos_count", len(repos))
 		span.SetStatus(codes.Unset, "no cross-repo match")
 		return nil, "", err
 	}
 
+	slog.InfoContext(ctx, "fork-aware fallback: resolved repositories",
+		"input_repository", repository, "resolved_repositories", repos)
+
 	for _, repo := range repos {
-		if repo == repository {
+		if strings.EqualFold(repo, repository) {
 			continue
 		}
 		span.SetAttributes(attribute.String("slip.resolved_repository", repo))
 		slip, matched, retryErr := f.reader.FindByCommits(ctx, repo, commits)
 		if retryErr == nil {
+			slog.InfoContext(ctx, "fork-aware fallback: resolved via fork fallback",
+				"input_repository", repository, "resolved_repository", repo)
 			span.SetStatus(codes.Ok, "resolved via fork fallback")
 			return slip, matched, nil
 		}
+		slog.WarnContext(ctx, "fork-aware fallback: retry failed for resolved repository",
+			"resolved_repository", repo, "error", retryErr)
 	}
 
+	slog.InfoContext(ctx, "fork-aware fallback: no match in resolved repositories",
+		"input_repository", repository, "resolved_repositories", repos)
 	span.SetStatus(codes.Unset, "no match in resolved repositories")
 	return nil, "", err
 }
@@ -143,20 +173,30 @@ func (f *ForkAwareSlipReader) FindAllByCommits(
 	)
 	defer span.End()
 
+	slog.InfoContext(ctx, "fork-aware fallback: resolving repositories for find-all",
+		"repository", repository, "commits_count", len(commits))
+
 	repos, resolveErr := f.resolveRepositories(ctx, commits)
 	if resolveErr != nil || len(repos) == 0 {
+		slog.WarnContext(ctx, "fork-aware fallback: no repositories resolved for find-all",
+			"error", resolveErr, "repos_count", len(repos))
 		span.SetStatus(codes.Unset, "no cross-repo match")
 		return results, nil
 	}
 
+	slog.InfoContext(ctx, "fork-aware fallback: resolved repositories for find-all",
+		"input_repository", repository, "resolved_repositories", repos)
+
 	var allResults []domain.SlipWithCommit
 	for _, repo := range repos {
-		if repo == repository {
+		if strings.EqualFold(repo, repository) {
 			continue
 		}
 		span.SetAttributes(attribute.String("slip.resolved_repository", repo))
 		repoResults, retryErr := f.reader.FindAllByCommits(ctx, repo, commits)
 		if retryErr == nil && len(repoResults) > 0 {
+			slog.InfoContext(ctx, "fork-aware fallback: found results for resolved repository",
+				"resolved_repository", repo, "results_count", len(repoResults))
 			allResults = append(allResults, repoResults...)
 		}
 	}
@@ -166,6 +206,8 @@ func (f *ForkAwareSlipReader) FindAllByCommits(
 		return allResults, nil
 	}
 
+	slog.InfoContext(ctx, "fork-aware fallback: no results from any resolved repository",
+		"input_repository", repository, "resolved_repositories", repos)
 	span.SetStatus(codes.Unset, "no match in resolved repositories")
 	return results, nil
 }
