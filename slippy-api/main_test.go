@@ -65,7 +65,7 @@ func TestBuildHandler_HealthEndpoint(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil)
+	h := buildHandler(cfg, reader, nil, nil)
 	require.NotNil(t, h)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -83,7 +83,7 @@ func TestBuildHandler_AuthRequired(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil)
+	h := buildHandler(cfg, reader, nil, nil)
 
 	// Request without auth header should be rejected
 	req := httptest.NewRequest(http.MethodGet, "/slips/test-corr-001", nil)
@@ -96,7 +96,7 @@ func TestBuildHandler_AuthSuccess(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil)
+	h := buildHandler(cfg, reader, nil, nil)
 
 	// Request with valid auth header should succeed
 	req := httptest.NewRequest(http.MethodGet, "/slips/test-corr-001", nil)
@@ -114,7 +114,7 @@ func TestBuildHandler_OpenAPISpec(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil)
+	h := buildHandler(cfg, reader, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
 	w := httptest.NewRecorder()
@@ -276,7 +276,10 @@ func TestRun_MissingClickhouseConfig(t *testing.T) {
 	clearRunEnv(t)
 	t.Setenv("SLIPPY_API_KEY", "test-key")
 	// Provide a valid inline pipeline config so we get past the pipeline step
-	t.Setenv("SLIPPY_PIPELINE_CONFIG", `{"version":"1.0","name":"test","steps":[{"name":"build","description":"build"}]}`)
+	t.Setenv(
+		"SLIPPY_PIPELINE_CONFIG",
+		`{"version":"1.0","name":"test","steps":[{"name":"build","description":"build"}]}`,
+	)
 
 	// config.Load() and pipeline config succeed, but ClickhouseLoadConfig() will fail
 	// because CLICKHOUSE_HOSTNAME is required

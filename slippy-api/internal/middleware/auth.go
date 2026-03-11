@@ -3,6 +3,7 @@ package middleware
 import (
 	"crypto/subtle"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 
@@ -62,8 +63,10 @@ func NewAPIKeyAuth(apiKey string) func(ctx huma.Context, next func(huma.Context)
 func writeError(ctx huma.Context, status int, msg string) {
 	ctx.SetStatus(status)
 	ctx.SetHeader("Content-Type", "application/json")
-	body := fmt.Sprintf(`{"status":%d,"title":"%s"}`, status, msg)
-	_, _ = ctx.BodyWriter().Write([]byte(body))
+	body := fmt.Sprintf(`{"status":%d,"title":%q}`, status, msg)
+	if _, writeErr := ctx.BodyWriter().Write([]byte(body)); writeErr != nil {
+		log.Printf("warning: failed to write error response: %v", writeErr)
+	}
 }
 
 // extractBearerToken extracts the token from an "Authorization: Bearer <token>" header.

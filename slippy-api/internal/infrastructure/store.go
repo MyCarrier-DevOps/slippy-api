@@ -76,7 +76,7 @@ func (a *SlipStoreAdapter) FindByCommits(
 	ctx context.Context,
 	repository string,
 	commits []string,
-) (*domain.Slip, string, error) {
+) (foundSlip *domain.Slip, matchedCommit string, err error) {
 	ctx, span := otel.Tracer(storeTracerName).Start(ctx, "clickhouse.FindByCommits",
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(

@@ -123,7 +123,10 @@ func (b *BuildInfoReader) ResolveImageTags(ctx context.Context, correlationID st
 
 // queryBuildScope queries ci.repoproperties for the build_scope of a repository.
 // Returns "all" or "modified". Falls back to "all" if no row is found.
-func (b *BuildInfoReader) queryBuildScope(ctx context.Context, org, repoName string) (string, error) {
+func (b *BuildInfoReader) queryBuildScope(
+	ctx context.Context,
+	org, repoName string,
+) (scope string, err error) {
 	query := `SELECT build_scope FROM ci.repoproperties
 		WHERE repository ILIKE ?
 		AND organization = ?
@@ -133,12 +136,16 @@ func (b *BuildInfoReader) queryBuildScope(ctx context.Context, org, repoName str
 	if err != nil {
 		return "", fmt.Errorf("failed to query ci.repoproperties: %w", err)
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); err == nil && closeErr != nil {
+			err = fmt.Errorf("failed to close rows: %w", closeErr)
+		}
+	}()
 
 	if rows.Next() {
 		var buildScope string
-		if err := rows.Scan(&buildScope); err != nil {
-			return "", fmt.Errorf("failed to scan build_scope: %w", err)
+		if scanErr := rows.Scan(&buildScope); scanErr != nil {
+			return "", fmt.Errorf("failed to scan build_scope: %w", scanErr)
 		}
 		// Validate the value; default to "all" for unknown values.
 		if buildScope != domain.BuildScopeAll && buildScope != domain.BuildScopeModified {
@@ -147,17 +154,20 @@ func (b *BuildInfoReader) queryBuildScope(ctx context.Context, org, repoName str
 		return buildScope, nil
 	}
 
-	if err := rows.Err(); err != nil {
-		return "", fmt.Errorf("error iterating ci.repoproperties rows: %w", err)
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return "", fmt.Errorf("error iterating ci.repoproperties rows: %w", rowsErr)
 	}
 
 	// No row found — default to "all" (safest assumption).
 	return domain.BuildScopeAll, nil
 }
 
-// queryBuildInfo queries ci.buildinfo by CorrelationId and returns a map of
-// component → ImageTag for all rows with BuildStatus = 'OK'.
-func (b *BuildInfoReader) queryBuildInfo(ctx context.Context, correlationID string) (map[string]string, error) {
+// queryBuildInfo queries ci.buildinfo by CorrelationId and returns
+// a map of component → ImageTag for all rows with BuildStatus = 'OK'.
+func (b *BuildInfoReader) queryBuildInfo(
+	ctx context.Context,
+	correlationID string,
+) (tags map[string]string, err error) {
 	// Use ROW_NUMBER to get the latest tag per component (same pattern as
 	// offload-generator's ClickHouseImageTagResolver).
 	query := `SELECT Component, ImageTag FROM (
@@ -171,26 +181,30 @@ func (b *BuildInfoReader) queryBuildInfo(ctx context.Context, correlationID stri
 	if err != nil {
 		return nil, fmt.Errorf("failed to query ci.buildinfo: %w", err)
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); err == nil && closeErr != nil {
+			err = fmt.Errorf("failed to close rows: %w", closeErr)
+		}
+	}()
 
-	tags := make(map[string]string)
+	result := make(map[string]string)
 	for rows.Next() {
 		var component, imageTag string
-		if err := rows.Scan(&component, &imageTag); err != nil {
-			return nil, fmt.Errorf("failed to scan ci.buildinfo row: %w", err)
+		if scanErr := rows.Scan(&component, &imageTag); scanErr != nil {
+			return nil, fmt.Errorf("failed to scan ci.buildinfo row: %w", scanErr)
 		}
-		tags[component] = imageTag
+		result[component] = imageTag
 	}
 
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating ci.buildinfo rows: %w", err)
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, fmt.Errorf("error iterating ci.buildinfo rows: %w", rowsErr)
 	}
 
-	if len(tags) == 0 {
+	if len(result) == 0 {
 		return nil, errNoBuildInfoRows
 	}
 
-	return tags, nil
+	return result, nil
 }
 
 // computeSlipTag computes the image tag from a slip's creation date and commit SHA.
@@ -209,7 +223,7 @@ func computeSlipTag(slip *domain.Slip) string {
 }
 
 // parseOwnerRepo splits a "owner/repo" string into its two components.
-func parseOwnerRepo(repository string) (string, string, error) {
+func parseOwnerRepo(repository string) (org, repo string, err error) {
 	parts := strings.SplitN(repository, "/", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return "", "", fmt.Errorf("expected 'owner/repo' format, got %q", repository)

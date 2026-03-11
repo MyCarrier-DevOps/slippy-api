@@ -24,7 +24,10 @@ type mockImageTagReader struct {
 	resolveImageTagsFn func(ctx context.Context, correlationID string) (*domain.ImageTagResult, error)
 }
 
-func (m *mockImageTagReader) ResolveImageTags(ctx context.Context, correlationID string) (*domain.ImageTagResult, error) {
+func (m *mockImageTagReader) ResolveImageTags(
+	ctx context.Context,
+	correlationID string,
+) (*domain.ImageTagResult, error) {
 	return m.resolveImageTagsFn(ctx, correlationID)
 }
 
