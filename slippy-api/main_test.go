@@ -244,6 +244,8 @@ func clearRunEnv(t *testing.T) {
 		"SLIPPY_API_KEY", "PORT",
 		"DRAGONFLY_HOST", "DRAGONFLY_PORT", "DRAGONFLY_PASSWORD",
 		"CACHE_TTL",
+		"SLIPPY_GITHUB_APP_ID", "SLIPPY_GITHUB_APP_PRIVATE_KEY",
+		"SLIPPY_GITHUB_ENTERPRISE_URL", "SLIPPY_ANCESTRY_DEPTH",
 		"CLICKHOUSE_HOSTNAME", "CLICKHOUSE_PORT", "CLICKHOUSE_USERNAME",
 		"CLICKHOUSE_PASSWORD", "CLICKHOUSE_DATABASE", "CLICKHOUSE_SKIP_VERIFY",
 		"SLIPPY_PIPELINE_CONFIG",
@@ -264,6 +266,8 @@ func TestRun_MissingAPIKey(t *testing.T) {
 func TestRun_MissingPipelineConfig(t *testing.T) {
 	clearRunEnv(t)
 	t.Setenv("SLIPPY_API_KEY", "test-key")
+	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
+	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
 
 	// config.Load() succeeds, but LoadPipelineConfig() will fail
 	// because SLIPPY_PIPELINE_CONFIG is not set
@@ -275,6 +279,8 @@ func TestRun_MissingPipelineConfig(t *testing.T) {
 func TestRun_MissingClickhouseConfig(t *testing.T) {
 	clearRunEnv(t)
 	t.Setenv("SLIPPY_API_KEY", "test-key")
+	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
+	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
 	// Provide a valid inline pipeline config so we get past the pipeline step
 	t.Setenv(
 		"SLIPPY_PIPELINE_CONFIG",

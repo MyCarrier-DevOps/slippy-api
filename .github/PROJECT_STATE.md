@@ -1,11 +1,11 @@
 # Project State — Slippy Application
 
-> **Last Updated:** 2026-03-10
-> **Status:** CI job logs endpoint implemented; all DA review fixes committed
+> **Last Updated:** 2026-03-11
+> **Status:** Fork-aware decorator removed; ancestry resolution active on all commit-based lookups
 
 ## Overview
 
-Read-only API for CI/CD routing slips. Provides endpoints to query routing slips by correlation ID, commit SHA, and repository. Backed by ClickHouse with optional Dragonfly/Redis caching and OpenTelemetry instrumentation.
+Read-only API for CI/CD routing slips. Provides endpoints to query routing slips by correlation ID, commit SHA, and repository. Backed by ClickHouse with optional Dragonfly/Redis caching and OpenTelemetry instrumentation. Supports GitHub-based commit ancestry resolution when a commit doesn't have a routing slip.
 
 ## Implemented Systems
 
@@ -20,7 +20,7 @@ Read-only API for CI/CD routing slips. Provides endpoints to query routing slips
 
 ### Infrastructure (internal/infrastructure)
 - **SlipStoreAdapter** — Adapts upstream `slippy.SlipStore` to read-only `domain.SlipReader`
-- **ForkAwareSlipReader** — Decorator that handles forked repository commit lookups
+- **SlipResolverAdapter** — Decorator that delegates all commit-based lookups (`LoadByCommit`, `FindByCommits`, `FindAllByCommits`) to `slippy.Client.ResolveSlip()` for ancestry resolution. Direct ClickHouse lookup is tried first; on `ErrSlipNotFound`, each commit is resolved via the library's ancestry walker.
 - **CachedSlipReader** — Dragonfly/Redis caching decorator (passthrough, cache logic planned)
 - **BuildInfoReader** — Resolves per-component image tags from ClickHouse ci.buildinfo
 - **CIJobLogStore** — Queries `observability.ciJob` with cursor pagination, per-column filtering, composite cursor (`timestamp|cityHash64` tiebreaker)
@@ -38,6 +38,40 @@ Read-only API for CI/CD routing slips. Provides endpoints to query routing slips
 - Environment variable-based config (`config/config.go`)
 
 ## Recent Changes
+
+### 2026-03-11: Removed ForkAwareSlipReader, Ancestry on All Commit Lookups
+**Problem:** `ForkAwareSlipReader` intercepted `ErrSlipNotFound` and attempted cross-repo resolution via a ClickHouse commit-SHA-only query. This was unnecessary — routing slips already store the correct repository name — and it actively interfered with ancestry resolution on the `FindByCommits` path (returning 404 instead of letting ancestry resolve).
+
+**Solution:**
+1. Deleted `fork_aware.go` and `fork_aware_test.go` entirely
+2. Extended `SlipResolverAdapter` to perform ancestry resolution on `FindByCommits` and `FindAllByCommits` (previously passthroughs)
+3. Simplified decorator chain: `SlipStoreAdapter` → `SlipResolverAdapter` → `CachedSlipReader`
+4. `LoadByCommit` now returns `ErrSlipNotFound` directly when ancestry fails (no fallback to reader chain)
+
+**How `FindByCommits` ancestry works:**
+- Direct ClickHouse lookup first via `reader.FindByCommits()`
+- On `ErrSlipNotFound`, iterates each commit calling `resolver.ResolveSlip()` (ancestry + image tag fallback)
+- Returns the first resolved slip with the input commit as `matched_commit`
+- Non-not-found errors short-circuit immediately
+
+**Files changed:**
+- Deleted: `internal/infrastructure/fork_aware.go`, `internal/infrastructure/fork_aware_test.go`
+- `internal/infrastructure/ancestry.go` — `FindByCommits` and `FindAllByCommits` now use ancestry fallback
+- `internal/infrastructure/ancestry_test.go` — 18 tests (100% coverage on ancestry.go), mock reader moved here
+- `main.go` — Removed fork-aware wiring, `SlipResolverAdapter` wraps `adapter` directly
+
+**Verified end-to-end:** `POST /slips/find-by-commits` with commit `e7b8469f` now resolves via ancestry to ancestor `6e81828` (correlation ID `7f6258ff`).
+
+### 2026-03-11: GitHub Env Vars Required
+`SLIPPY_GITHUB_APP_ID` and `SLIPPY_GITHUB_APP_PRIVATE_KEY` are now required — the server refuses to start without them. `GitHubEnabled()` removed from config.
+
+**Environment variables (required):**
+- `SLIPPY_GITHUB_APP_ID` — GitHub App ID
+- `SLIPPY_GITHUB_APP_PRIVATE_KEY` — PEM-encoded private key or file path
+
+**Environment variables (optional):**
+- `SLIPPY_GITHUB_ENTERPRISE_URL` — GitHub Enterprise base URL
+- `SLIPPY_ANCESTRY_DEPTH` — How many commits to walk (default: 25)
 
 ### 2026-03-10: CI Job Logs Endpoint
 **Feature:** Added `GET /logs/{correlationID}` with:
@@ -74,15 +108,17 @@ Added `ForkAwareSlipReader` decorator that resolves forked repository commit loo
 
 ## Current Focus
 
-All planned work complete. Branch `feat/log-search` ready for review.
+Ancestry resolution active on all commit-based lookup paths. Decorator chain: `SlipStoreAdapter` → `SlipResolverAdapter` → `CachedSlipReader`. Ready for PR review and merge.
 
 ## Architectural Decisions
 
-- **Decorator pattern**: Fork awareness, caching, and store each in separate decorators maintaining single-responsibility
+- **Decorator pattern**: Ancestry resolution, caching, and store each in separate decorators maintaining single-responsibility
+- **Ancestry resolution**: Delegates to `slippy.Client.ResolveSlip()` via `SlipResolverAdapter`. All commit-based lookups (`LoadByCommit`, `FindByCommits`, `FindAllByCommits`) try direct ClickHouse first, then fall back to ancestry walking. Resolution logic is maintained in the `slippy` library, not reimplemented locally.
+- **GitHub App auth**: Uses `ghinstallation/v2` for JWT-based GitHub App authentication with per-org installation caching (handled by `goLibMyCarrier/github.GraphQLClient`)
 - **Composite cursor pagination**: `timestamp|cityHash64(row_data)` prevents data loss when multiple rows share the same nanosecond timestamp
 - **LIMIT n+1 peek**: Request one extra row to determine if a next page exists without a separate COUNT query
 - **Named parameters in ClickHouse**: `{name:Type}` syntax for dynamic filter injection
-- **Commit SHA uniqueness**: Full 40-char hex SHAs are globally unique, safe for cross-repo resolution
+- **No fork-aware decorator**: Routing slips store the correct repository name; cross-repo fallback was unnecessary and interfered with ancestry resolution
 
 ## Technical Debt / Known Issues
 

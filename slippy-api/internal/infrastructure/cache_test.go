@@ -196,5 +196,3 @@ func TestCachedSlipReader_FindAllByCommits_EmptyResult(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, results)
 }
-
-

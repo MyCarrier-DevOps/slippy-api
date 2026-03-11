@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse"
+	"github.com/MyCarrier-DevOps/goLibMyCarrier/logger"
 	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
 
 	"github.com/MyCarrier-DevOps/slippy-api/internal/config"
@@ -147,9 +148,13 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("clickhouse config: %w", err)
 	}
+	// slipDatabase is the ClickHouse database containing routing_slips.
+	const slipDatabase = "ci"
+
 	store, err := slippy.NewClickHouseStoreFromConfig(chCfg, slippy.ClickHouseStoreOptions{
 		SkipMigrations: true, // read-only API — no schema changes
 		PipelineConfig: pipelineCfg,
+		Database:       slipDatabase,
 	})
 	if err != nil {
 		return fmt.Errorf("clickhouse store: %w", err)
@@ -164,12 +169,26 @@ func run() error {
 	// Adapt the read+write store to our read-only interface.
 	adapter := infrastructure.NewSlipStoreAdapter(store)
 
-	// Fork-aware decorator: falls back to cross-repo commit lookup
-	// when the caller provides a fork name but the slip is stored under the parent.
-	forkAware := infrastructure.NewForkAwareSlipReader(adapter, store.Session(), chCfg.ChDatabase)
+	// --- GitHub ancestry resolution ---
+	// When a commit doesn't have a routing slip, walk backwards through commit
+	// history via the GitHub GraphQL API to find an ancestor that does.
+	ghCfg := slippy.GitHubConfig{
+		AppID:         cfg.GitHubAppID,
+		PrivateKey:    cfg.GitHubPrivateKey,
+		EnterpriseURL: cfg.GitHubEnterpriseURL,
+	}
+	ghClient, ghErr := slippy.NewGitHubClient(ghCfg, logger.NewStdLogger(false))
+	if ghErr != nil {
+		return fmt.Errorf("github client: %w", ghErr)
+	}
+	slippyClient := slippy.NewClientWithDependencies(store, ghClient, slippy.Config{
+		AncestryDepth: cfg.AncestryDepth,
+	})
+	slipReader := infrastructure.NewSlipResolverAdapter(slippyClient, adapter)
+	log.Printf("github ancestry resolution enabled (depth=%d)", cfg.AncestryDepth)
 
 	// --- Optional Dragonfly/Redis cache ---
-	reader := connectCache(cfg, forkAware, redisDial)
+	reader := connectCache(cfg, slipReader, redisDial)
 
 	// --- BuildInfo reader for image tag resolution ---
 	// Uses the same ClickHouse session as the slip store to query ci.buildinfo
