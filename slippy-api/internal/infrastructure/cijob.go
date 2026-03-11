@@ -2,6 +2,7 @@ package infrastructure
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -73,6 +74,16 @@ func (s *CIJobLogStore) QueryLogs(
 	ctx context.Context,
 	q *domain.CIJobLogQuery,
 ) (result *domain.CIJobLogResult, err error) {
+	if q == nil {
+		return nil, errors.New("query must not be nil")
+	}
+	if q.CorrelationID == "" {
+		return nil, errors.New("correlation ID is required")
+	}
+	if q.Limit < 1 {
+		return nil, errors.New("limit must be at least 1")
+	}
+
 	ctx, span := otel.Tracer(cijobTracerName).Start(ctx, "cijob.QueryLogs",
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(

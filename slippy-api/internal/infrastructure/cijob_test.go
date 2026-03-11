@@ -469,3 +469,34 @@ func TestParseCursor_Invalid(t *testing.T) {
 		})
 	}
 }
+
+func TestQueryLogs_NilQuery(t *testing.T) {
+	store := NewCIJobLogStore(&clickhousetest.MockSession{})
+	result, err := store.QueryLogs(context.Background(), nil)
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "query must not be nil")
+}
+
+func TestQueryLogs_EmptyCorrelationID(t *testing.T) {
+	store := NewCIJobLogStore(&clickhousetest.MockSession{})
+	result, err := store.QueryLogs(context.Background(), &domain.CIJobLogQuery{
+		Limit: 10,
+		Sort:  domain.SortDesc,
+	})
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "correlation ID is required")
+}
+
+func TestQueryLogs_ZeroLimit(t *testing.T) {
+	store := NewCIJobLogStore(&clickhousetest.MockSession{})
+	result, err := store.QueryLogs(context.Background(), &domain.CIJobLogQuery{
+		CorrelationID: "corr-001",
+		Limit:         0,
+		Sort:          domain.SortDesc,
+	})
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "limit must be at least 1")
+}

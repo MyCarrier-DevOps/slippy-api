@@ -115,19 +115,26 @@ curl -H "Authorization: Bearer $API_KEY" \
 
 ```json
 {
-  "items": [
+  "logs": [
     {
       "timestamp": "2026-03-10T12:00:00.123456789Z",
-      "correlation_id": "abc-123-def",
       "level": "ERROR",
       "message": "build failed: exit code 1",
       "service": "ci-runner",
       "component": "build",
-      "...": "..."
+      "cluster": "prod-us-east",
+      "cloud": "aws",
+      "environment": "prod",
+      "namespace": "ci",
+      "ci_job_instance": "runner-01",
+      "ci_job_type": "deploy",
+      "build_repository": "MyCarrier-DevOps/my-service",
+      "build_image": "my-service:26.10.a1b2c3d",
+      "build_branch": "main"
     }
   ],
   "next_page": "/logs/abc-123-def?limit=50&sort=desc&level=ERROR&cursor=2026-03-10T12%3A00%3A00.123456789Z%7C12345678901234",
-  "count": 50
+  "count": 1
 }
 ```
 
