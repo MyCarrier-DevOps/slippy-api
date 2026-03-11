@@ -24,11 +24,9 @@ type SlipResolver interface {
 }
 
 // SlipResolverAdapter wraps the slippy library's ResolveSlip for ancestry-based
-// slip resolution. For LoadByCommit, it delegates to the library's commit ancestry
-// walker. For all other methods, it delegates to the underlying reader chain.
-//
-// When ancestry resolution fails with ErrSlipNotFound, the adapter falls back to
-// the reader chain (which includes fork-aware resolution) for repo name mismatches.
+// slip resolution. For commit-based lookups (LoadByCommit, FindByCommits,
+// FindAllByCommits), it first tries the direct reader, then falls back to the
+// library's commit ancestry walker when no slip is found.
 type SlipResolverAdapter struct {
 	resolver SlipResolver
 	reader   domain.SlipReader
@@ -36,7 +34,7 @@ type SlipResolverAdapter struct {
 
 // NewSlipResolverAdapter creates a decorator that resolves slips via the slippy
 // library's ResolveSlip (commit ancestry + image tag fallback). The reader is
-// used for passthrough methods and as a fork-aware fallback.
+// used for direct lookups before falling back to ancestry resolution.
 func NewSlipResolverAdapter(
 	resolver SlipResolver,
 	reader domain.SlipReader,
@@ -97,12 +95,10 @@ func (a *SlipResolverAdapter) LoadByCommit(
 		return nil, err
 	}
 
-	// Ancestry resolution didn't find a slip. Fall back to the reader chain
-	// which includes fork-aware resolution for repo name mismatches.
-	slog.InfoContext(ctx, "ancestry: falling back to reader chain",
+	slog.InfoContext(ctx, "ancestry: slip not found via resolver",
 		"repository", repository, "commit_sha", commitSHA)
-	span.SetStatus(codes.Unset, "falling back to reader chain")
-	return a.reader.LoadByCommit(ctx, repository, commitSHA)
+	span.SetStatus(codes.Unset, "not found")
+	return nil, slippy.ErrSlipNotFound
 }
 
 func (a *SlipResolverAdapter) FindByCommits(
@@ -110,7 +106,62 @@ func (a *SlipResolverAdapter) FindByCommits(
 	repository string,
 	commits []string,
 ) (foundSlip *domain.Slip, matchedCommit string, err error) {
-	return a.reader.FindByCommits(ctx, repository, commits)
+	// Try the direct ClickHouse lookup first.
+	slip, matched, err := a.reader.FindByCommits(ctx, repository, commits)
+	if err == nil {
+		return slip, matched, nil
+	}
+	if !errors.Is(err, slippy.ErrSlipNotFound) {
+		return nil, "", err
+	}
+
+	// Direct lookup found nothing — try ancestry resolution for each commit.
+	ctx, span := otel.Tracer(ancestryTracerName).Start(ctx, "ancestry.FindByCommits.resolve",
+		trace.WithAttributes(
+			attribute.String("slip.repository", repository),
+			attribute.Int("slip.commits_count", len(commits)),
+		),
+	)
+	defer span.End()
+
+	slog.InfoContext(ctx, "ancestry: resolving slip for commits via library",
+		"repository", repository, "commits_count", len(commits))
+
+	for _, commit := range commits {
+		result, resolveErr := a.resolver.ResolveSlip(ctx, slippy.ResolveOptions{
+			Repository: repository,
+			Ref:        commit,
+		})
+		if resolveErr == nil {
+			slog.InfoContext(ctx, "ancestry: resolved slip for commit",
+				"repository", repository,
+				"input_commit", commit,
+				"resolved_by", result.ResolvedBy,
+				"matched_commit", result.MatchedCommit,
+				"correlation_id", result.Slip.CorrelationID)
+			span.SetAttributes(
+				attribute.String("slip.resolved_by", result.ResolvedBy),
+				attribute.String("slip.matched_commit", result.MatchedCommit),
+				attribute.String("slip.input_commit", commit),
+				attribute.String("slip.correlation_id", result.Slip.CorrelationID),
+			)
+			span.SetStatus(codes.Ok, "resolved via "+result.ResolvedBy)
+			return result.Slip, commit, nil
+		}
+
+		if !errors.Is(resolveErr, slippy.ErrSlipNotFound) {
+			slog.WarnContext(ctx, "ancestry: resolver error for commit",
+				"repository", repository, "commit", commit, "error", resolveErr)
+			span.RecordError(resolveErr)
+			span.SetStatus(codes.Error, "resolver error")
+			return nil, "", resolveErr
+		}
+	}
+
+	slog.InfoContext(ctx, "ancestry: no slip found for any commit",
+		"repository", repository, "commits_count", len(commits))
+	span.SetStatus(codes.Unset, "not found")
+	return nil, "", slippy.ErrSlipNotFound
 }
 
 func (a *SlipResolverAdapter) FindAllByCommits(
@@ -118,5 +169,52 @@ func (a *SlipResolverAdapter) FindAllByCommits(
 	repository string,
 	commits []string,
 ) ([]domain.SlipWithCommit, error) {
-	return a.reader.FindAllByCommits(ctx, repository, commits)
+	// Try the direct ClickHouse lookup first.
+	results, err := a.reader.FindAllByCommits(ctx, repository, commits)
+	if err != nil {
+		return nil, err
+	}
+	if len(results) > 0 {
+		return results, nil
+	}
+
+	// Direct lookup found nothing — try ancestry resolution for each commit.
+	ctx, span := otel.Tracer(ancestryTracerName).Start(ctx, "ancestry.FindAllByCommits.resolve",
+		trace.WithAttributes(
+			attribute.String("slip.repository", repository),
+			attribute.Int("slip.commits_count", len(commits)),
+		),
+	)
+	defer span.End()
+
+	slog.InfoContext(ctx, "ancestry: resolving all slips for commits via library",
+		"repository", repository, "commits_count", len(commits))
+
+	var allResults []domain.SlipWithCommit
+	for _, commit := range commits {
+		result, resolveErr := a.resolver.ResolveSlip(ctx, slippy.ResolveOptions{
+			Repository: repository,
+			Ref:        commit,
+		})
+		if resolveErr == nil {
+			allResults = append(allResults, domain.SlipWithCommit{
+				Slip:          result.Slip,
+				MatchedCommit: commit,
+			})
+			continue
+		}
+		if !errors.Is(resolveErr, slippy.ErrSlipNotFound) {
+			slog.WarnContext(ctx, "ancestry: resolver error for commit",
+				"repository", repository, "commit", commit, "error", resolveErr)
+			span.RecordError(resolveErr)
+			span.SetStatus(codes.Error, "resolver error")
+			return nil, resolveErr
+		}
+	}
+
+	slog.InfoContext(ctx, "ancestry: resolved slips for find-all",
+		"repository", repository, "results_count", len(allResults))
+	span.SetAttributes(attribute.Int("slip.results_count", len(allResults)))
+	span.SetStatus(codes.Ok, "resolved")
+	return allResults, nil
 }

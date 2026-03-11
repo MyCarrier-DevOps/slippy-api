@@ -149,8 +149,6 @@ func run() error {
 		return fmt.Errorf("clickhouse config: %w", err)
 	}
 	// slipDatabase is the ClickHouse database containing routing_slips.
-	// The upstream slippy library defaults to "ci" when Database is empty;
-	// we set it explicitly so the fork-aware decorator queries the same database.
 	const slipDatabase = "ci"
 
 	store, err := slippy.NewClickHouseStoreFromConfig(chCfg, slippy.ClickHouseStoreOptions{
@@ -171,31 +169,23 @@ func run() error {
 	// Adapt the read+write store to our read-only interface.
 	adapter := infrastructure.NewSlipStoreAdapter(store)
 
-	// Fork-aware decorator: falls back to cross-repo commit lookup
-	// when the caller provides a fork name but the slip is stored under the parent.
-	forkAware := infrastructure.NewForkAwareSlipReader(adapter, store.Session(), slipDatabase)
-
-	// --- Optional GitHub ancestry resolution ---
+	// --- GitHub ancestry resolution ---
 	// When a commit doesn't have a routing slip, walk backwards through commit
 	// history via the GitHub GraphQL API to find an ancestor that does.
-	var slipReader domain.SlipReader = forkAware
-	if cfg.GitHubEnabled() {
-		ghCfg := slippy.GitHubConfig{
-			AppID:         cfg.GitHubAppID,
-			PrivateKey:    cfg.GitHubPrivateKey,
-			EnterpriseURL: cfg.GitHubEnterpriseURL,
-		}
-		ghClient, ghErr := slippy.NewGitHubClient(ghCfg, logger.NewStdLogger(false))
-		if ghErr != nil {
-			log.Printf("warning: github client creation failed, ancestry resolution disabled: %v", ghErr)
-		} else {
-			slippyClient := slippy.NewClientWithDependencies(store, ghClient, slippy.Config{
-				AncestryDepth: cfg.AncestryDepth,
-			})
-			slipReader = infrastructure.NewSlipResolverAdapter(slippyClient, forkAware)
-			log.Printf("github ancestry resolution enabled (depth=%d)", cfg.AncestryDepth)
-		}
+	ghCfg := slippy.GitHubConfig{
+		AppID:         cfg.GitHubAppID,
+		PrivateKey:    cfg.GitHubPrivateKey,
+		EnterpriseURL: cfg.GitHubEnterpriseURL,
 	}
+	ghClient, ghErr := slippy.NewGitHubClient(ghCfg, logger.NewStdLogger(false))
+	if ghErr != nil {
+		return fmt.Errorf("github client: %w", ghErr)
+	}
+	slippyClient := slippy.NewClientWithDependencies(store, ghClient, slippy.Config{
+		AncestryDepth: cfg.AncestryDepth,
+	})
+	slipReader := infrastructure.NewSlipResolverAdapter(slippyClient, adapter)
+	log.Printf("github ancestry resolution enabled (depth=%d)", cfg.AncestryDepth)
 
 	// --- Optional Dragonfly/Redis cache ---
 	reader := connectCache(cfg, slipReader, redisDial)

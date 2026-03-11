@@ -43,10 +43,9 @@ type Config struct {
 }
 
 // Load reads configuration from environment variables.
-// Required: SLIPPY_API_KEY
+// Required: SLIPPY_API_KEY, SLIPPY_GITHUB_APP_ID, SLIPPY_GITHUB_APP_PRIVATE_KEY
 // Optional: PORT, DRAGONFLY_HOST, DRAGONFLY_PORT, DRAGONFLY_PASSWORD, CACHE_TTL,
 //
-//	SLIPPY_GITHUB_APP_ID, SLIPPY_GITHUB_APP_PRIVATE_KEY,
 //	SLIPPY_GITHUB_ENTERPRISE_URL, SLIPPY_ANCESTRY_DEPTH
 func Load() (*Config, error) {
 	cfg := &Config{
@@ -97,8 +96,10 @@ func Load() (*Config, error) {
 		cfg.CacheTTL = ttl
 	}
 
-	// Optional: SLIPPY_GITHUB_APP_ID
-	if v := os.Getenv("SLIPPY_GITHUB_APP_ID"); v != "" {
+	// Required: SLIPPY_GITHUB_APP_ID
+	if v := os.Getenv("SLIPPY_GITHUB_APP_ID"); v == "" {
+		return nil, fmt.Errorf("SLIPPY_GITHUB_APP_ID is required")
+	} else {
 		id, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
 			return nil, fmt.Errorf("SLIPPY_GITHUB_APP_ID must be a valid integer: %w", err)
@@ -106,8 +107,11 @@ func Load() (*Config, error) {
 		cfg.GitHubAppID = id
 	}
 
-	// Optional: SLIPPY_GITHUB_APP_PRIVATE_KEY
+	// Required: SLIPPY_GITHUB_APP_PRIVATE_KEY
 	cfg.GitHubPrivateKey = os.Getenv("SLIPPY_GITHUB_APP_PRIVATE_KEY")
+	if cfg.GitHubPrivateKey == "" {
+		return nil, fmt.Errorf("SLIPPY_GITHUB_APP_PRIVATE_KEY is required")
+	}
 
 	// Optional: SLIPPY_GITHUB_ENTERPRISE_URL
 	cfg.GitHubEnterpriseURL = os.Getenv("SLIPPY_GITHUB_ENTERPRISE_URL")
@@ -130,10 +134,4 @@ func Load() (*Config, error) {
 // CacheEnabled returns true if Dragonfly configuration is provided.
 func (c *Config) CacheEnabled() bool {
 	return c.DragonflyHost != ""
-}
-
-// GitHubEnabled returns true if GitHub App configuration is provided
-// for commit ancestry resolution.
-func (c *Config) GitHubEnabled() bool {
-	return c.GitHubAppID != 0 && c.GitHubPrivateKey != ""
 }

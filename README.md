@@ -28,7 +28,7 @@ The application follows Clean Architecture with clear dependency boundaries:
 | Layer | Package | Responsibility |
 |---|---|---|
 | **Domain** | `internal/domain` | `SlipReader` / `ImageTagReader` / `CIJobLogReader` interfaces, type aliases for upstream `Slip`/`SlipWithCommit` |
-| **Infrastructure** | `internal/infrastructure` | `SlipStoreAdapter` (read-only adapter), `ForkAwareSlipReader` (cross-repo fallback), `CachedSlipReader` (Dragonfly/Redis decorator), `BuildInfoReader` (image tag resolution), `CIJobLogStore` (CI job log queries) |
+| **Infrastructure** | `internal/infrastructure` | `SlipStoreAdapter` (read-only adapter), `SlipResolverAdapter` (ancestry resolution via `slippy.Client.ResolveSlip()`), `CachedSlipReader` (Dragonfly/Redis decorator), `BuildInfoReader` (image tag resolution), `CIJobLogStore` (CI job log queries) |
 | **Handler** | `internal/handler` | HTTP route registration, request/response types, error mapping |
 | **Middleware** | `internal/middleware` | Bearer token authentication with constant-time comparison |
 | **Config** | `internal/config` | Environment variable loading and validation |
@@ -169,6 +169,8 @@ All configuration is via environment variables. No config files, no Vault.
 |---|---|---|
 | `SLIPPY_API_KEY` | Bearer token for API authentication | `my-secret-key` |
 | `SLIPPY_PIPELINE_CONFIG` | Pipeline configuration (file path or inline JSON) | `/config/pipeline.json` |
+| `SLIPPY_GITHUB_APP_ID` | GitHub App ID for ancestry resolution | `2645252` |
+| `SLIPPY_GITHUB_APP_PRIVATE_KEY` | PEM-encoded private key or file path | `/config/github.pem` |
 | `CLICKHOUSE_HOSTNAME` | ClickHouse server hostname | `clickhouse.example.com` |
 | `CLICKHOUSE_USERNAME` | ClickHouse username | `slippy` |
 | `CLICKHOUSE_PASSWORD` | ClickHouse password | `***` |
@@ -179,6 +181,8 @@ All configuration is via environment variables. No config files, no Vault.
 | Variable | Description | Default |
 |---|---|---|
 | `PORT` | HTTP server listen port | `8080` |
+| `SLIPPY_GITHUB_ENTERPRISE_URL` | GitHub Enterprise base URL | _(github.com)_ |
+| `SLIPPY_ANCESTRY_DEPTH` | Max commits to walk for ancestry resolution | `25` |
 | `CLICKHOUSE_PORT` | ClickHouse port | `9440` |
 | `CLICKHOUSE_SKIP_VERIFY` | Skip TLS verification | `false` |
 | `DRAGONFLY_HOST` | Dragonfly/Redis host (enables caching when set) | _(disabled)_ |
@@ -242,8 +246,8 @@ slippy-api/                          # Repository root
         │   ├── cache_test.go
         │   ├── cijob.go             # CIJobLogStore (observability.ciJob queries)
         │   ├── cijob_test.go
-        │   ├── fork_aware.go        # ForkAwareSlipReader (cross-repo fallback)
-        │   ├── fork_aware_test.go
+        │   ├── ancestry.go          # SlipResolverAdapter (ancestry resolution)
+        │   ├── ancestry_test.go
         │   ├── store.go             # SlipStoreAdapter (read-only adapter)
         │   └── store_test.go
         ├── middleware/
@@ -326,7 +330,7 @@ docker run -p 8080:8080 \
 ## Key Design Decisions
 
 - **Read-only**: The API only exposes read operations. The `SlipStoreAdapter` enforces this by adapting the upstream read+write `SlipStore` to the narrow `SlipReader` interface.
-- **Fork-aware commit lookups**: `ForkAwareSlipReader` decorator handles forked repository queries by falling back to a commit-SHA-only lookup when the initial repository-scoped query returns `ErrSlipNotFound`, then retrying with the resolved repository name.
+- **Ancestry resolution**: `SlipResolverAdapter` delegates all commit-based lookups to `slippy.Client.ResolveSlip()`. When a direct ClickHouse lookup returns `ErrSlipNotFound`, the adapter walks backwards through commit history via the GitHub GraphQL API to find an ancestor with a routing slip.
 - **Cursor pagination with composite cursor**: The `/logs` endpoint uses a `timestamp|cityHash64` composite cursor to guarantee no data loss when multiple rows share the same nanosecond timestamp. Uses `LIMIT n+1` peek to determine next-page existence without a separate COUNT query.
 - **huma v2 + humago**: Code-first API framework with auto-generated OpenAPI 3.1 spec. Uses Go's standard library `net/http.ServeMux` via the humago adapter — no Gin, no Echo.
 - **Bearer auth with constant-time comparison**: Prevents timing attacks. Operations without a `security` declaration (e.g., `/health`) pass through unauthenticated.
