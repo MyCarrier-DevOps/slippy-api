@@ -4,9 +4,8 @@ go 1.26
 
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.42.0
-	github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse v1.3.63
-	github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.63
-	github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.63
+	github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse v1.3.64
+	github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.64
 	github.com/danielgtaylor/huma/v2 v2.36.0
 	github.com/redis/go-redis/v9 v9.7.3
 	github.com/stretchr/testify v1.11.1
@@ -27,8 +26,9 @@ require (
 	github.com/Azure/go-ansiterm v0.0.0-20210617225240-d185dfc1b5a1 // indirect
 	github.com/ClickHouse/ch-go v0.70.0 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
-	github.com/MyCarrier-DevOps/goLibMyCarrier/clickhousemigrator v1.3.57 // indirect
-	github.com/MyCarrier-DevOps/goLibMyCarrier/github v1.3.57 // indirect
+	github.com/MyCarrier-DevOps/goLibMyCarrier/clickhousemigrator v1.3.64 // indirect
+	github.com/MyCarrier-DevOps/goLibMyCarrier/github v1.3.64 // indirect
+	github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.64 // indirect
 	github.com/ProtonMail/go-crypto v1.3.0 // indirect
 	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/bradleyfalzon/ghinstallation/v2 v2.17.0 // indirect
@@ -65,7 +65,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/google/go-github/v75 v75.0.0 // indirect
-	github.com/google/go-github/v79 v79.0.0 // indirect
+	github.com/google/go-github/v82 v82.0.0 // indirect
 	github.com/google/go-querystring v1.2.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.7 // indirect

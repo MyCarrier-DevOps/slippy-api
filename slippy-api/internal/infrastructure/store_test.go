@@ -113,6 +113,14 @@ func (m *mockSlipStore) AppendHistory(ctx context.Context, id string, entry slip
 	return nil
 }
 
+func (m *mockSlipStore) InsertAncestryLink(_ context.Context, _ *slippy.Slip, _ slippy.AncestryEntry) error {
+	return nil
+}
+
+func (m *mockSlipStore) ResolveAncestry(_ context.Context, _, _, _ string, _ int) ([]slippy.AncestryEntry, error) {
+	return nil, nil
+}
+
 // --- Store Adapter Tests ---
 
 func TestNewSlipStoreAdapter(t *testing.T) {
