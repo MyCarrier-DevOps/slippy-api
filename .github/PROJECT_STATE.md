@@ -1,7 +1,7 @@
 # Project State — Slippy Application
 
-> **Last Updated:** 2026-03-11
-> **Status:** Fork-aware decorator removed; ancestry resolution active on all commit-based lookups
+> **Last Updated:** 2026-03-16
+> **Status:** CLICKHOUSE_DATABASE now respected for routing slip store database; ancestry resolution active on all commit-based lookups
 
 ## Overview
 
@@ -38,6 +38,22 @@ Read-only API for CI/CD routing slips. Provides endpoints to query routing slips
 - Environment variable-based config (`config/config.go`)
 
 ## Recent Changes
+
+### 2026-03-16: `CLICKHOUSE_DATABASE` Is Now Honored by slippy-api
+**Problem:** `main.go` hardcoded `const slipDatabase = "ci"` when constructing `slippy.NewClickHouseStoreFromConfig(...)`, so runtime `CLICKHOUSE_DATABASE` had no effect for routing slip reads.
+
+**Solution:**
+1. Added `SlipDatabase` to `internal/config.Config` with default `"ci"`
+2. Loaded optional `CLICKHOUSE_DATABASE` in `config.Load()` into `cfg.SlipDatabase`
+3. Replaced hardcoded `const slipDatabase = "ci"` in `main.go` with `cfg.SlipDatabase`
+4. Extended `internal/config/config_test.go` to assert default `ci` and override behavior (`ci_test`)
+
+**Files changed:**
+- `slippy-api/internal/config/config.go`
+- `slippy-api/internal/config/config_test.go`
+- `slippy-api/main.go`
+
+**Validation:** `go test ./...` passed in `slippy-api/slippy-api`.
 
 ### 2026-03-11: Removed ForkAwareSlipReader, Ancestry on All Commit Lookups
 **Problem:** `ForkAwareSlipReader` intercepted `ErrSlipNotFound` and attempted cross-repo resolution via a ClickHouse commit-SHA-only query. This was unnecessary — routing slips already store the correct repository name — and it actively interfered with ancestry resolution on the `FindByCommits` path (returning 404 instead of letting ancestry resolve).

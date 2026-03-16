@@ -40,19 +40,23 @@ type Config struct {
 
 	// AncestryDepth is how many commits to walk when resolving ancestry (default: 25)
 	AncestryDepth int
+
+	// SlipDatabase is the ClickHouse database containing routing_slips (default: "ci")
+	SlipDatabase string
 }
 
 // Load reads configuration from environment variables.
 // Required: SLIPPY_API_KEY, SLIPPY_GITHUB_APP_ID, SLIPPY_GITHUB_APP_PRIVATE_KEY
 // Optional: PORT, DRAGONFLY_HOST, DRAGONFLY_PORT, DRAGONFLY_PASSWORD, CACHE_TTL,
 //
-//	SLIPPY_GITHUB_ENTERPRISE_URL, SLIPPY_ANCESTRY_DEPTH
+//	SLIPPY_GITHUB_ENTERPRISE_URL, SLIPPY_ANCESTRY_DEPTH, CLICKHOUSE_DATABASE
 func Load() (*Config, error) {
 	cfg := &Config{
 		Port:          8080,
 		DragonflyPort: 6379,
 		CacheTTL:      10 * time.Minute,
 		AncestryDepth: defaultAncestryDepth,
+		SlipDatabase:  "ci",
 	}
 
 	// Required
@@ -126,6 +130,11 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("SLIPPY_ANCESTRY_DEPTH must be at least 1")
 		}
 		cfg.AncestryDepth = depth
+	}
+
+	// Optional: CLICKHOUSE_DATABASE
+	if v := os.Getenv("CLICKHOUSE_DATABASE"); v != "" {
+		cfg.SlipDatabase = v
 	}
 
 	return cfg, nil

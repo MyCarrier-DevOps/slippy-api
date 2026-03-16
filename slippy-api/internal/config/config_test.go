@@ -18,6 +18,7 @@ func clearEnv(t *testing.T) {
 		"CACHE_TTL",
 		"SLIPPY_GITHUB_APP_ID", "SLIPPY_GITHUB_APP_PRIVATE_KEY",
 		"SLIPPY_GITHUB_ENTERPRISE_URL", "SLIPPY_ANCESTRY_DEPTH",
+		"CLICKHOUSE_DATABASE",
 	} {
 		t.Setenv(key, "")
 		os.Unsetenv(key)
@@ -53,6 +54,7 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, "test-pem", cfg.GitHubPrivateKey)
 	assert.Equal(t, "", cfg.GitHubEnterpriseURL)
 	assert.Equal(t, 25, cfg.AncestryDepth)
+	assert.Equal(t, "ci", cfg.SlipDatabase)
 }
 
 func TestLoad_AllValues(t *testing.T) {
@@ -65,6 +67,7 @@ func TestLoad_AllValues(t *testing.T) {
 	t.Setenv("CACHE_TTL", "5m")
 	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
 	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
+	t.Setenv("CLICKHOUSE_DATABASE", "ci_test")
 
 	cfg, err := Load()
 	require.NoError(t, err)
@@ -75,6 +78,7 @@ func TestLoad_AllValues(t *testing.T) {
 	assert.Equal(t, 6380, cfg.DragonflyPort)
 	assert.Equal(t, "dragon-pass", cfg.DragonflyPassword)
 	assert.Equal(t, 5*time.Minute, cfg.CacheTTL)
+	assert.Equal(t, "ci_test", cfg.SlipDatabase)
 }
 
 func TestLoad_InvalidPort(t *testing.T) {
