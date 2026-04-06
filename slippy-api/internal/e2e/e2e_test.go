@@ -102,10 +102,12 @@ func buildTestServer(apiKey string, reader domain.SlipReader, rdb redis.Cmdable,
 	// Wire cache decorator around the reader
 	cachedReader := infrastructure.NewCachedSlipReader(reader, rdb, cacheTTL)
 
-	// Wire routes
-	handler.RegisterHealthRoutes(api)
+	// Wire routes on both unversioned (legacy) and /v1 paths.
+	grp := huma.NewGroup(api, "", "/v1")
+
+	handler.RegisterHealthRoutes(grp)
 	h := handler.NewSlipHandler(cachedReader)
-	handler.RegisterRoutes(api, h)
+	handler.RegisterRoutes(grp, h)
 
 	return mux
 }

@@ -5,9 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
 )
 
 // Compile-time check: mockSlipStore must satisfy slippy.SlipStore.

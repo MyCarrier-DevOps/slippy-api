@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,6 +58,20 @@ func (s *stubSlipReader) FindByCommits(_ context.Context, _ string, _ []string) 
 
 func (s *stubSlipReader) FindAllByCommits(_ context.Context, _ string, _ []string) ([]domain.SlipWithCommit, error) {
 	return nil, errors.New("not implemented")
+}
+
+// --- Stub readers for optional handlers (used in spec generation) ---
+
+type stubImageTagReader struct{}
+
+func (s *stubImageTagReader) ResolveImageTags(_ context.Context, _ string) (*domain.ImageTagResult, error) {
+	return &domain.ImageTagResult{}, nil
+}
+
+type stubCIJobLogReader struct{}
+
+func (s *stubCIJobLogReader) QueryLogs(_ context.Context, _ *domain.CIJobLogQuery) (*domain.CIJobLogResult, error) {
+	return &domain.CIJobLogResult{}, nil
 }
 
 // --- buildHandler tests ---
@@ -128,6 +143,209 @@ func TestBuildHandler_OpenAPISpec(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "Slippy API", info["title"])
 	assert.Equal(t, "Read-only API for CI/CD routing slips", info["description"])
+}
+
+// --- v1 versioned endpoint tests ---
+
+func TestBuildHandler_V1HealthEndpoint(t *testing.T) {
+	cfg := &config.Config{APIKey: "test-key", Port: 8080}
+	reader := newStubSlipReader()
+
+	h := buildHandler(cfg, reader, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var body map[string]string
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&body))
+	assert.Equal(t, "ok", body["status"])
+}
+
+func TestBuildHandler_V1AuthRequired(t *testing.T) {
+	cfg := &config.Config{APIKey: "test-key", Port: 8080}
+	reader := newStubSlipReader()
+
+	h := buildHandler(cfg, reader, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/slips/test-corr-001", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+func TestBuildHandler_V1AuthSuccess(t *testing.T) {
+	cfg := &config.Config{APIKey: "test-key", Port: 8080}
+	reader := newStubSlipReader()
+
+	h := buildHandler(cfg, reader, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/slips/test-corr-001", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var slip domain.Slip
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&slip))
+	assert.Equal(t, "test-corr-001", slip.CorrelationID)
+}
+
+func TestBuildHandler_OpenAPISpecContainsV1Routes(t *testing.T) {
+	cfg := &config.Config{APIKey: "test-key", Port: 8080}
+	reader := newStubSlipReader()
+
+	h := buildHandler(cfg, reader, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var spec map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&spec))
+
+	paths, ok := spec["paths"].(map[string]any)
+	require.True(t, ok)
+
+	// Verify both unversioned (legacy) and v1 paths exist
+	assert.Contains(t, paths, "/health")
+	assert.Contains(t, paths, "/v1/health")
+	assert.Contains(t, paths, "/slips/{correlationID}")
+	assert.Contains(t, paths, "/v1/slips/{correlationID}")
+}
+
+// --- Spec generation (gated behind GENERATE_SPEC=1) ---
+
+func TestGenerateOpenAPISpec(t *testing.T) {
+	if os.Getenv("GENERATE_SPEC") == "" {
+		t.Skip("set GENERATE_SPEC=1 to regenerate OpenAPI spec files")
+	}
+
+	cfg := &config.Config{APIKey: "dummy", Port: 8080}
+	reader := newStubSlipReader()
+	h := buildHandler(cfg, reader, &stubImageTagReader{}, &stubCIJobLogReader{})
+
+	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// Pretty-print the JSON
+	var spec map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&spec))
+	formatted, err := json.MarshalIndent(spec, "", "  ")
+	require.NoError(t, err)
+
+	require.NoError(t, os.MkdirAll("api/v1", 0o755))
+	require.NoError(t, os.WriteFile("api/v1/openapi.json", formatted, 0o644))
+	t.Logf("wrote api/v1/openapi.json (%d bytes)", len(formatted))
+
+	// Also produce a v1-only, OpenAPI 3.0.3 compatible spec for client generation.
+	v1Spec := buildV1OnlySpec(t, spec)
+	v1Formatted, err := json.MarshalIndent(v1Spec, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile("api/v1/openapi-v1.json", v1Formatted, 0o644))
+	t.Logf("wrote api/v1/openapi-v1.json (%d bytes)", len(v1Formatted))
+}
+
+// buildV1OnlySpec filters the full spec to v1 paths only, strips the /v1 prefix,
+// cleans up v1- operation ID prefixes, removes the v1 tag, and downconverts
+// OpenAPI 3.1 nullable syntax to 3.0.3.
+func buildV1OnlySpec(t *testing.T, full map[string]any) map[string]any {
+	t.Helper()
+
+	// Deep-copy via JSON round-trip.
+	raw, err := json.Marshal(full)
+	require.NoError(t, err)
+	var spec map[string]any
+	require.NoError(t, json.Unmarshal(raw, &spec))
+
+	// Downgrade version.
+	spec["openapi"] = "3.0.3"
+
+	// Filter paths: keep only /v1/ prefixed, strip prefix, clean operation IDs.
+	oldPaths, _ := spec["paths"].(map[string]any)
+	newPaths := make(map[string]any)
+	for path, methods := range oldPaths {
+		if !strings.HasPrefix(path, "/v1") {
+			continue
+		}
+		stripped := strings.TrimPrefix(path, "/v1")
+		if stripped == "" {
+			stripped = "/"
+		}
+
+		// Clean operation IDs and remove v1 tag from each method.
+		methodMap, ok := methods.(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, opAny := range methodMap {
+			op, ok := opAny.(map[string]any)
+			if !ok {
+				continue
+			}
+			if id, ok := op["operationId"].(string); ok {
+				op["operationId"] = strings.TrimPrefix(id, "v1-")
+			}
+			if tags, ok := op["tags"].([]any); ok {
+				filtered := make([]any, 0, len(tags))
+				for _, tag := range tags {
+					if tag != "v1" {
+						filtered = append(filtered, tag)
+					}
+				}
+				if len(filtered) > 0 {
+					op["tags"] = filtered
+				} else {
+					delete(op, "tags")
+				}
+			}
+		}
+		newPaths[stripped] = methods
+	}
+	spec["paths"] = newPaths
+
+	// Downconvert 3.1 nullable types to 3.0 format throughout the spec.
+	downconvertNullable(spec)
+
+	return spec
+}
+
+// downconvertNullable recursively converts {"type": ["array", "null"]} to
+// {"type": "array", "nullable": true} for OpenAPI 3.0 compatibility.
+func downconvertNullable(v any) {
+	switch val := v.(type) {
+	case map[string]any:
+		if typeVal, ok := val["type"]; ok {
+			if arr, ok := typeVal.([]any); ok {
+				var nonNull string
+				hasNull := false
+				for _, item := range arr {
+					s, _ := item.(string)
+					if s == "null" {
+						hasNull = true
+					} else {
+						nonNull = s
+					}
+				}
+				if hasNull && nonNull != "" {
+					val["type"] = nonNull
+					val["nullable"] = true
+				}
+			}
+		}
+		for _, child := range val {
+			downconvertNullable(child)
+		}
+	case []any:
+		for _, item := range val {
+			downconvertNullable(item)
+		}
+	}
 }
 
 // --- connectCache tests ---

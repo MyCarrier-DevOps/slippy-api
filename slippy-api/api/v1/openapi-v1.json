@@ -1,0 +1,1031 @@
+{
+  "components": {
+    "schemas": {
+      "AncestryEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "branch": {
+            "type": "string"
+          },
+          "commit_sha": {
+            "type": "string"
+          },
+          "correlation_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "failed_step": {
+            "type": "string"
+          },
+          "repository": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "correlation_id",
+          "commit_sha",
+          "status",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "CIJobLog": {
+        "additionalProperties": false,
+        "properties": {
+          "build_branch": {
+            "type": "string"
+          },
+          "build_image": {
+            "type": "string"
+          },
+          "build_repository": {
+            "type": "string"
+          },
+          "ci_job_instance": {
+            "type": "string"
+          },
+          "ci_job_type": {
+            "type": "string"
+          },
+          "cloud": {
+            "type": "string"
+          },
+          "cluster": {
+            "type": "string"
+          },
+          "component": {
+            "type": "string"
+          },
+          "environment": {
+            "type": "string"
+          },
+          "level": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "timestamp": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "timestamp",
+          "level",
+          "service",
+          "component",
+          "cluster",
+          "cloud",
+          "environment",
+          "namespace",
+          "message",
+          "ci_job_instance",
+          "ci_job_type",
+          "build_repository",
+          "build_image",
+          "build_branch"
+        ],
+        "type": "object"
+      },
+      "ComponentStepData": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "completed_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "component": {
+            "type": "string"
+          },
+          "dockerfile_path": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "image_tag": {
+            "type": "string"
+          },
+          "started_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "component",
+          "status"
+        ],
+        "type": "object"
+      },
+      "ErrorDetail": {
+        "additionalProperties": false,
+        "properties": {
+          "location": {
+            "description": "Where the error occurred, e.g. 'body.items[3].tags' or 'path.thing-id'",
+            "type": "string"
+          },
+          "message": {
+            "description": "Error message text",
+            "type": "string"
+          },
+          "value": {
+            "description": "The value at the given location"
+          }
+        },
+        "type": "object"
+      },
+      "ErrorModel": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/ErrorModel.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "detail": {
+            "description": "A human-readable explanation specific to this occurrence of the problem.",
+            "examples": [
+              "Property foo is required but is missing."
+            ],
+            "type": "string"
+          },
+          "errors": {
+            "description": "Optional list of individual error details",
+            "items": {
+              "$ref": "#/components/schemas/ErrorDetail"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "instance": {
+            "description": "A URI reference that identifies the specific occurrence of the problem.",
+            "examples": [
+              "https://example.com/error-log/abc123"
+            ],
+            "format": "uri",
+            "type": "string"
+          },
+          "status": {
+            "description": "HTTP status code",
+            "examples": [
+              400
+            ],
+            "format": "int64",
+            "type": "integer"
+          },
+          "title": {
+            "description": "A short, human-readable summary of the problem type. This value should not change between occurrences of the error.",
+            "examples": [
+              "Bad Request"
+            ],
+            "type": "string"
+          },
+          "type": {
+            "default": "about:blank",
+            "description": "A URI reference to human-readable documentation for the error.",
+            "examples": [
+              "https://example.com/errors/example"
+            ],
+            "format": "uri",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "FindAllByCommitsItem": {
+        "additionalProperties": false,
+        "properties": {
+          "matched_commit": {
+            "type": "string"
+          },
+          "slip": {
+            "$ref": "#/components/schemas/Slip"
+          }
+        },
+        "required": [
+          "slip",
+          "matched_commit"
+        ],
+        "type": "object"
+      },
+      "FindByCommitsInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/FindByCommitsInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "commits": {
+            "description": "List of commit SHAs to search",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "repository": {
+            "description": "Full repository name (owner/repo)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository",
+          "commits"
+        ],
+        "type": "object"
+      },
+      "FindByCommitsOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/FindByCommitsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "matched_commit": {
+            "type": "string"
+          },
+          "slip": {
+            "$ref": "#/components/schemas/Slip"
+          }
+        },
+        "required": [
+          "slip",
+          "matched_commit"
+        ],
+        "type": "object"
+      },
+      "GetLogsOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/GetLogsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "count": {
+            "description": "Number of logs returned in this page",
+            "format": "int64",
+            "type": "integer"
+          },
+          "logs": {
+            "items": {
+              "$ref": "#/components/schemas/CIJobLog"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "next_page": {
+            "description": "URL path for the next page of results",
+            "type": "string"
+          }
+        },
+        "required": [
+          "logs",
+          "count"
+        ],
+        "type": "object"
+      },
+      "HealthOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/HealthOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "status": {
+            "description": "Service health status",
+            "examples": [
+              "ok"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "ImageTagResult": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/ImageTagResult.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "build_scope": {
+            "type": "string"
+          },
+          "slip_tag": {
+            "type": "string"
+          },
+          "tags": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "tags",
+          "build_scope",
+          "slip_tag"
+        ],
+        "type": "object"
+      },
+      "Slip": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/Slip.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "aggregates": {
+            "additionalProperties": {
+              "items": {
+                "$ref": "#/components/schemas/ComponentStepData"
+              },
+              "nullable": true,
+              "type": "array"
+            },
+            "type": "object"
+          },
+          "ancestry": {
+            "items": {
+              "$ref": "#/components/schemas/AncestryEntry"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "branch": {
+            "type": "string"
+          },
+          "commit_sha": {
+            "type": "string"
+          },
+          "correlation_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "promoted_to": {
+            "type": "string"
+          },
+          "repository": {
+            "type": "string"
+          },
+          "state_history": {
+            "items": {
+              "$ref": "#/components/schemas/StateHistoryEntry"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "status": {
+            "type": "string"
+          },
+          "steps": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/Step"
+            },
+            "type": "object"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "correlation_id",
+          "repository",
+          "branch",
+          "commit_sha",
+          "created_at",
+          "updated_at",
+          "status",
+          "steps",
+          "aggregates",
+          "state_history",
+          "ancestry"
+        ],
+        "type": "object"
+      },
+      "StateHistoryEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "component": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "step": {
+            "type": "string"
+          },
+          "timestamp": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "step",
+          "status",
+          "timestamp",
+          "actor"
+        ],
+        "type": "object"
+      },
+      "Step": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "completed_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "held_reason": {
+            "type": "string"
+          },
+          "started_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "apiKey": {
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "Read-only API for CI/CD routing slips",
+    "title": "Slippy API",
+    "version": "1.0.0"
+  },
+  "openapi": "3.0.3",
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "health-check",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Health check endpoint"
+      }
+    },
+    "/logs/{correlationID}": {
+      "get": {
+        "description": "Returns paginated CI job logs from observability.ciJob, filterable by any column. Use the next_page URL from the response to fetch subsequent pages.",
+        "operationId": "get-logs",
+        "parameters": [
+          {
+            "description": "Correlation ID to look up logs for",
+            "in": "path",
+            "name": "correlationID",
+            "required": true,
+            "schema": {
+              "description": "Correlation ID to look up logs for",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Page size",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "default": 100,
+              "description": "Page size",
+              "format": "int64",
+              "maximum": 1000,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Pagination cursor from previous response",
+            "explode": false,
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "description": "Pagination cursor from previous response",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Sort by timestamp",
+            "explode": false,
+            "in": "query",
+            "name": "sort",
+            "schema": {
+              "default": "desc",
+              "description": "Sort by timestamp",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by log level",
+            "explode": false,
+            "in": "query",
+            "name": "level",
+            "schema": {
+              "description": "Filter by log level",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by service name",
+            "explode": false,
+            "in": "query",
+            "name": "service",
+            "schema": {
+              "description": "Filter by service name",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by component name",
+            "explode": false,
+            "in": "query",
+            "name": "component",
+            "schema": {
+              "description": "Filter by component name",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by cluster",
+            "explode": false,
+            "in": "query",
+            "name": "cluster",
+            "schema": {
+              "description": "Filter by cluster",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by cloud provider",
+            "explode": false,
+            "in": "query",
+            "name": "cloud",
+            "schema": {
+              "description": "Filter by cloud provider",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by environment",
+            "explode": false,
+            "in": "query",
+            "name": "environment",
+            "schema": {
+              "description": "Filter by environment",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by namespace",
+            "explode": false,
+            "in": "query",
+            "name": "namespace",
+            "schema": {
+              "description": "Filter by namespace",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by exact message",
+            "explode": false,
+            "in": "query",
+            "name": "message",
+            "schema": {
+              "description": "Filter by exact message",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by CI job instance",
+            "explode": false,
+            "in": "query",
+            "name": "ci_job_instance",
+            "schema": {
+              "description": "Filter by CI job instance",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by CI job type",
+            "explode": false,
+            "in": "query",
+            "name": "ci_job_type",
+            "schema": {
+              "description": "Filter by CI job type",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by build repository",
+            "explode": false,
+            "in": "query",
+            "name": "build_repository",
+            "schema": {
+              "description": "Filter by build repository",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by build image",
+            "explode": false,
+            "in": "query",
+            "name": "build_image",
+            "schema": {
+              "description": "Filter by build image",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by build branch",
+            "explode": false,
+            "in": "query",
+            "name": "build_branch",
+            "schema": {
+              "description": "Filter by build branch",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetLogsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "summary": "Query CI job logs by correlation ID"
+      }
+    },
+    "/slips/by-commit/{owner}/{repo}/{commitSHA}": {
+      "get": {
+        "operationId": "get-slip-by-commit",
+        "parameters": [
+          {
+            "description": "Repository owner (e.g. 'org')",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "schema": {
+              "description": "Repository owner (e.g. 'org')",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Repository name (e.g. 'my-service')",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "schema": {
+              "description": "Repository name (e.g. 'my-service')",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Git commit SHA",
+            "in": "path",
+            "name": "commitSHA",
+            "required": true,
+            "schema": {
+              "description": "Git commit SHA",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Slip"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "summary": "Get a routing slip by repository and commit SHA"
+      }
+    },
+    "/slips/find-all-by-commits": {
+      "post": {
+        "operationId": "find-all-by-commits",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FindByCommitsInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/FindAllByCommitsItem"
+                  },
+                  "nullable": true,
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "summary": "Find all matching routing slips for a list of commits"
+      }
+    },
+    "/slips/find-by-commits": {
+      "post": {
+        "operationId": "find-by-commits",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FindByCommitsInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FindByCommitsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "summary": "Find the first matching routing slip for a list of commits"
+      }
+    },
+    "/slips/{correlationID}": {
+      "get": {
+        "operationId": "get-slip",
+        "parameters": [
+          {
+            "description": "Routing slip correlation ID",
+            "in": "path",
+            "name": "correlationID",
+            "required": true,
+            "schema": {
+              "description": "Routing slip correlation ID",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Slip"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "summary": "Get a routing slip by correlation ID"
+      }
+    },
+    "/slips/{correlationID}/image-tags": {
+      "get": {
+        "description": "Looks up the slip by correlation ID, determines build_scope from ci.repoproperties, and returns per-component image tags. For build_scope=all, all components share the slip-computed tag (YY.WW.SHA7). For build_scope=modified, each component carries its actual tag from ci.buildinfo.",
+        "operationId": "get-image-tags",
+        "parameters": [
+          {
+            "description": "Routing slip correlation ID",
+            "in": "path",
+            "name": "correlationID",
+            "required": true,
+            "schema": {
+              "description": "Routing slip correlation ID",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImageTagResult"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "summary": "Resolve per-component image tags for a routing slip"
+      }
+    }
+  }
+}

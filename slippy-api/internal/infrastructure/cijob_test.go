@@ -119,7 +119,23 @@ func TestQueryLogs_WithCursorDesc(t *testing.T) {
 			return &clickhousetest.MockRows{
 				NextData: []bool{true},
 				ScanFunc: scannerFor([][]any{
-					{ts, "WARN", "svc", "comp", "cl", "az", "stg", "ns", "msg", "inst", "job", "repo", "img", "dev", uint64(100)},
+					{
+						ts,
+						"WARN",
+						"svc",
+						"comp",
+						"cl",
+						"az",
+						"stg",
+						"ns",
+						"msg",
+						"inst",
+						"job",
+						"repo",
+						"img",
+						"dev",
+						uint64(100),
+					},
 				}),
 			}, nil
 		},
@@ -150,7 +166,23 @@ func TestQueryLogs_WithCursorAsc(t *testing.T) {
 			return &clickhousetest.MockRows{
 				NextData: []bool{true},
 				ScanFunc: scannerFor([][]any{
-					{ts, "INFO", "svc", "comp", "cl", "az", "stg", "ns", "msg", "inst", "job", "repo", "img", "dev", uint64(100)},
+					{
+						ts,
+						"INFO",
+						"svc",
+						"comp",
+						"cl",
+						"az",
+						"stg",
+						"ns",
+						"msg",
+						"inst",
+						"job",
+						"repo",
+						"img",
+						"dev",
+						uint64(100),
+					},
 				}),
 			}, nil
 		},
