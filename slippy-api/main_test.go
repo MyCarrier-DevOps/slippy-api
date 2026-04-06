@@ -130,6 +130,105 @@ func TestBuildHandler_OpenAPISpec(t *testing.T) {
 	assert.Equal(t, "Read-only API for CI/CD routing slips", info["description"])
 }
 
+// --- v1 versioned endpoint tests ---
+
+func TestBuildHandler_V1HealthEndpoint(t *testing.T) {
+	cfg := &config.Config{APIKey: "test-key", Port: 8080}
+	reader := newStubSlipReader()
+
+	h := buildHandler(cfg, reader, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var body map[string]string
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&body))
+	assert.Equal(t, "ok", body["status"])
+}
+
+func TestBuildHandler_V1AuthRequired(t *testing.T) {
+	cfg := &config.Config{APIKey: "test-key", Port: 8080}
+	reader := newStubSlipReader()
+
+	h := buildHandler(cfg, reader, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/slips/test-corr-001", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+func TestBuildHandler_V1AuthSuccess(t *testing.T) {
+	cfg := &config.Config{APIKey: "test-key", Port: 8080}
+	reader := newStubSlipReader()
+
+	h := buildHandler(cfg, reader, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/slips/test-corr-001", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var slip domain.Slip
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&slip))
+	assert.Equal(t, "test-corr-001", slip.CorrelationID)
+}
+
+func TestBuildHandler_OpenAPISpecContainsV1Routes(t *testing.T) {
+	cfg := &config.Config{APIKey: "test-key", Port: 8080}
+	reader := newStubSlipReader()
+
+	h := buildHandler(cfg, reader, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var spec map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&spec))
+
+	paths, ok := spec["paths"].(map[string]any)
+	require.True(t, ok)
+
+	// Verify both unversioned (legacy) and v1 paths exist
+	assert.Contains(t, paths, "/health")
+	assert.Contains(t, paths, "/v1/health")
+	assert.Contains(t, paths, "/slips/{correlationID}")
+	assert.Contains(t, paths, "/v1/slips/{correlationID}")
+}
+
+// --- Spec generation (gated behind GENERATE_SPEC=1) ---
+
+func TestGenerateOpenAPISpec(t *testing.T) {
+	if os.Getenv("GENERATE_SPEC") == "" {
+		t.Skip("set GENERATE_SPEC=1 to regenerate OpenAPI spec files")
+	}
+
+	cfg := &config.Config{APIKey: "dummy", Port: 8080}
+	reader := newStubSlipReader()
+	h := buildHandler(cfg, reader, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// Pretty-print the JSON
+	var spec any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&spec))
+	formatted, err := json.MarshalIndent(spec, "", "  ")
+	require.NoError(t, err)
+
+	require.NoError(t, os.MkdirAll("api/v1", 0o755))
+	require.NoError(t, os.WriteFile("api/v1/openapi.json", formatted, 0o644))
+	t.Logf("wrote api/v1/openapi.json (%d bytes)", len(formatted))
+}
+
 // --- connectCache tests ---
 
 func TestConnectCache_Disabled(t *testing.T) {

@@ -59,21 +59,25 @@ func buildHandler(
 	// Register authentication middleware.
 	api.UseMiddleware(middleware.NewAPIKeyAuth(cfg.APIKey))
 
-	// Register routes.
-	handler.RegisterHealthRoutes(api)
+	// Register routes on both unversioned (legacy) and /v1 paths.
+	// The empty prefix keeps existing routes unchanged for backward compatibility.
+	// The "/v1" prefix registers versioned routes with "v1-" prefixed OperationIDs.
+	grp := huma.NewGroup(api, "", "/v1")
+
+	handler.RegisterHealthRoutes(grp)
 	h := handler.NewSlipHandler(reader)
-	handler.RegisterRoutes(api, h)
+	handler.RegisterRoutes(grp, h)
 
 	// Register image tag routes when a reader is available.
 	if imageTagReader != nil {
 		ith := handler.NewImageTagHandler(imageTagReader)
-		handler.RegisterImageTagRoutes(api, ith)
+		handler.RegisterImageTagRoutes(grp, ith)
 	}
 
 	// Register CI job log routes when a reader is available.
 	if ciJobLogReader != nil {
 		clh := handler.NewCIJobLogHandler(ciJobLogReader)
-		handler.RegisterCIJobLogRoutes(api, clh)
+		handler.RegisterCIJobLogRoutes(grp, clh)
 	}
 
 	// Wrap with OpenTelemetry instrumentation.

@@ -100,6 +100,18 @@ build:
 		fi; \
 	done
 
+.PHONY: generate-spec
+generate-spec:
+	@echo "Generating OpenAPI spec..."
+	@for dir in $(APPLICATION); do \
+		if [ -d "$$dir" ]; then \
+			echo "Generating spec for $$dir..."; \
+			(cd $$dir && GENERATE_SPEC=1 go test -run TestGenerateOpenAPISpec -count=1 ./...); \
+		else \
+			echo "Directory $$dir not found, skipping..."; \
+		fi; \
+	done
+
 .PHONY: install-tools
 install-tools:
 	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b `go env GOPATH`/bin v2.11.3
