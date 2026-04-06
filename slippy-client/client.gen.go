@@ -21,6 +21,24 @@ const (
 	ApiKeyScopes = "apiKey.Scopes"
 )
 
+// Defines values for GetLogsParamsSort.
+const (
+	Asc  GetLogsParamsSort = "asc"
+	Desc GetLogsParamsSort = "desc"
+)
+
+// Valid indicates whether the value is a known member of the GetLogsParamsSort enum.
+func (e GetLogsParamsSort) Valid() bool {
+	switch e {
+	case Asc:
+		return true
+	case Desc:
+		return true
+	default:
+		return false
+	}
+}
+
 // AncestryEntry defines model for AncestryEntry.
 type AncestryEntry struct {
 	Branch        *string   `json:"branch,omitempty"`
@@ -30,6 +48,24 @@ type AncestryEntry struct {
 	FailedStep    *string   `json:"failed_step,omitempty"`
 	Repository    *string   `json:"repository,omitempty"`
 	Status        string    `json:"status"`
+}
+
+// CIJobLog defines model for CIJobLog.
+type CIJobLog struct {
+	BuildBranch     string    `json:"build_branch"`
+	BuildImage      string    `json:"build_image"`
+	BuildRepository string    `json:"build_repository"`
+	CiJobInstance   string    `json:"ci_job_instance"`
+	CiJobType       string    `json:"ci_job_type"`
+	Cloud           string    `json:"cloud"`
+	Cluster         string    `json:"cluster"`
+	Component       string    `json:"component"`
+	Environment     string    `json:"environment"`
+	Level           string    `json:"level"`
+	Message         string    `json:"message"`
+	Namespace       string    `json:"namespace"`
+	Service         string    `json:"service"`
+	Timestamp       time.Time `json:"timestamp"`
 }
 
 // ComponentStepData defines model for ComponentStepData.
@@ -106,6 +142,19 @@ type FindByCommitsOutputBody struct {
 	Slip          Slip    `json:"slip"`
 }
 
+// GetLogsOutputBody defines model for GetLogsOutputBody.
+type GetLogsOutputBody struct {
+	// Schema A URL to the JSON Schema for this object.
+	Schema *string `json:"$schema,omitempty"`
+
+	// Count Number of logs returned in this page
+	Count int64       `json:"count"`
+	Logs  *[]CIJobLog `json:"logs"`
+
+	// NextPage URL path for the next page of results
+	NextPage *string `json:"next_page,omitempty"`
+}
+
 // HealthOutputBody defines model for HealthOutputBody.
 type HealthOutputBody struct {
 	// Schema A URL to the JSON Schema for this object.
@@ -113,6 +162,15 @@ type HealthOutputBody struct {
 
 	// Status Service health status
 	Status string `json:"status"`
+}
+
+// ImageTagResult defines model for ImageTagResult.
+type ImageTagResult struct {
+	// Schema A URL to the JSON Schema for this object.
+	Schema     *string           `json:"$schema,omitempty"`
+	BuildScope string            `json:"build_scope"`
+	SlipTag    string            `json:"slip_tag"`
+	Tags       map[string]string `json:"tags"`
 }
 
 // Slip defines model for Slip.
@@ -152,6 +210,60 @@ type Step struct {
 	StartedAt   *time.Time `json:"started_at,omitempty"`
 	Status      string     `json:"status"`
 }
+
+// GetLogsParams defines parameters for GetLogs.
+type GetLogsParams struct {
+	// Limit Page size
+	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Cursor Pagination cursor from previous response
+	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+
+	// Sort Sort by timestamp
+	Sort *GetLogsParamsSort `form:"sort,omitempty" json:"sort,omitempty"`
+
+	// Level Filter by log level
+	Level *string `form:"level,omitempty" json:"level,omitempty"`
+
+	// Service Filter by service name
+	Service *string `form:"service,omitempty" json:"service,omitempty"`
+
+	// Component Filter by component name
+	Component *string `form:"component,omitempty" json:"component,omitempty"`
+
+	// Cluster Filter by cluster
+	Cluster *string `form:"cluster,omitempty" json:"cluster,omitempty"`
+
+	// Cloud Filter by cloud provider
+	Cloud *string `form:"cloud,omitempty" json:"cloud,omitempty"`
+
+	// Environment Filter by environment
+	Environment *string `form:"environment,omitempty" json:"environment,omitempty"`
+
+	// Namespace Filter by namespace
+	Namespace *string `form:"namespace,omitempty" json:"namespace,omitempty"`
+
+	// Message Filter by exact message
+	Message *string `form:"message,omitempty" json:"message,omitempty"`
+
+	// CiJobInstance Filter by CI job instance
+	CiJobInstance *string `form:"ci_job_instance,omitempty" json:"ci_job_instance,omitempty"`
+
+	// CiJobType Filter by CI job type
+	CiJobType *string `form:"ci_job_type,omitempty" json:"ci_job_type,omitempty"`
+
+	// BuildRepository Filter by build repository
+	BuildRepository *string `form:"build_repository,omitempty" json:"build_repository,omitempty"`
+
+	// BuildImage Filter by build image
+	BuildImage *string `form:"build_image,omitempty" json:"build_image,omitempty"`
+
+	// BuildBranch Filter by build branch
+	BuildBranch *string `form:"build_branch,omitempty" json:"build_branch,omitempty"`
+}
+
+// GetLogsParamsSort defines parameters for GetLogs.
+type GetLogsParamsSort string
 
 // FindAllByCommitsJSONRequestBody defines body for FindAllByCommits for application/json ContentType.
 type FindAllByCommitsJSONRequestBody = FindByCommitsInputBody
@@ -235,6 +347,9 @@ type ClientInterface interface {
 	// HealthCheck request
 	HealthCheck(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetLogs request
+	GetLogs(ctx context.Context, correlationID string, params *GetLogsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetSlipByCommit request
 	GetSlipByCommit(ctx context.Context, owner string, repo string, commitSHA string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -250,10 +365,25 @@ type ClientInterface interface {
 
 	// GetSlip request
 	GetSlip(ctx context.Context, correlationID string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetImageTags request
+	GetImageTags(ctx context.Context, correlationID string, reqEditors ...RequestEditorFn) (*http.Response, error)
 }
 
 func (c *Client) HealthCheck(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewHealthCheckRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetLogs(ctx context.Context, correlationID string, params *GetLogsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetLogsRequest(c.Server, correlationID, params)
 	if err != nil {
 		return nil, err
 	}
@@ -336,6 +466,18 @@ func (c *Client) GetSlip(ctx context.Context, correlationID string, reqEditors .
 	return c.Client.Do(req)
 }
 
+func (c *Client) GetImageTags(ctx context.Context, correlationID string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetImageTagsRequest(c.Server, correlationID)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 // NewHealthCheckRequest generates requests for HealthCheck
 func NewHealthCheckRequest(server string) (*http.Request, error) {
 	var err error
@@ -353,6 +495,302 @@ func NewHealthCheckRequest(server string) (*http.Request, error) {
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewGetLogsRequest generates requests for GetLogs
+func NewGetLogsRequest(server string, correlationID string, params *GetLogsParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "correlationID", correlationID, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/logs/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Cursor != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "cursor", *params.Cursor, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Sort != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "sort", *params.Sort, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Level != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "level", *params.Level, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Service != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "service", *params.Service, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Component != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "component", *params.Component, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Cluster != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "cluster", *params.Cluster, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Cloud != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "cloud", *params.Cloud, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Environment != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "environment", *params.Environment, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Namespace != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "namespace", *params.Namespace, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Message != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "message", *params.Message, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.CiJobInstance != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "ci_job_instance", *params.CiJobInstance, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.CiJobType != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "ci_job_type", *params.CiJobType, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.BuildRepository != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "build_repository", *params.BuildRepository, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.BuildImage != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "build_image", *params.BuildImage, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.BuildBranch != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "build_branch", *params.BuildBranch, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -525,6 +963,40 @@ func NewGetSlipRequest(server string, correlationID string) (*http.Request, erro
 	return req, nil
 }
 
+// NewGetImageTagsRequest generates requests for GetImageTags
+func NewGetImageTagsRequest(server string, correlationID string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "correlationID", correlationID, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/slips/%s/image-tags", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 func (c *Client) applyEditors(ctx context.Context, req *http.Request, additionalEditors []RequestEditorFn) error {
 	for _, r := range c.RequestEditors {
 		if err := r(ctx, req); err != nil {
@@ -571,6 +1043,9 @@ type ClientWithResponsesInterface interface {
 	// HealthCheckWithResponse request
 	HealthCheckWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*HealthCheckResponse, error)
 
+	// GetLogsWithResponse request
+	GetLogsWithResponse(ctx context.Context, correlationID string, params *GetLogsParams, reqEditors ...RequestEditorFn) (*GetLogsResponse, error)
+
 	// GetSlipByCommitWithResponse request
 	GetSlipByCommitWithResponse(ctx context.Context, owner string, repo string, commitSHA string, reqEditors ...RequestEditorFn) (*GetSlipByCommitResponse, error)
 
@@ -586,6 +1061,9 @@ type ClientWithResponsesInterface interface {
 
 	// GetSlipWithResponse request
 	GetSlipWithResponse(ctx context.Context, correlationID string, reqEditors ...RequestEditorFn) (*GetSlipResponse, error)
+
+	// GetImageTagsWithResponse request
+	GetImageTagsWithResponse(ctx context.Context, correlationID string, reqEditors ...RequestEditorFn) (*GetImageTagsResponse, error)
 }
 
 type HealthCheckResponse struct {
@@ -605,6 +1083,29 @@ func (r HealthCheckResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r HealthCheckResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetLogsResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *GetLogsOutputBody
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetLogsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetLogsResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -703,6 +1204,29 @@ func (r GetSlipResponse) StatusCode() int {
 	return 0
 }
 
+type GetImageTagsResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *ImageTagResult
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetImageTagsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetImageTagsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 // HealthCheckWithResponse request returning *HealthCheckResponse
 func (c *ClientWithResponses) HealthCheckWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*HealthCheckResponse, error) {
 	rsp, err := c.HealthCheck(ctx, reqEditors...)
@@ -710,6 +1234,15 @@ func (c *ClientWithResponses) HealthCheckWithResponse(ctx context.Context, reqEd
 		return nil, err
 	}
 	return ParseHealthCheckResponse(rsp)
+}
+
+// GetLogsWithResponse request returning *GetLogsResponse
+func (c *ClientWithResponses) GetLogsWithResponse(ctx context.Context, correlationID string, params *GetLogsParams, reqEditors ...RequestEditorFn) (*GetLogsResponse, error) {
+	rsp, err := c.GetLogs(ctx, correlationID, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetLogsResponse(rsp)
 }
 
 // GetSlipByCommitWithResponse request returning *GetSlipByCommitResponse
@@ -764,6 +1297,15 @@ func (c *ClientWithResponses) GetSlipWithResponse(ctx context.Context, correlati
 	return ParseGetSlipResponse(rsp)
 }
 
+// GetImageTagsWithResponse request returning *GetImageTagsResponse
+func (c *ClientWithResponses) GetImageTagsWithResponse(ctx context.Context, correlationID string, reqEditors ...RequestEditorFn) (*GetImageTagsResponse, error) {
+	rsp, err := c.GetImageTags(ctx, correlationID, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetImageTagsResponse(rsp)
+}
+
 // ParseHealthCheckResponse parses an HTTP response from a HealthCheckWithResponse call
 func ParseHealthCheckResponse(rsp *http.Response) (*HealthCheckResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -780,6 +1322,39 @@ func ParseHealthCheckResponse(rsp *http.Response) (*HealthCheckResponse, error) 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest HealthOutputBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetLogsResponse parses an HTTP response from a GetLogsWithResponse call
+func ParseGetLogsResponse(rsp *http.Response) (*GetLogsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetLogsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest GetLogsOutputBody
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -912,6 +1487,39 @@ func ParseGetSlipResponse(rsp *http.Response) (*GetSlipResponse, error) {
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest Slip
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetImageTagsResponse parses an HTTP response from a GetImageTagsWithResponse call
+func ParseGetImageTagsResponse(rsp *http.Response) (*GetImageTagsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetImageTagsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ImageTagResult
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

@@ -35,6 +35,71 @@
         ],
         "type": "object"
       },
+      "CIJobLog": {
+        "additionalProperties": false,
+        "properties": {
+          "build_branch": {
+            "type": "string"
+          },
+          "build_image": {
+            "type": "string"
+          },
+          "build_repository": {
+            "type": "string"
+          },
+          "ci_job_instance": {
+            "type": "string"
+          },
+          "ci_job_type": {
+            "type": "string"
+          },
+          "cloud": {
+            "type": "string"
+          },
+          "cluster": {
+            "type": "string"
+          },
+          "component": {
+            "type": "string"
+          },
+          "environment": {
+            "type": "string"
+          },
+          "level": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "timestamp": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "timestamp",
+          "level",
+          "service",
+          "component",
+          "cluster",
+          "cloud",
+          "environment",
+          "namespace",
+          "message",
+          "ci_job_instance",
+          "ci_job_type",
+          "build_repository",
+          "build_image",
+          "build_branch"
+        ],
+        "type": "object"
+      },
       "ComponentStepData": {
         "additionalProperties": false,
         "properties": {
@@ -222,6 +287,41 @@
         ],
         "type": "object"
       },
+      "GetLogsOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/GetLogsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "count": {
+            "description": "Number of logs returned in this page",
+            "format": "int64",
+            "type": "integer"
+          },
+          "logs": {
+            "items": {
+              "$ref": "#/components/schemas/CIJobLog"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "next_page": {
+            "description": "URL path for the next page of results",
+            "type": "string"
+          }
+        },
+        "required": [
+          "logs",
+          "count"
+        ],
+        "type": "object"
+      },
       "HealthOutputBody": {
         "additionalProperties": false,
         "properties": {
@@ -244,6 +344,38 @@
         },
         "required": [
           "status"
+        ],
+        "type": "object"
+      },
+      "ImageTagResult": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/ImageTagResult.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "build_scope": {
+            "type": "string"
+          },
+          "slip_tag": {
+            "type": "string"
+          },
+          "tags": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "tags",
+          "build_scope",
+          "slip_tag"
         ],
         "type": "object"
       },
@@ -432,6 +564,221 @@
           }
         },
         "summary": "Health check endpoint"
+      }
+    },
+    "/logs/{correlationID}": {
+      "get": {
+        "description": "Returns paginated CI job logs from observability.ciJob, filterable by any column. Use the next_page URL from the response to fetch subsequent pages.",
+        "operationId": "get-logs",
+        "parameters": [
+          {
+            "description": "Correlation ID to look up logs for",
+            "in": "path",
+            "name": "correlationID",
+            "required": true,
+            "schema": {
+              "description": "Correlation ID to look up logs for",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Page size",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "default": 100,
+              "description": "Page size",
+              "format": "int64",
+              "maximum": 1000,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Pagination cursor from previous response",
+            "explode": false,
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "description": "Pagination cursor from previous response",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Sort by timestamp",
+            "explode": false,
+            "in": "query",
+            "name": "sort",
+            "schema": {
+              "default": "desc",
+              "description": "Sort by timestamp",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by log level",
+            "explode": false,
+            "in": "query",
+            "name": "level",
+            "schema": {
+              "description": "Filter by log level",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by service name",
+            "explode": false,
+            "in": "query",
+            "name": "service",
+            "schema": {
+              "description": "Filter by service name",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by component name",
+            "explode": false,
+            "in": "query",
+            "name": "component",
+            "schema": {
+              "description": "Filter by component name",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by cluster",
+            "explode": false,
+            "in": "query",
+            "name": "cluster",
+            "schema": {
+              "description": "Filter by cluster",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by cloud provider",
+            "explode": false,
+            "in": "query",
+            "name": "cloud",
+            "schema": {
+              "description": "Filter by cloud provider",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by environment",
+            "explode": false,
+            "in": "query",
+            "name": "environment",
+            "schema": {
+              "description": "Filter by environment",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by namespace",
+            "explode": false,
+            "in": "query",
+            "name": "namespace",
+            "schema": {
+              "description": "Filter by namespace",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by exact message",
+            "explode": false,
+            "in": "query",
+            "name": "message",
+            "schema": {
+              "description": "Filter by exact message",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by CI job instance",
+            "explode": false,
+            "in": "query",
+            "name": "ci_job_instance",
+            "schema": {
+              "description": "Filter by CI job instance",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by CI job type",
+            "explode": false,
+            "in": "query",
+            "name": "ci_job_type",
+            "schema": {
+              "description": "Filter by CI job type",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by build repository",
+            "explode": false,
+            "in": "query",
+            "name": "build_repository",
+            "schema": {
+              "description": "Filter by build repository",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by build image",
+            "explode": false,
+            "in": "query",
+            "name": "build_image",
+            "schema": {
+              "description": "Filter by build image",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by build branch",
+            "explode": false,
+            "in": "query",
+            "name": "build_branch",
+            "schema": {
+              "description": "Filter by build branch",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetLogsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "summary": "Query CI job logs by correlation ID"
       }
     },
     "/slips/by-commit/{owner}/{repo}/{commitSHA}": {
@@ -632,6 +979,52 @@
           }
         ],
         "summary": "Get a routing slip by correlation ID"
+      }
+    },
+    "/slips/{correlationID}/image-tags": {
+      "get": {
+        "description": "Looks up the slip by correlation ID, determines build_scope from ci.repoproperties, and returns per-component image tags. For build_scope=all, all components share the slip-computed tag (YY.WW.SHA7). For build_scope=modified, each component carries its actual tag from ci.buildinfo.",
+        "operationId": "get-image-tags",
+        "parameters": [
+          {
+            "description": "Routing slip correlation ID",
+            "in": "path",
+            "name": "correlationID",
+            "required": true,
+            "schema": {
+              "description": "Routing slip correlation ID",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImageTagResult"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "summary": "Resolve per-component image tags for a routing slip"
       }
     }
   }

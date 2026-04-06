@@ -50,17 +50,24 @@ The API uses [Huma v2](https://huma.rocks/) groups for versioning. Adding a new 
 
 ### 1. Create a new route group
 
-In `main.go`, add a separate group for the new version:
+The current v1 setup uses a **fan-out group** to register both legacy (unversioned) and `/v1/` routes simultaneously:
 
 ```go
-// Existing v1 routes
+// Current setup — fan-out registers every route at both "" and "/v1"
+grp := huma.NewGroup(api, "", "/v1")
+```
+
+When introducing v2, switch to **separate single-prefix groups** for each version. The legacy unversioned routes can be dropped or kept as a third group:
+
+```go
+// v1 routes
 v1 := huma.NewGroup(api, "/v1")
 handler.RegisterHealthRoutes(v1)
 handler.RegisterRoutes(v1, slipHandlerV1)
 handler.RegisterImageTagRoutes(v1, ith)
 handler.RegisterCIJobLogRoutes(v1, clh)
 
-// New v2 routes (only changed endpoints)
+// v2 routes (only changed endpoints)
 v2 := huma.NewGroup(api, "/v2")
 handler.RegisterRoutesV2(v2, slipHandlerV2)
 ```

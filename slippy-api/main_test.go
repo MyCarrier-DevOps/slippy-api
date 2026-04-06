@@ -60,6 +60,20 @@ func (s *stubSlipReader) FindAllByCommits(_ context.Context, _ string, _ []strin
 	return nil, errors.New("not implemented")
 }
 
+// --- Stub readers for optional handlers (used in spec generation) ---
+
+type stubImageTagReader struct{}
+
+func (s *stubImageTagReader) ResolveImageTags(_ context.Context, _ string) (*domain.ImageTagResult, error) {
+	return &domain.ImageTagResult{}, nil
+}
+
+type stubCIJobLogReader struct{}
+
+func (s *stubCIJobLogReader) QueryLogs(_ context.Context, _ *domain.CIJobLogQuery) (*domain.CIJobLogResult, error) {
+	return &domain.CIJobLogResult{}, nil
+}
+
 // --- buildHandler tests ---
 
 func TestBuildHandler_HealthEndpoint(t *testing.T) {
@@ -212,7 +226,7 @@ func TestGenerateOpenAPISpec(t *testing.T) {
 
 	cfg := &config.Config{APIKey: "dummy", Port: 8080}
 	reader := newStubSlipReader()
-	h := buildHandler(cfg, reader, nil, nil)
+	h := buildHandler(cfg, reader, &stubImageTagReader{}, &stubCIJobLogReader{})
 
 	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
 	w := httptest.NewRecorder()

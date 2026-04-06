@@ -2,12 +2,13 @@ SHELL:=/bin/bash
 
 GOOS ?= $(shell go env GOOS)
 GOARCH ?= $(shell go env GOARCH)
-APPLICATION := slippy-api slippy-client
+MODULES  := slippy-api slippy-client
+BINARIES := slippy-api
 
 .PHONY: lint
 lint: install-tools
 	@echo "Linting all modules..."
-	@for dir in $(APPLICATION); do \
+	@for dir in $(MODULES); do \
 		if [ -d "$$dir" ]; then \
 			echo "Linting $$dir module..."; \
 			(cd $$dir && go mod tidy && golangci-lint run --config ../.github/.golangci.yml --timeout 5m ./...); \
@@ -19,7 +20,7 @@ lint: install-tools
 .PHONY: test
 test:
 	@echo "Testing all modules..."
-	@for dir in $(APPLICATION); do \
+	@for dir in $(MODULES); do \
 		if [ -d "$$dir" ]; then \
 			echo "Testing $$dir module..."; \
 			(cd $$dir && go mod download && go test -cover -coverprofile=coverage.out ./... && go tool cover -func coverage.out ); \
@@ -31,7 +32,7 @@ test:
 .PHONY: clean
 clean:
 	@echo "Cleaning all modules..."
-	@for dir in $(APPLICATION); do \
+	@for dir in $(MODULES); do \
 		if [ -d "$$dir" ]; then \
 			echo "Cleaning $$dir module..."; \
 			(cd $$dir && go clean ./... && go clean -testcache); \
@@ -43,7 +44,7 @@ clean:
 .PHONY: fmt
 fmt: install-tools
 	@echo "Formatting all modules..."
-	@for dir in $(APPLICATION); do \
+	@for dir in $(MODULES); do \
 		if [ -d "$$dir" ]; then \
 			echo "Formatting $$dir module..."; \
 			(cd $$dir && golangci-lint fmt --config ../.github/.golangci.yml ./...); \
@@ -55,7 +56,7 @@ fmt: install-tools
 .PHONY: bump
 bump:
 	@echo "Bumping module versions..."
-	@for dir in $(APPLICATION); do \
+	@for dir in $(MODULES); do \
 		if [ -d "$$dir" ]; then \
 			echo "Bumping $$dir module..."; \
 			(cd $$dir && go get -u && go mod tidy ); \
@@ -67,7 +68,7 @@ bump:
 .PHONY: tidy
 tidy:
 	@echo "Tidying up module dependencies..."
-	@for dir in $(APPLICATION); do \
+	@for dir in $(MODULES); do \
 		if [ -d "$$dir" ]; then \
 			echo "Tidying $$dir module..."; \
 			(cd $$dir && go mod tidy ); \
@@ -79,7 +80,7 @@ tidy:
 .PHONY: check-sec
 check-sec:
 	@echo "Checking security vulnerabilities in all modules..."
-	@for dir in $(APPLICATION); do \
+	@for dir in $(MODULES); do \
 		if [ -d "$$dir" ]; then \
 			echo "Checking $$dir module..."; \
 			(cd $$dir && go mod download && go install golang.org/x/vuln/cmd/govulncheck@latest && govulncheck -show verbose ./...) || exit 1; \
@@ -90,11 +91,12 @@ check-sec:
 
 .PHONY: build
 build:
-	@echo "Building $(APPLICATION)..."
-	@for dir in $(APPLICATION); do \
+	@mkdir -p bin
+	@echo "Building $(BINARIES)..."
+	@for dir in $(BINARIES); do \
 		if [ -d "$$dir" ]; then \
-			echo "Building $$dir..."; \
-			(cd $$dir && CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -o $$(basename $$dir) .); \
+			echo "Building $$dir -> bin/$$(basename $$dir)"; \
+			(cd $$dir && CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -o ../bin/$$(basename $$dir) .); \
 		else \
 			echo "Directory $$dir not found, skipping..."; \
 		fi; \
