@@ -1,6 +1,6 @@
 module github.com/MyCarrier-DevOps/slippy-api
 
-go 1.26.1
+go 1.26
 
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.44.0

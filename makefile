@@ -79,8 +79,8 @@ tidy:
 
 .PHONY: check-sec
 check-sec:
-	@echo "Checking security vulnerabilities in all modules..."
-	@for dir in $(MODULES); do \
+	@echo "Checking security vulnerabilities..."
+	@for dir in $(or $(PKG),$(MODULES)); do \
 		if [ -d "$$dir" ]; then \
 			echo "Checking $$dir module..."; \
 			(cd $$dir && go mod download && go install golang.org/x/vuln/cmd/govulncheck@latest && govulncheck -show verbose ./...) || exit 1; \
