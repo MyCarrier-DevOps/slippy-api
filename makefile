@@ -2,7 +2,7 @@ SHELL:=/bin/bash
 
 GOOS ?= $(shell go env GOOS)
 GOARCH ?= $(shell go env GOARCH)
-APPLICATION := slippy-api
+APPLICATION := slippy-api slippy-client
 
 .PHONY: lint
 lint: install-tools
@@ -103,14 +103,17 @@ build:
 .PHONY: generate-spec
 generate-spec:
 	@echo "Generating OpenAPI spec..."
-	@for dir in $(APPLICATION); do \
-		if [ -d "$$dir" ]; then \
-			echo "Generating spec for $$dir..."; \
-			(cd $$dir && GENERATE_SPEC=1 go test -run TestGenerateOpenAPISpec -count=1 ./...); \
-		else \
-			echo "Directory $$dir not found, skipping..."; \
-		fi; \
-	done
+	(cd slippy-api && GENERATE_SPEC=1 go test -run TestGenerateOpenAPISpec -count=1 ./...)
+
+.PHONY: generate-client
+generate-client: generate-spec install-oapi-codegen
+	@echo "Generating Go client from OpenAPI spec..."
+	(cd slippy-client && oapi-codegen -config oapi-codegen.yaml ../slippy-api/api/v1/openapi-v1.json)
+	(cd slippy-client && go mod tidy)
+
+.PHONY: install-oapi-codegen
+install-oapi-codegen:
+	go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.6.0
 
 .PHONY: install-tools
 install-tools:

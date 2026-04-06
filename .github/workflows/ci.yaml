@@ -55,7 +55,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        module: [slippy-api]
+        module: [slippy-api, slippy-client]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
