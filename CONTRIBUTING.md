@@ -222,10 +222,42 @@ The binary is statically linked (`CGO_ENABLED=0`) and has no runtime dependencie
 
 The GitHub Actions workflow at `.github/workflows/ci.yaml` runs on every push and PR to `main`:
 
+### On every push and PR
+
 - **Unit tests** with 80% coverage threshold (`slippy-api` module)
 - **Lint** on both `slippy-api` and `slippy-client` modules
 - **Vulnerability scan** via `govulncheck`
-- **Tag and release** `slippy-client` when its files change on main (uses GitVersion for semver)
+
+### On merge to main (additional steps)
+
+- **Regenerate contracts & client** -- runs `make generate-client`, compares the output to what's committed. If there's a diff (i.e., an API change was merged without regenerating), CI commits the updated specs and client back to main automatically.
+- **Release slippy-client** -- if the client changed, GitVersion calculates the next semver, creates a `slippy-client/vX.Y.Z` tag, publishes a GitHub Release, and refreshes the pkg.go.dev cache.
+
+```
+PR merges to main
+       │
+       ▼
+ tests + lint + vuln
+       │
+       ▼
+ regenerate-client
+  ├─ no diff → done
+  └─ diff → auto-commit "chore: regenerate..." → push to main
+       │
+       ▼
+ release-client (tag + GitHub Release + pkg.go.dev)
+```
+
+The auto-commit uses `[skip ci]` to prevent an infinite loop. The CI bot pushes via the Write role bypass configured in the branch ruleset.
+
+### Branch protection
+
+The `main` branch is protected by a GitHub **ruleset** (not classic branch protection):
+
+- **Require a pull request before merging** -- all changes go through PR review
+- **Bypass list** -- the **Write** role is granted "Always" bypass, which allows the CI `GITHUB_TOKEN` (with `contents: write`) to push regenerated files directly to main
+- **Fork PR workflows are disabled** -- external forks cannot trigger CI runs
+- **Repository access** -- only the DevSecOps team has Write access
 
 ## Getting Help
 

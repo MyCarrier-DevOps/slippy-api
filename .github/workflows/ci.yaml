@@ -135,37 +135,66 @@ jobs:
           fi
           echo "All vulnerability scan jobs passed"
 
-  # Detect if slippy-client files changed (used to gate the release job)
-  detect-client-changes:
-    name: "Detect slippy-client changes"
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    outputs:
-      changed: ${{ steps.filter.outputs.client }}
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            client:
-              - 'slippy-client/**'
-
-  # Tag and release slippy-client when its files change on main
-  release-client:
-    name: "Release slippy-client"
+  # Regenerate OpenAPI spec + Go client when API code changes on main.
+  # Commits the result back so the contract and client stay in sync.
+  regenerate-client:
+    name: "Regenerate contracts & client"
     runs-on: ubuntu-latest
     needs:
       - unit-tests-check
       - lint-check
       - vuln-check
-      - detect-client-changes
     if: >-
       github.ref == 'refs/heads/main' &&
-      needs.detect-client-changes.outputs.changed == 'true' &&
+      github.event_name == 'push' &&
       needs.unit-tests-check.result == 'success' &&
       needs.lint-check.result == 'success' &&
       needs.vuln-check.result == 'success'
+    permissions:
+      contents: write
+    outputs:
+      changed: ${{ steps.check-diff.outputs.changed }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Regenerate spec and client
+        run: make generate-client
+
+      - name: Check for changes
+        id: check-diff
+        run: |
+          if git diff --quiet slippy-api/api/ slippy-client/; then
+            echo "No contract or client changes detected"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Contract or client changes detected"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit regenerated files
+        if: steps.check-diff.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add slippy-api/api/ slippy-client/client.gen.go slippy-client/go.mod slippy-client/go.sum
+          git commit -m "chore: regenerate API contracts and Go client [skip ci]"
+          git push
+
+  # Tag and release slippy-client when contracts were regenerated with changes
+  release-client:
+    name: "Release slippy-client"
+    runs-on: ubuntu-latest
+    needs:
+      - regenerate-client
+    if: needs.regenerate-client.outputs.changed == 'true'
     permissions:
       contents: write
     steps:

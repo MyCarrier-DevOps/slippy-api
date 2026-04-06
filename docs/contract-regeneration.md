@@ -124,6 +124,22 @@ make generate-client && make fmt && make lint && make test
 
 `generate-client` already calls `generate-spec`, so this single pipeline handles the full cycle.
 
+## CI Automation
+
+You don't strictly need to regenerate locally -- CI handles it as a safety net.
+
+When a PR merges to `main`, the **`regenerate-client`** CI job:
+
+1. Runs `make generate-client` (spec + client)
+2. Compares the output to what's committed
+3. If there's a diff, commits the updated files back to main with `chore: regenerate API contracts and Go client [skip ci]`
+4. If the client changed, the **`release-client`** job tags and releases a new version
+
+**However, best practice is to regenerate locally and include the files in your PR.** This way:
+- Reviewers can see the contract diff in the PR
+- CI won't need to auto-commit after merge
+- You catch issues before merging, not after
+
 ## Troubleshooting
 
 ### oapi-codegen fails with "unsupported OpenAPI version"
