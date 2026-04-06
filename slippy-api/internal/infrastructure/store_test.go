@@ -29,6 +29,8 @@ type mockSlipStore struct {
 	updateStepWithHistoryFn func(ctx context.Context, id, step, comp string, status slippy.StepStatus, entry slippy.StateHistoryEntry) error
 	updateComponentFn       func(ctx context.Context, id, comp, stepType string, status slippy.StepStatus) error
 	appendHistoryFn         func(ctx context.Context, id string, entry slippy.StateHistoryEntry) error
+	setComponentImageTagFn  func(ctx context.Context, id, step, comp, tag string) error
+	pingFn                  func(ctx context.Context) error
 }
 
 func (m *mockSlipStore) Load(ctx context.Context, id string) (*slippy.Slip, error) {
@@ -119,6 +121,20 @@ func (m *mockSlipStore) InsertAncestryLink(_ context.Context, _ *slippy.Slip, _ 
 
 func (m *mockSlipStore) ResolveAncestry(_ context.Context, _, _, _ string, _ int) ([]slippy.AncestryEntry, error) {
 	return nil, nil
+}
+
+func (m *mockSlipStore) SetComponentImageTag(ctx context.Context, id, step, comp, tag string) error {
+	if m.setComponentImageTagFn != nil {
+		return m.setComponentImageTagFn(ctx, id, step, comp, tag)
+	}
+	return nil
+}
+
+func (m *mockSlipStore) Ping(ctx context.Context) error {
+	if m.pingFn != nil {
+		return m.pingFn(ctx)
+	}
+	return nil
 }
 
 // --- Store Adapter Tests ---
