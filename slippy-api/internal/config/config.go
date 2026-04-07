@@ -4,8 +4,9 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"strings"
 	"time"
+
+	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
 )
 
 const defaultAncestryDepth = 25
@@ -57,7 +58,7 @@ func Load() (*Config, error) {
 		DragonflyPort: 6379,
 		CacheTTL:      10 * time.Minute,
 		AncestryDepth: defaultAncestryDepth,
-		SlipDatabase:  "ci",
+		SlipDatabase:  slippy.DefaultConfig().Database,
 	}
 
 	// Required
@@ -120,11 +121,6 @@ func Load() (*Config, error) {
 
 	// Optional: SLIPPY_GITHUB_ENTERPRISE_URL
 	cfg.GitHubEnterpriseURL = os.Getenv("SLIPPY_GITHUB_ENTERPRISE_URL")
-
-	// SlipDatabase: derive from K8S_NAMESPACE — use "ci_test" for dev/test namespaces, "ci" otherwise.
-	if ns := os.Getenv("K8S_NAMESPACE"); strings.HasSuffix(ns, "-test") || strings.HasSuffix(ns, "-dev") {
-		cfg.SlipDatabase = "ci_test"
-	}
 
 	// Optional: SLIPPY_ANCESTRY_DEPTH
 	if v := os.Getenv("SLIPPY_ANCESTRY_DEPTH"); v != "" {
