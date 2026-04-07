@@ -185,6 +185,7 @@ All configuration is via environment variables. No config files, no Vault.
 | `SLIPPY_ANCESTRY_DEPTH` | Max commits to walk for ancestry resolution | `25` |
 | `CLICKHOUSE_PORT` | ClickHouse port | `9440` |
 | `CLICKHOUSE_SKIP_VERIFY` | Skip TLS verification | `false` |
+| `K8S_NAMESPACE` | Kubernetes namespace; `-test` or `-dev` suffix selects `ci_test` database | _(ci)_ |
 | `DRAGONFLY_HOST` | Dragonfly/Redis host (enables caching when set) | _(disabled)_ |
 | `DRAGONFLY_PORT` | Dragonfly/Redis port | `6379` |
 | `DRAGONFLY_PASSWORD` | Dragonfly/Redis password | _(empty)_ |
