@@ -136,7 +136,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
-	log.Printf("config loaded (port=%d, cache=%v)", cfg.Port, cfg.CacheEnabled())
+	log.Printf("config loaded (port=%d, cache=%v, db=%s)", cfg.Port, cfg.CacheEnabled(), cfg.SlipDatabase)
 
 	// --- Pipeline configuration ---
 	// The slippy library requires a PipelineConfig for all store operations because
@@ -152,13 +152,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("clickhouse config: %w", err)
 	}
-	// slipDatabase is the ClickHouse database containing routing_slips.
-	const slipDatabase = "ci"
-
 	store, err := slippy.NewClickHouseStoreFromConfig(chCfg, slippy.ClickHouseStoreOptions{
 		SkipMigrations: true, // read-only API — no schema changes
 		PipelineConfig: pipelineCfg,
-		Database:       slipDatabase,
+		Database:       cfg.SlipDatabase,
 	})
 	if err != nil {
 		return fmt.Errorf("clickhouse store: %w", err)

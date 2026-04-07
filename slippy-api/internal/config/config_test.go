@@ -18,6 +18,7 @@ func clearEnv(t *testing.T) {
 		"CACHE_TTL",
 		"SLIPPY_GITHUB_APP_ID", "SLIPPY_GITHUB_APP_PRIVATE_KEY",
 		"SLIPPY_GITHUB_ENTERPRISE_URL", "SLIPPY_ANCESTRY_DEPTH",
+		"K8S_NAMESPACE",
 	} {
 		t.Setenv(key, "")
 		os.Unsetenv(key)
@@ -53,6 +54,37 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, "test-pem", cfg.GitHubPrivateKey)
 	assert.Equal(t, "", cfg.GitHubEnterpriseURL)
 	assert.Equal(t, 25, cfg.AncestryDepth)
+	assert.Equal(t, "ci", cfg.SlipDatabase)
+}
+
+func TestLoad_SlipDatabase_DerivedFromNamespace(t *testing.T) {
+	tests := []struct {
+		namespace string
+		wantDB    string
+	}{
+		{"slippy-api-test", "ci_test"},
+		{"slippy-api-dev", "ci_test"},
+		{"dev", "ci_test"},
+		{"feature-abc", "ci_test"},
+		{"slippy-api-prod", "ci"},
+		{"slippy-api", "ci"},
+		{"", "ci"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.namespace, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv("SLIPPY_API_KEY", "key")
+			t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
+			t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
+			if tt.namespace != "" {
+				t.Setenv("K8S_NAMESPACE", tt.namespace)
+			}
+
+			cfg, err := Load()
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantDB, cfg.SlipDatabase)
+		})
+	}
 }
 
 func TestLoad_AllValues(t *testing.T) {
