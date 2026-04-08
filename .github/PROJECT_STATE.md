@@ -1,7 +1,7 @@
 # Project State — Slippy Application
 
-> **Last Updated:** 2026-03-11
-> **Status:** Fork-aware decorator removed; ancestry resolution active on all commit-based lookups
+> **Last Updated:** 2026-04-08
+> **Status:** goLibMyCarrier bumped to v1.3.72; all checks pass
 
 ## Overview
 
@@ -38,6 +38,9 @@ Read-only API for CI/CD routing slips. Provides endpoints to query routing slips
 - Environment variable-based config (`config/config.go`)
 
 ## Recent Changes
+
+### 2026-04-08: Bump goLibMyCarrier to v1.3.72
+Updated all goLibMyCarrier submodules (`clickhouse`, `logger`, `slippy`, `clickhousemigrator`, `github`) from v1.3.71 → v1.3.72 on branch `chore/goLibMyCarrier-1.3.72`. `go mod tidy` run. All checks pass: fmt clean, lint 0 issues, tests green (97.1% infra coverage), build OK.
 
 ### 2026-03-11: Removed ForkAwareSlipReader, Ancestry on All Commit Lookups
 **Problem:** `ForkAwareSlipReader` intercepted `ErrSlipNotFound` and attempted cross-repo resolution via a ClickHouse commit-SHA-only query. This was unnecessary — routing slips already store the correct repository name — and it actively interfered with ancestry resolution on the `FindByCommits` path (returning 404 instead of letting ancestry resolve).
