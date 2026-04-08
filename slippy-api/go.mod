@@ -4,9 +4,9 @@ go 1.26
 
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.44.0
-	github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse v1.3.71
-	github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.71
-	github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.71
+	github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse v1.3.72
+	github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.72
+	github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.72
 	github.com/danielgtaylor/huma/v2 v2.37.3
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/stretchr/testify v1.11.1
@@ -27,8 +27,8 @@ require (
 	github.com/Azure/go-ansiterm v0.0.0-20210617225240-d185dfc1b5a1 // indirect
 	github.com/ClickHouse/ch-go v0.71.0 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
-	github.com/MyCarrier-DevOps/goLibMyCarrier/clickhousemigrator v1.3.71 // indirect
-	github.com/MyCarrier-DevOps/goLibMyCarrier/github v1.3.71 // indirect
+	github.com/MyCarrier-DevOps/goLibMyCarrier/clickhousemigrator v1.3.72 // indirect
+	github.com/MyCarrier-DevOps/goLibMyCarrier/github v1.3.72 // indirect
 	github.com/ProtonMail/go-crypto v1.4.1 // indirect
 	github.com/andybalholm/brotli v1.2.1 // indirect
 	github.com/bradleyfalzon/ghinstallation/v2 v2.18.0 // indirect
