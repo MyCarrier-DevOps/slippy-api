@@ -68,6 +68,21 @@ func (s *stubImageTagReader) ResolveImageTags(_ context.Context, _ string) (*dom
 	return &domain.ImageTagResult{}, nil
 }
 
+type stubSlipWriter struct{}
+
+func (s *stubSlipWriter) CreateSlipForPush(
+	_ context.Context,
+	opts domain.PushOptions,
+) (*domain.CreateSlipResult, error) {
+	return &domain.CreateSlipResult{Slip: &domain.Slip{CorrelationID: opts.CorrelationID}}, nil
+}
+func (s *stubSlipWriter) StartStep(_ context.Context, _, _, _ string) error    { return nil }
+func (s *stubSlipWriter) CompleteStep(_ context.Context, _, _, _ string) error { return nil }
+func (s *stubSlipWriter) FailStep(_ context.Context, _, _, _, _ string) error  { return nil }
+func (s *stubSlipWriter) SetComponentImageTag(_ context.Context, _, _, _ string) error {
+	return nil
+}
+
 type stubCIJobLogReader struct{}
 
 func (s *stubCIJobLogReader) QueryLogs(_ context.Context, _ *domain.CIJobLogQuery) (*domain.CIJobLogResult, error) {
@@ -80,7 +95,7 @@ func TestBuildHandler_HealthEndpoint(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil)
 	require.NotNil(t, h)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -98,7 +113,7 @@ func TestBuildHandler_AuthRequired(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil)
 
 	// Request without auth header should be rejected
 	req := httptest.NewRequest(http.MethodGet, "/slips/test-corr-001", nil)
@@ -111,7 +126,7 @@ func TestBuildHandler_AuthSuccess(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil)
 
 	// Request with valid auth header should succeed
 	req := httptest.NewRequest(http.MethodGet, "/slips/test-corr-001", nil)
@@ -129,7 +144,7 @@ func TestBuildHandler_OpenAPISpec(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
 	w := httptest.NewRecorder()
@@ -142,7 +157,7 @@ func TestBuildHandler_OpenAPISpec(t *testing.T) {
 	info, ok := spec["info"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "Slippy API", info["title"])
-	assert.Equal(t, "Read-only API for CI/CD routing slips", info["description"])
+	assert.Equal(t, "API for CI/CD routing slips", info["description"])
 }
 
 // --- v1 versioned endpoint tests ---
@@ -151,7 +166,7 @@ func TestBuildHandler_V1HealthEndpoint(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
 	w := httptest.NewRecorder()
@@ -168,7 +183,7 @@ func TestBuildHandler_V1AuthRequired(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/slips/test-corr-001", nil)
 	w := httptest.NewRecorder()
@@ -180,7 +195,7 @@ func TestBuildHandler_V1AuthSuccess(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/slips/test-corr-001", nil)
 	req.Header.Set("Authorization", "Bearer test-key")
@@ -197,7 +212,7 @@ func TestBuildHandler_OpenAPISpecContainsV1Routes(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
 	w := httptest.NewRecorder()
@@ -226,7 +241,7 @@ func TestGenerateOpenAPISpec(t *testing.T) {
 
 	cfg := &config.Config{APIKey: "dummy", Port: 8080}
 	reader := newStubSlipReader()
-	h := buildHandler(cfg, reader, &stubImageTagReader{}, &stubCIJobLogReader{})
+	h := buildHandler(cfg, reader, &stubSlipWriter{}, &stubImageTagReader{}, &stubCIJobLogReader{})
 
 	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
 	w := httptest.NewRecorder()

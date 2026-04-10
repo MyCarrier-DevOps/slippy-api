@@ -17,12 +17,13 @@ import (
 // authTracerName is the instrumentation scope for authentication operations.
 const authTracerName = "slippy-api/auth"
 
-// NewAPIKeyAuth returns a huma middleware that validates Bearer tokens against the
-// configured API key using constant-time comparison. Operations that declare a
-// "bearer" security requirement are protected; all others pass through.
-func NewAPIKeyAuth(apiKey string) func(ctx huma.Context, next func(huma.Context)) {
+// NewAPIKeyAuth returns a huma middleware that validates Bearer tokens using a
+// two-key scheme. Operations declaring "apiKey" security accept either the read
+// key or the write key. Operations declaring "writeApiKey" security accept only
+// the write key. Constant-time comparison is used for all token checks.
+func NewAPIKeyAuth(readKey, writeKey string) func(ctx huma.Context, next func(huma.Context)) {
 	return func(ctx huma.Context, next func(huma.Context)) {
-		// Only enforce auth on operations that declare a security requirement
+		// Only enforce auth on operations that declare a security requirement.
 		if len(ctx.Operation().Security) == 0 {
 			next(ctx)
 			return
@@ -46,17 +47,56 @@ func NewAPIKeyAuth(apiKey string) func(ctx huma.Context, next func(huma.Context)
 			return
 		}
 
-		if subtle.ConstantTimeCompare([]byte(token), []byte(apiKey)) != 1 {
-			span.SetAttributes(attribute.String("auth.result", "invalid_token"))
-			span.SetStatus(codes.Error, "invalid API key")
-			writeError(ctx, http.StatusForbidden, "invalid API key")
-			return
+		if requiresWriteAccess(ctx.Operation()) {
+			// Write operations: only the write key is accepted.
+			if writeKey == "" || subtle.ConstantTimeCompare([]byte(token), []byte(writeKey)) != 1 {
+				span.SetAttributes(attribute.String("auth.result", "invalid_token"))
+				span.SetStatus(codes.Error, "invalid API key")
+				writeError(ctx, http.StatusForbidden, "invalid API key")
+				return
+			}
+			span.SetAttributes(
+				attribute.String("auth.result", "success"),
+				attribute.String("auth.access_level", "write"),
+			)
+		} else {
+			// Read operations: accept either the read key or the write key.
+			readMatch := subtle.ConstantTimeCompare([]byte(token), []byte(readKey))
+			writeMatch := 0
+			if writeKey != "" {
+				writeMatch = subtle.ConstantTimeCompare([]byte(token), []byte(writeKey))
+			}
+			if readMatch|writeMatch != 1 {
+				span.SetAttributes(attribute.String("auth.result", "invalid_token"))
+				span.SetStatus(codes.Error, "invalid API key")
+				writeError(ctx, http.StatusForbidden, "invalid API key")
+				return
+			}
+
+			level := "read"
+			if writeMatch == 1 {
+				level = "write"
+			}
+			span.SetAttributes(
+				attribute.String("auth.result", "success"),
+				attribute.String("auth.access_level", level),
+			)
 		}
 
-		span.SetAttributes(attribute.String("auth.result", "success"))
 		span.SetStatus(codes.Ok, "")
 		next(ctx)
 	}
+}
+
+// requiresWriteAccess returns true if the operation declares a "writeApiKey"
+// security requirement.
+func requiresWriteAccess(op *huma.Operation) bool {
+	for _, req := range op.Security {
+		if _, ok := req["writeApiKey"]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // writeError writes a JSON error response without needing the huma.API reference.

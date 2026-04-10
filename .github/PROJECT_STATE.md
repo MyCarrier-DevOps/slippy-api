@@ -111,7 +111,34 @@ Added `ForkAwareSlipReader` decorator that resolves forked repository commit loo
 
 ## Current Focus
 
-Ancestry resolution active on all commit-based lookup paths. Decorator chain: `SlipStoreAdapter` → `SlipResolverAdapter` → `CachedSlipReader`. Ready for PR review and merge.
+### ADO-80684: Add SlipWriter Interface (Write API)
+
+**Goal:** Expand slippy-api from read-only to read+write by adding 5 business-level write endpoints backed by `slippy.Client`.
+
+**Write Endpoints (all require `SLIPPY_WRITE_API_KEY`):**
+- `POST /slips` — Create slip for push event (`CreateSlipForPush`)
+- `POST /slips/{correlationID}/steps/{stepName}/start` — Mark step as running
+- `POST /slips/{correlationID}/steps/{stepName}/complete` — Mark step as completed
+- `POST /slips/{correlationID}/steps/{stepName}/fail` — Mark step as failed
+- `PUT /slips/{correlationID}/components/{componentName}/image-tag` — Set component image tag
+
+**Auth model:**
+- `SLIPPY_API_KEY` — read endpoints only
+- `SLIPPY_WRITE_API_KEY` — read + write endpoints (superset)
+
+**Implementation plan:**
+1. `domain/slip.go` — type aliases + `SlipWriter` interface
+2. `config/config.go` — `WriteAPIKey`, `SkipMigrations` fields
+3. `middleware/auth.go` — two-key auth scheme (read vs write security)
+4. `infrastructure/slip_writer.go` — `SlipWriterAdapter` wrapping `*slippy.Client` (not raw store)
+5. `handler/slip_write_handler.go` — HTTP handler + route registration
+6. `main.go` — wire writer, add `writeApiKey` security scheme
+
+**Key decisions:**
+- Wraps `slippy.Client` (business-level) not `slippy.SlipStore` (raw) — avoids reimplementing ancestry resolution, atomic step+history writes
+- Writer bypasses cache/ancestry decorators — writes go directly through the client
+- All 5 methods are synchronous, non-blocking ClickHouse writes
+- Test coverage target: 90%+
 
 ## Architectural Decisions
 

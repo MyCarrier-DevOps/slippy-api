@@ -13,11 +13,12 @@ import (
 func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
-		"SLIPPY_API_KEY", "PORT",
+		"SLIPPY_API_KEY", "SLIPPY_WRITE_API_KEY", "PORT",
 		"DRAGONFLY_HOST", "DRAGONFLY_PORT", "DRAGONFLY_PASSWORD",
 		"CACHE_TTL",
 		"SLIPPY_GITHUB_APP_ID", "SLIPPY_GITHUB_APP_PRIVATE_KEY",
 		"SLIPPY_GITHUB_ENTERPRISE_URL", "SLIPPY_ANCESTRY_DEPTH",
+		"SLIPPY_SKIP_MIGRATIONS",
 		"K8S_NAMESPACE",
 	} {
 		t.Setenv(key, "")
@@ -55,6 +56,8 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, "", cfg.GitHubEnterpriseURL)
 	assert.Equal(t, 25, cfg.AncestryDepth)
 	assert.Equal(t, "ci", cfg.SlipDatabase)
+	assert.Equal(t, "", cfg.WriteAPIKey)
+	assert.True(t, cfg.SkipMigrations)
 }
 
 func TestLoad_SlipDatabase_DerivedFromNamespace(t *testing.T) {
@@ -232,4 +235,55 @@ func TestLoad_AncestryDepthTooSmall(t *testing.T) {
 	cfg, err := Load()
 	assert.Nil(t, cfg)
 	assert.ErrorContains(t, err, "SLIPPY_ANCESTRY_DEPTH must be at least 1")
+}
+
+func TestLoad_WriteAPIKey(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("SLIPPY_API_KEY", "read-key")
+	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
+	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
+	t.Setenv("SLIPPY_WRITE_API_KEY", "write-key-abc")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, "write-key-abc", cfg.WriteAPIKey)
+}
+
+func TestLoad_WriteAPIKeyOptional(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("SLIPPY_API_KEY", "read-key")
+	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
+	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, "", cfg.WriteAPIKey)
+}
+
+func TestLoad_SkipMigrations(t *testing.T) {
+	tests := []struct {
+		name     string
+		envVal   string
+		expected bool
+	}{
+		{"default (absent)", "", true},
+		{"explicit true", "true", true},
+		{"explicit false", "false", false},
+		{"garbage value", "yes", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv("SLIPPY_API_KEY", "key")
+			t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
+			t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
+			if tt.envVal != "" {
+				t.Setenv("SLIPPY_SKIP_MIGRATIONS", tt.envVal)
+			}
+
+			cfg, err := Load()
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, cfg.SkipMigrations)
+		})
+	}
 }

@@ -1,0 +1,295 @@
+package handler
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"strings"
+
+	"github.com/danielgtaylor/huma/v2"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
+
+	"github.com/MyCarrier-DevOps/slippy-api/internal/domain"
+)
+
+// SlipWriteHandler holds dependencies for write route handlers.
+type SlipWriteHandler struct {
+	writer domain.SlipWriter
+}
+
+// NewSlipWriteHandler creates a handler backed by the given writer.
+func NewSlipWriteHandler(writer domain.SlipWriter) *SlipWriteHandler {
+	return &SlipWriteHandler{writer: writer}
+}
+
+// writeApiKeySecurity marks an operation as requiring write API key authentication.
+var writeApiKeySecurity = []map[string][]string{{"writeApiKey": {}}}
+
+// --- Input / Output types ------------------------------------------------
+
+// ComponentDefinitionInput is a JSON-friendly DTO for component definitions.
+// The upstream slippy.ComponentDefinition has no JSON tags, so we need this
+// local type for proper request deserialization.
+type ComponentDefinitionInput struct {
+	Name           string `json:"name"                      doc:"Component identifier"`
+	DockerfilePath string `json:"dockerfile_path,omitempty" doc:"Path to Dockerfile"`
+}
+
+// CreateSlipInput captures the request body for creating a routing slip.
+type CreateSlipInput struct {
+	Body struct {
+		CorrelationID string                     `json:"correlation_id" doc:"Unique slip identifier (from Kafka event)"`
+		Repository    string                     `json:"repository" doc:"Full repository name (owner/repo)"`
+		Branch        string                     `json:"branch" doc:"Git branch name"`
+		CommitSHA     string                     `json:"commit_sha" doc:"Full git commit SHA"`
+		CommitMessage string                     `json:"commit_message,omitempty" doc:"Commit message (enables squash merge PR-based ancestry)"`
+		Components    []ComponentDefinitionInput `json:"components,omitempty" doc:"Components to track in aggregate steps"`
+	}
+}
+
+// CreateSlipOutput wraps the response for slip creation.
+// Warnings are converted from []error to []string for JSON serialization.
+type CreateSlipOutput struct {
+	Body struct {
+		Slip             *domain.Slip `json:"slip"`
+		Warnings         []string     `json:"warnings,omitempty"`
+		AncestryResolved bool         `json:"ancestry_resolved"`
+	}
+}
+
+// StepInput captures path params and optional body for step start/complete.
+type StepInput struct {
+	CorrelationID string `path:"correlationID" doc:"Routing slip correlation ID"`
+	StepName      string `path:"stepName"      doc:"Pipeline step name"`
+	Body          struct {
+		ComponentName string `json:"component_name,omitempty" doc:"Component name (required for aggregate steps, empty for pipeline steps)"`
+	}
+}
+
+// FailStepInput captures path params and body for step failure.
+type FailStepInput struct {
+	CorrelationID string `path:"correlationID" doc:"Routing slip correlation ID"`
+	StepName      string `path:"stepName"      doc:"Pipeline step name"`
+	Body          struct {
+		ComponentName string `json:"component_name,omitempty" doc:"Component name (required for aggregate steps, empty for pipeline steps)"`
+		Reason        string `json:"reason" doc:"Failure reason"`
+	}
+}
+
+// SetImageTagInput captures path params and body for setting an image tag.
+type SetImageTagInput struct {
+	CorrelationID string `path:"correlationID" doc:"Routing slip correlation ID"`
+	ComponentName string `path:"componentName" doc:"Component name"`
+	Body          struct {
+		ImageTag string `json:"image_tag" doc:"Container image tag (e.g. 26.09.aef1234)"`
+	}
+}
+
+// --- Route Registration --------------------------------------------------
+
+// RegisterWriteRoutes registers all write-related routes on the given huma API.
+func RegisterWriteRoutes(api huma.API, h *SlipWriteHandler) {
+	huma.Register(api, huma.Operation{
+		OperationID:   "create-slip",
+		Method:        http.MethodPost,
+		Path:          "/slips",
+		Summary:       "Create a new routing slip for a push event",
+		Security:      writeApiKeySecurity,
+		DefaultStatus: http.StatusCreated,
+	}, h.createSlip)
+
+	huma.Register(api, huma.Operation{
+		OperationID:   "start-step",
+		Method:        http.MethodPost,
+		Path:          "/slips/{correlationID}/steps/{stepName}/start",
+		Summary:       "Mark a pipeline step as running",
+		Security:      writeApiKeySecurity,
+		DefaultStatus: http.StatusNoContent,
+	}, h.startStep)
+
+	huma.Register(api, huma.Operation{
+		OperationID:   "complete-step",
+		Method:        http.MethodPost,
+		Path:          "/slips/{correlationID}/steps/{stepName}/complete",
+		Summary:       "Mark a pipeline step as completed",
+		Security:      writeApiKeySecurity,
+		DefaultStatus: http.StatusNoContent,
+	}, h.completeStep)
+
+	huma.Register(api, huma.Operation{
+		OperationID:   "fail-step",
+		Method:        http.MethodPost,
+		Path:          "/slips/{correlationID}/steps/{stepName}/fail",
+		Summary:       "Mark a pipeline step as failed",
+		Security:      writeApiKeySecurity,
+		DefaultStatus: http.StatusNoContent,
+	}, h.failStep)
+
+	huma.Register(api, huma.Operation{
+		OperationID:   "set-image-tag",
+		Method:        http.MethodPut,
+		Path:          "/slips/{correlationID}/components/{componentName}/image-tag",
+		Summary:       "Record the built container image tag for a component",
+		Security:      writeApiKeySecurity,
+		DefaultStatus: http.StatusNoContent,
+	}, h.setImageTag)
+}
+
+// --- Handlers ------------------------------------------------------------
+
+func (h *SlipWriteHandler) createSlip(ctx context.Context, input *CreateSlipInput) (*CreateSlipOutput, error) {
+	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.createSlip",
+		trace.WithAttributes(
+			attribute.String("slip.correlation_id", input.Body.CorrelationID),
+			attribute.String("slip.repository", input.Body.Repository),
+		),
+	)
+	defer span.End()
+
+	components := make([]domain.ComponentDefinition, len(input.Body.Components))
+	for i, c := range input.Body.Components {
+		components[i] = domain.ComponentDefinition{
+			Name:           c.Name,
+			DockerfilePath: c.DockerfilePath,
+		}
+	}
+
+	result, err := h.writer.CreateSlipForPush(ctx, domain.PushOptions{
+		CorrelationID: input.Body.CorrelationID,
+		Repository:    input.Body.Repository,
+		Branch:        input.Body.Branch,
+		CommitSHA:     input.Body.CommitSHA,
+		CommitMessage: input.Body.CommitMessage,
+		Components:    components,
+	})
+	if err != nil {
+		recordHandlerError(span, err)
+		return nil, mapWriteError(err)
+	}
+
+	span.SetStatus(codes.Ok, "")
+	out := &CreateSlipOutput{}
+	out.Body.Slip = result.Slip
+	out.Body.AncestryResolved = result.AncestryResolved
+	for _, w := range result.Warnings {
+		out.Body.Warnings = append(out.Body.Warnings, w.Error())
+	}
+	return out, nil
+}
+
+func (h *SlipWriteHandler) startStep(ctx context.Context, input *StepInput) (*struct{}, error) {
+	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.startStep",
+		trace.WithAttributes(
+			attribute.String("slip.correlation_id", input.CorrelationID),
+			attribute.String("slip.step_name", input.StepName),
+			attribute.String("slip.component_name", input.Body.ComponentName),
+		),
+	)
+	defer span.End()
+
+	if err := h.writer.StartStep(ctx, input.CorrelationID, input.StepName, input.Body.ComponentName); err != nil {
+		recordHandlerError(span, err)
+		return nil, mapWriteError(err)
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil, nil //nolint:nilnil // huma 204 No Content convention
+}
+
+func (h *SlipWriteHandler) completeStep(ctx context.Context, input *StepInput) (*struct{}, error) {
+	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.completeStep",
+		trace.WithAttributes(
+			attribute.String("slip.correlation_id", input.CorrelationID),
+			attribute.String("slip.step_name", input.StepName),
+			attribute.String("slip.component_name", input.Body.ComponentName),
+		),
+	)
+	defer span.End()
+
+	if err := h.writer.CompleteStep(ctx, input.CorrelationID, input.StepName, input.Body.ComponentName); err != nil {
+		recordHandlerError(span, err)
+		return nil, mapWriteError(err)
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil, nil //nolint:nilnil // huma 204 No Content convention
+}
+
+func (h *SlipWriteHandler) failStep(ctx context.Context, input *FailStepInput) (*struct{}, error) {
+	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.failStep",
+		trace.WithAttributes(
+			attribute.String("slip.correlation_id", input.CorrelationID),
+			attribute.String("slip.step_name", input.StepName),
+			attribute.String("slip.component_name", input.Body.ComponentName),
+		),
+	)
+	defer span.End()
+
+	if err := h.writer.FailStep(
+		ctx,
+		input.CorrelationID,
+		input.StepName,
+		input.Body.ComponentName,
+		input.Body.Reason,
+	); err != nil {
+		recordHandlerError(span, err)
+		return nil, mapWriteError(err)
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil, nil //nolint:nilnil // huma 204 No Content convention
+}
+
+func (h *SlipWriteHandler) setImageTag(ctx context.Context, input *SetImageTagInput) (*struct{}, error) {
+	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.setImageTag",
+		trace.WithAttributes(
+			attribute.String("slip.correlation_id", input.CorrelationID),
+			attribute.String("slip.component_name", input.ComponentName),
+			attribute.String("slip.image_tag", input.Body.ImageTag),
+		),
+	)
+	defer span.End()
+
+	if err := h.writer.SetComponentImageTag(
+		ctx,
+		input.CorrelationID,
+		input.ComponentName,
+		input.Body.ImageTag,
+	); err != nil {
+		recordHandlerError(span, err)
+		return nil, mapWriteError(err)
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil, nil //nolint:nilnil // huma 204 No Content convention
+}
+
+// --- Error Mapping -------------------------------------------------------
+
+// mapWriteError converts domain/store errors to huma status errors for write ops.
+func mapWriteError(err error) error {
+	switch {
+	case errors.Is(err, slippy.ErrSlipNotFound):
+		return huma.NewError(http.StatusNotFound, "slip not found")
+	case errors.Is(err, slippy.ErrInvalidCorrelationID):
+		return huma.NewError(http.StatusBadRequest, "invalid correlation ID")
+	case errors.Is(err, slippy.ErrInvalidRepository):
+		return huma.NewError(http.StatusBadRequest, "invalid repository")
+	case errors.Is(err, slippy.ErrInvalidConfiguration):
+		return huma.NewError(http.StatusBadRequest, "invalid configuration")
+	default:
+		if strings.Contains(err.Error(), "invalid push options") {
+			return huma.NewError(http.StatusBadRequest, err.Error())
+		}
+		var stepErr *slippy.StepError
+		if errors.As(err, &stepErr) {
+			return huma.NewError(http.StatusUnprocessableEntity, stepErr.Error())
+		}
+		var slipErr *slippy.SlipError
+		if errors.As(err, &slipErr) {
+			return huma.NewError(http.StatusUnprocessableEntity, slipErr.Error())
+		}
+		return huma.NewError(http.StatusInternalServerError, "internal error")
+	}
+}
