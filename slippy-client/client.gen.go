@@ -275,8 +275,8 @@ type Step struct {
 	Status      string     `json:"status"`
 }
 
-// StepInputBody defines model for StepInputBody.
-type StepInputBody struct {
+// StepBody defines model for StepBody.
+type StepBody struct {
 	// Schema A URL to the JSON Schema for this object.
 	Schema *string `json:"$schema,omitempty"`
 
@@ -351,13 +351,13 @@ type FindByCommitsJSONRequestBody = FindByCommitsInputBody
 type SetImageTagJSONRequestBody = SetImageTagInputBody
 
 // CompleteStepJSONRequestBody defines body for CompleteStep for application/json ContentType.
-type CompleteStepJSONRequestBody = StepInputBody
+type CompleteStepJSONRequestBody = StepBody
 
 // FailStepJSONRequestBody defines body for FailStep for application/json ContentType.
 type FailStepJSONRequestBody = FailStepInputBody
 
 // StartStepJSONRequestBody defines body for StartStep for application/json ContentType.
-type StartStepJSONRequestBody = StepInputBody
+type StartStepJSONRequestBody = StepBody
 
 // RequestEditorFn  is the function signature for the RequestEditor callback function
 type RequestEditorFn func(ctx context.Context, req *http.Request) error

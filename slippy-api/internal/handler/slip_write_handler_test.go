@@ -192,6 +192,24 @@ func TestStartStep_Success(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
+func TestStartStep_NoBody(t *testing.T) {
+	w := &mockWriter{
+		startStepFn: func(_ context.Context, cID, step, comp string) error {
+			assert.Equal(t, "abc-123", cID)
+			assert.Equal(t, "push_parsed", step)
+			assert.Equal(t, "", comp)
+			return nil
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/push_parsed/start", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
 func TestStartStep_NotFound(t *testing.T) {
 	w := &mockWriter{
 		startStepFn: func(_ context.Context, _, _, _ string) error {

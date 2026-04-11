@@ -62,13 +62,26 @@ type CreateSlipOutput struct {
 	}
 }
 
+// StepBody is the optional request body for step start/complete endpoints.
+type StepBody struct {
+	ComponentName string `json:"component_name,omitempty" doc:"Component name (required for aggregate steps, empty for pipeline steps)"`
+}
+
 // StepInput captures path params and optional body for step start/complete.
+// Body is a pointer so that the request body is optional in the OpenAPI spec —
+// pipeline-level steps don't need a body at all.
 type StepInput struct {
-	CorrelationID string `path:"correlationID" doc:"Routing slip correlation ID"`
-	StepName      string `path:"stepName"      doc:"Pipeline step name"`
-	Body          struct {
-		ComponentName string `json:"component_name,omitempty" doc:"Component name (required for aggregate steps, empty for pipeline steps)"`
+	CorrelationID string    `path:"correlationID" doc:"Routing slip correlation ID"`
+	StepName      string    `path:"stepName"      doc:"Pipeline step name"`
+	Body          *StepBody `                                                       json:",omitempty"`
+}
+
+// componentName returns the component name from the optional body, or empty string if no body.
+func (s *StepInput) componentName() string {
+	if s.Body == nil {
+		return ""
 	}
+	return s.Body.ComponentName
 }
 
 // FailStepInput captures path params and body for step failure.
@@ -183,16 +196,17 @@ func (h *SlipWriteHandler) createSlip(ctx context.Context, input *CreateSlipInpu
 }
 
 func (h *SlipWriteHandler) startStep(ctx context.Context, input *StepInput) (*struct{}, error) {
+	componentName := input.componentName()
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.startStep",
 		trace.WithAttributes(
 			attribute.String("slip.correlation_id", input.CorrelationID),
 			attribute.String("slip.step_name", input.StepName),
-			attribute.String("slip.component_name", input.Body.ComponentName),
+			attribute.String("slip.component_name", componentName),
 		),
 	)
 	defer span.End()
 
-	if err := h.writer.StartStep(ctx, input.CorrelationID, input.StepName, input.Body.ComponentName); err != nil {
+	if err := h.writer.StartStep(ctx, input.CorrelationID, input.StepName, componentName); err != nil {
 		recordHandlerError(span, err)
 		return nil, mapWriteError(err)
 	}
@@ -201,16 +215,17 @@ func (h *SlipWriteHandler) startStep(ctx context.Context, input *StepInput) (*st
 }
 
 func (h *SlipWriteHandler) completeStep(ctx context.Context, input *StepInput) (*struct{}, error) {
+	componentName := input.componentName()
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.completeStep",
 		trace.WithAttributes(
 			attribute.String("slip.correlation_id", input.CorrelationID),
 			attribute.String("slip.step_name", input.StepName),
-			attribute.String("slip.component_name", input.Body.ComponentName),
+			attribute.String("slip.component_name", componentName),
 		),
 	)
 	defer span.End()
 
-	if err := h.writer.CompleteStep(ctx, input.CorrelationID, input.StepName, input.Body.ComponentName); err != nil {
+	if err := h.writer.CompleteStep(ctx, input.CorrelationID, input.StepName, componentName); err != nil {
 		recordHandlerError(span, err)
 		return nil, mapWriteError(err)
 	}

@@ -685,13 +685,13 @@
         ],
         "type": "object"
       },
-      "StepInputBody": {
+      "StepBody": {
         "additionalProperties": false,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
             "examples": [
-              "https://example.com/schemas/StepInputBody.json"
+              "https://example.com/schemas/StepBody.json"
             ],
             "format": "uri",
             "readOnly": true,
@@ -1856,11 +1856,10 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/StepInputBody"
+                "$ref": "#/components/schemas/StepBody"
               }
             }
-          },
-          "required": true
+          }
         },
         "responses": {
           "204": {
@@ -1972,11 +1971,10 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/StepInputBody"
+                "$ref": "#/components/schemas/StepBody"
               }
             }
-          },
-          "required": true
+          }
         },
         "responses": {
           "204": {
