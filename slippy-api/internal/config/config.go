@@ -147,8 +147,12 @@ func Load() (*Config, error) {
 	cfg.WriteAPIKey = os.Getenv("SLIPPY_WRITE_API_KEY")
 
 	// Optional: SLIPPY_SKIP_MIGRATIONS (default: true for backward compatibility)
-	if v := os.Getenv("SLIPPY_SKIP_MIGRATIONS"); v == "false" {
-		cfg.SkipMigrations = false
+	if v := os.Getenv("SLIPPY_SKIP_MIGRATIONS"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("SLIPPY_SKIP_MIGRATIONS must be a valid boolean: %w", err)
+		}
+		cfg.SkipMigrations = b
 	}
 
 	return cfg, nil

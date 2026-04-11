@@ -1,35 +1,45 @@
 # Project State — Slippy Application
 
-> **Last Updated:** 2026-04-08
-> **Status:** goLibMyCarrier bumped to v1.3.72; all checks pass
+> **Last Updated:** 2026-04-10
+> **Status:** Write API implemented (ADO-80684); all checks pass
 
 ## Overview
 
-Read-only API for CI/CD routing slips. Provides endpoints to query routing slips by correlation ID, commit SHA, and repository. Backed by ClickHouse with optional Dragonfly/Redis caching and OpenTelemetry instrumentation. Supports GitHub-based commit ancestry resolution when a commit doesn't have a routing slip.
+REST API for CI/CD routing slips. Provides read endpoints to query routing slips by correlation ID, commit SHA, and repository, plus write endpoints (v1 only) for slip creation and step lifecycle management. Backed by ClickHouse with optional Dragonfly/Redis caching and OpenTelemetry instrumentation. Supports GitHub-based commit ancestry resolution when a commit doesn't have a routing slip.
 
 ## Implemented Systems
 
-### Core API (internal/handler)
+### Core API — Read Endpoints (internal/handler, legacy + /v1)
 - `GET /slips/{correlationID}` — Load slip by correlation ID
 - `GET /slips/by-commit/{owner}/{repo}/{commitSHA}` — Load slip by repo + commit
 - `POST /slips/find-by-commits` — Find first matching slip from commit list
 - `POST /slips/find-all-by-commits` — Find all matching slips from commit list
+- `GET /slips/{correlationID}/image-tags` — Image tag resolution via BuildInfoReader
 - `GET /logs/{correlationID}` — CI job logs with cursor pagination, filtering, configurable sort
 - `GET /health` — Health check
-- Image tag resolution via BuildInfoReader
+
+### Core API — Write Endpoints (internal/handler, /v1 only, requires `SLIPPY_WRITE_API_KEY`)
+- `POST /v1/slips` — Create routing slip for push event (`CreateSlipForPush`)
+- `POST /v1/slips/{correlationID}/steps/{stepName}/start` — Mark step as running
+- `POST /v1/slips/{correlationID}/steps/{stepName}/complete` — Mark step as completed
+- `POST /v1/slips/{correlationID}/steps/{stepName}/fail` — Mark step as failed
+- `PUT /v1/slips/{correlationID}/components/{componentName}/image-tag` — Set component image tag
 
 ### Infrastructure (internal/infrastructure)
 - **SlipStoreAdapter** — Adapts upstream `slippy.SlipStore` to read-only `domain.SlipReader`
+- **SlipWriterAdapter** — Adapts upstream `*slippy.Client` to `domain.SlipWriter` (business-level write operations with OTel instrumentation)
 - **SlipResolverAdapter** — Decorator that delegates all commit-based lookups (`LoadByCommit`, `FindByCommits`, `FindAllByCommits`) to `slippy.Client.ResolveSlip()` for ancestry resolution. Direct ClickHouse lookup is tried first; on `ErrSlipNotFound`, each commit is resolved via the library's ancestry walker.
 - **CachedSlipReader** — Dragonfly/Redis caching decorator (passthrough, cache logic planned)
 - **BuildInfoReader** — Resolves per-component image tags from ClickHouse ci.buildinfo
 - **CIJobLogStore** — Queries `observability.ciJob` with cursor pagination, per-column filtering, composite cursor (`timestamp|cityHash64` tiebreaker)
 
 ### Domain (internal/domain)
+- `slip.go` — `SlipReader`, `SlipWriter` interfaces + type aliases (`Slip`, `PushOptions`, `CreateSlipResult`, `StepStatus`, `StateHistoryEntry`, `AncestryEntry`, `ComponentDefinition`)
 - `ci_job_log.go` — `CIJobLog`, `CIJobLogQuery`, `CIJobLogResult`, `CIJobLogReader` interface, `ErrInvalidCursor` sentinel, `SortOrder` type
+- `image_tag.go` — `ImageTagReader` interface, `ImageTagResult`
 
 ### Middleware
-- API key authentication (`middleware/auth.go`)
+- Two-key API authentication (`middleware/auth.go`) — `SLIPPY_API_KEY` (read), `SLIPPY_WRITE_API_KEY` (read+write)
 
 ### Telemetry
 - OpenTelemetry tracing and metrics (`telemetry/telemetry.go`)
@@ -38,6 +48,33 @@ Read-only API for CI/CD routing slips. Provides endpoints to query routing slips
 - Environment variable-based config (`config/config.go`)
 
 ## Recent Changes
+
+### 2026-04-10: ADO-80684 — SlipWriter Interface (Write API)
+**Feature:** Expanded slippy-api from read-only to read+write by adding 5 business-level write endpoints backed by `slippy.Client`.
+
+**Write endpoints (v1 only, require `SLIPPY_WRITE_API_KEY`):**
+- `POST /v1/slips` — Create slip for push event (includes ancestry resolution)
+- `POST /v1/slips/{correlationID}/steps/{stepName}/start` — Mark step as running
+- `POST /v1/slips/{correlationID}/steps/{stepName}/complete` — Mark step as completed
+- `POST /v1/slips/{correlationID}/steps/{stepName}/fail` — Mark step as failed
+- `PUT /v1/slips/{correlationID}/components/{componentName}/image-tag` — Set image tag
+
+**Two-key auth:**
+- `SLIPPY_API_KEY` — read endpoints only
+- `SLIPPY_WRITE_API_KEY` (optional) — read + write (superset). When absent, server runs read-only.
+
+**Key decisions:**
+- Wraps `*slippy.Client` (business-level) not `slippy.SlipStore` (raw) — avoids reimplementing ancestry resolution, atomic step+history writes, pipeline config lookup
+- Write routes registered on `/v1` only (no legacy unversioned paths)
+- `PipelineConfig` passed to `slippy.Client` for `SetComponentImageTag` and `CreateSlipForPush`
+- `SLIPPY_SKIP_MIGRATIONS` env var (default: `true`) replaces hardcoded `SkipMigrations: true`
+- Adversarial review caught 4 critical issues pre-implementation (PipelineConfig missing, `[]error` JSON serialization, `ComponentDefinition` no JSON tags, auth scheme detection)
+
+**Files created:** `slip_writer.go`, `slip_writer_test.go`, `slip_write_handler.go`, `slip_write_handler_test.go`
+**Files modified:** `domain/slip.go`, `config/config.go`, `middleware/auth.go`, `main.go`, plus tests
+**OpenAPI spec + Go client regenerated** with all 5 write endpoints
+
+**Coverage:** config 100%, handler 100%, infrastructure 97.4%, middleware 97.9%. Lint: 0 issues.
 
 ### 2026-04-08: Bump goLibMyCarrier to v1.3.72
 Updated all goLibMyCarrier submodules (`clickhouse`, `logger`, `slippy`, `clickhousemigrator`, `github`) from v1.3.71 → v1.3.72 on branch `chore/goLibMyCarrier-1.3.72`. `go mod tidy` run. All checks pass: fmt clean, lint 0 issues, tests green (97.1% infra coverage), build OK.
@@ -111,34 +148,7 @@ Added `ForkAwareSlipReader` decorator that resolves forked repository commit loo
 
 ## Current Focus
 
-### ADO-80684: Add SlipWriter Interface (Write API)
-
-**Goal:** Expand slippy-api from read-only to read+write by adding 5 business-level write endpoints backed by `slippy.Client`.
-
-**Write Endpoints (all require `SLIPPY_WRITE_API_KEY`):**
-- `POST /slips` — Create slip for push event (`CreateSlipForPush`)
-- `POST /slips/{correlationID}/steps/{stepName}/start` — Mark step as running
-- `POST /slips/{correlationID}/steps/{stepName}/complete` — Mark step as completed
-- `POST /slips/{correlationID}/steps/{stepName}/fail` — Mark step as failed
-- `PUT /slips/{correlationID}/components/{componentName}/image-tag` — Set component image tag
-
-**Auth model:**
-- `SLIPPY_API_KEY` — read endpoints only
-- `SLIPPY_WRITE_API_KEY` — read + write endpoints (superset)
-
-**Implementation plan:**
-1. `domain/slip.go` — type aliases + `SlipWriter` interface
-2. `config/config.go` — `WriteAPIKey`, `SkipMigrations` fields
-3. `middleware/auth.go` — two-key auth scheme (read vs write security)
-4. `infrastructure/slip_writer.go` — `SlipWriterAdapter` wrapping `*slippy.Client` (not raw store)
-5. `handler/slip_write_handler.go` — HTTP handler + route registration
-6. `main.go` — wire writer, add `writeApiKey` security scheme
-
-**Key decisions:**
-- Wraps `slippy.Client` (business-level) not `slippy.SlipStore` (raw) — avoids reimplementing ancestry resolution, atomic step+history writes
-- Writer bypasses cache/ancestry decorators — writes go directly through the client
-- All 5 methods are synchronous, non-blocking ClickHouse writes
-- Test coverage target: 90%+
+ADO-80684 (SlipWriter) implemented — pending PR review and merge.
 
 ## Architectural Decisions
 

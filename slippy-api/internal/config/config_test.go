@@ -268,8 +268,11 @@ func TestLoad_SkipMigrations(t *testing.T) {
 	}{
 		{"default (absent)", "", true},
 		{"explicit true", "true", true},
+		{"explicit TRUE", "TRUE", true},
+		{"explicit 1", "1", true},
 		{"explicit false", "false", false},
-		{"garbage value", "yes", true},
+		{"explicit FALSE", "FALSE", false},
+		{"explicit 0", "0", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -286,4 +289,16 @@ func TestLoad_SkipMigrations(t *testing.T) {
 			assert.Equal(t, tt.expected, cfg.SkipMigrations)
 		})
 	}
+}
+
+func TestLoad_SkipMigrations_Invalid(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("SLIPPY_API_KEY", "key")
+	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
+	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
+	t.Setenv("SLIPPY_SKIP_MIGRATIONS", "yes")
+
+	cfg, err := Load()
+	assert.Nil(t, cfg)
+	assert.ErrorContains(t, err, "SLIPPY_SKIP_MIGRATIONS must be a valid boolean")
 }

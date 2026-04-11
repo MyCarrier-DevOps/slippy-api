@@ -197,7 +197,7 @@ func (h *SlipWriteHandler) startStep(ctx context.Context, input *StepInput) (*st
 		return nil, mapWriteError(err)
 	}
 	span.SetStatus(codes.Ok, "")
-	return nil, nil //nolint:nilnil // huma 204 No Content convention
+	return &struct{}{}, nil
 }
 
 func (h *SlipWriteHandler) completeStep(ctx context.Context, input *StepInput) (*struct{}, error) {
@@ -215,7 +215,7 @@ func (h *SlipWriteHandler) completeStep(ctx context.Context, input *StepInput) (
 		return nil, mapWriteError(err)
 	}
 	span.SetStatus(codes.Ok, "")
-	return nil, nil //nolint:nilnil // huma 204 No Content convention
+	return &struct{}{}, nil
 }
 
 func (h *SlipWriteHandler) failStep(ctx context.Context, input *FailStepInput) (*struct{}, error) {
@@ -239,7 +239,7 @@ func (h *SlipWriteHandler) failStep(ctx context.Context, input *FailStepInput) (
 		return nil, mapWriteError(err)
 	}
 	span.SetStatus(codes.Ok, "")
-	return nil, nil //nolint:nilnil // huma 204 No Content convention
+	return &struct{}{}, nil
 }
 
 func (h *SlipWriteHandler) setImageTag(ctx context.Context, input *SetImageTagInput) (*struct{}, error) {
@@ -262,7 +262,7 @@ func (h *SlipWriteHandler) setImageTag(ctx context.Context, input *SetImageTagIn
 		return nil, mapWriteError(err)
 	}
 	span.SetStatus(codes.Ok, "")
-	return nil, nil //nolint:nilnil // huma 204 No Content convention
+	return &struct{}{}, nil
 }
 
 // --- Error Mapping -------------------------------------------------------

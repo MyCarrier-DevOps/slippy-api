@@ -1,6 +1,6 @@
 # Slippy-API: Architecture, Functions & Flow
 
-A read-only Go REST API for querying CI/CD routing slips from ClickHouse.
+Go REST API for CI/CD routing slips backed by ClickHouse.
 
 ---
 
@@ -67,7 +67,9 @@ slippy-api/
 
 ## 3. API Endpoints
 
-All endpoints except `/health`, `/docs`, and `/openapi.json` require Bearer token authentication.
+Read endpoints require `SLIPPY_API_KEY` (or `SLIPPY_WRITE_API_KEY`). Write endpoints require `SLIPPY_WRITE_API_KEY` only. Public endpoints (`/health`, `/docs`, `/openapi.json`) require no auth.
+
+### Read Endpoints (legacy + /v1)
 
 | Method | Path | OperationID | Handler | Description |
 |--------|------|-------------|---------|-------------|
@@ -80,6 +82,16 @@ All endpoints except `/health`, `/docs`, and `/openapi.json` require Bearer toke
 | `GET` | `/logs/{correlationID}` | `get-logs` | `CIJobLogHandler.getLogs()` | Query CI job logs (cursor-paginated, filterable) |
 | `GET` | `/openapi.json` | — | Auto-generated | OpenAPI 3.1 spec |
 | `GET` | `/docs` | — | Stoplight Elements | Interactive API docs |
+
+### Write Endpoints (/v1 only)
+
+| Method | Path | OperationID | Handler | Description |
+|--------|------|-------------|---------|-------------|
+| `POST` | `/v1/slips` | `create-slip` | `SlipWriteHandler.createSlip()` | Create routing slip for a push event |
+| `POST` | `/v1/slips/{correlationID}/steps/{stepName}/start` | `start-step` | `SlipWriteHandler.startStep()` | Mark step as running |
+| `POST` | `/v1/slips/{correlationID}/steps/{stepName}/complete` | `complete-step` | `SlipWriteHandler.completeStep()` | Mark step as completed |
+| `POST` | `/v1/slips/{correlationID}/steps/{stepName}/fail` | `fail-step` | `SlipWriteHandler.failStep()` | Mark step as failed |
+| `PUT` | `/v1/slips/{correlationID}/components/{componentName}/image-tag` | `set-image-tag` | `SlipWriteHandler.setImageTag()` | Record built image tag for a component |
 
 ---
 
@@ -98,6 +110,22 @@ type SlipReader interface {
 
 - `Slip` is a type alias to `slippy.Slip` from the upstream goLibMyCarrier library
 - Contains fields: CorrelationID, CommitSHA, Repository, Branch, CreatedAt, Status, FailedStep, etc.
+
+### SlipWriter (`internal/domain/slip.go`)
+
+```go
+type SlipWriter interface {
+    CreateSlipForPush(ctx, opts PushOptions) (*CreateSlipResult, error)
+    StartStep(ctx, correlationID, stepName, componentName string) error
+    CompleteStep(ctx, correlationID, stepName, componentName string) error
+    FailStep(ctx, correlationID, stepName, componentName, reason string) error
+    SetComponentImageTag(ctx, correlationID, componentName, imageTag string) error
+}
+```
+
+- Maps to business-level operations from `slippy.Client` (not raw store methods)
+- Used by pushhookparser (slip creation) and Slippy CI CLI (pre-job/post-job step lifecycle)
+- All methods are synchronous, non-blocking ClickHouse writes
 
 ### ImageTagReader (`internal/domain/image_tag.go`)
 
@@ -161,6 +189,14 @@ type CIJobLogReader interface {
   - `build_scope=modified` → each component carries its actual tag from buildinfo
 - **Tracing**: OTel span under `slippy-api/buildinfo`
 
+### SlipWriterAdapter (`internal/infrastructure/slip_writer.go`)
+
+- **Wraps**: `*slippy.Client` (high-level business client, not raw `SlipStore`)
+- **Purpose**: Implements `domain.SlipWriter` — delegates to `slippy.Client` methods that include business logic (ancestry resolution, atomic step+history writes, pipeline config lookup)
+- **Write path**: Bypasses the read decorator chain (cache, ancestry resolver) — writes go directly through the client to ClickHouse
+- **Tracing**: OTel spans under `slippy-api/writer`
+- **Compile-time check**: `var _ domain.SlipWriter = (*SlipWriterAdapter)(nil)`
+
 ### CIJobLogStore (`internal/infrastructure/cijob.go`)
 
 - **Implements**: `CIJobLogReader`
@@ -174,60 +210,46 @@ type CIJobLogReader interface {
 ## 6. Request Flow
 
 ```
-                           ┌─────────────────────────────────┐
-                           │          HTTP Request            │
-                           └───────────────┬─────────────────┘
-                                           │
-                           ┌───────────────▼─────────────────┐
-                           │   OTel HTTP Instrumentation      │
-                           │   (otelhttp.NewHandler)          │
-                           └───────────────┬─────────────────┘
-                                           │
-                           ┌───────────────▼─────────────────┐
-                           │   Auth Middleware                 │
-                           │   (Bearer token, constant-time)  │
-                           │   → 401/403 if invalid           │
-                           └───────────────┬─────────────────┘
-                                           │
-                           ┌───────────────▼─────────────────┐
-                           │   Huma Router                    │
-                           │   (path + method matching)       │
-                           │   (auto request deserialization) │
-                           └───────────────┬─────────────────┘
-                                           │
-              ┌────────────────────────────┼────────────────────────────┐
-              │                            │                            │
-   ┌──────────▼──────────┐   ┌────────────▼────────────┐   ┌──────────▼──────────┐
-   │   SlipHandler        │   │  ImageTagHandler         │   │  CIJobLogHandler     │
-   │  (4 operations)      │   │  (1 operation)           │   │  (1 operation)       │
-   └──────────┬──────────┘   └────────────┬────────────┘   └──────────┬──────────┘
-              │                            │                            │
-              │ SlipReader                 │ ImageTagReader             │ CIJobLogReader
-              │                            │                            │
-   ┌──────────▼──────────┐   ┌────────────▼────────────┐   ┌──────────▼──────────┐
-   │  CachedSlipReader    │   │  BuildInfoReader         │   │  CIJobLogStore       │
-   │  (Redis/Dragonfly)   │   │  (queries buildinfo +    │   │  (cursor pagination, │
-   │                      │   │   repoproperties tables)  │   │   ClickHouse)        │
-   └──────────┬──────────┘   └────────────┬────────────┘   └──────────┬──────────┘
-              │                            │                            │
-   ┌──────────▼──────────┐                │                            │
-   │  SlipResolverAdapter │                │                            │
-   │  (GitHub ancestry    │                │                            │
-   │   walk fallback)     │                │                            │
-   └──────────┬──────────┘                │                            │
-              │                            │                            │
-   ┌──────────▼──────────┐                │                            │
-   │  SlipStoreAdapter    │                │                            │
-   │  (read-only wrapper) │                │                            │
-   └──────────┬──────────┘                │                            │
-              │                            │                            │
-              └────────────────────────────┼────────────────────────────┘
-                                           │
-                           ┌───────────────▼─────────────────┐
-                           │         ClickHouse               │
-                           │  (ci.*, observability.ciJob)     │
-                           └─────────────────────────────────┘
+                         HTTP Request
+                              │
+                    OTel HTTP Instrumentation
+                              │
+                    Auth Middleware (two-key)
+                    apiKey=read, writeApiKey=read+write
+                              │
+                        Huma Router
+                              │
+         ┌────────┬───────────┼──────────┬──────────┐
+         │        │           │          │          │
+    SlipHandler  SlipWrite  ImageTag  CIJobLog   Health
+    (4 read ops) Handler    Handler   Handler
+         │       (5 write    │          │
+         │        ops)       │          │
+         │        │          │          │
+  ┌──────┘   ┌────┘          │          │
+  │ SlipReader│ SlipWriter   │          │
+  │          │               │          │
+  ▼          ▼               ▼          ▼
+CachedSlip  SlipWriter   BuildInfo   CIJobLog
+Reader      Adapter      Reader      Store
+  │        (*slippy.      │          │
+  ▼         Client)       │          │
+SlipResolver    │         │          │
+Adapter         │         │          │
+  │             │         │          │
+  ▼             │         │          │
+SlipStore       │         │          │
+Adapter         │         │          │
+  │             │         │          │
+  └─────────────┴─────────┴──────────┘
+                │
+           ClickHouse
+     (ci.*, observability.ciJob)
 ```
+
+**Read path**: Handler → CachedSlipReader → SlipResolverAdapter → SlipStoreAdapter → ClickHouse
+
+**Write path**: Handler → SlipWriterAdapter → slippy.Client → ClickHouse (bypasses cache/ancestry decorators)
 
 ---
 
@@ -239,23 +261,20 @@ main() → run()
   ├─ 1. telemetry.Init()          — OpenTelemetry SDK (traces + metrics)
   ├─ 2. config.Load()             — Environment variables → Config struct
   ├─ 3. slippy.LoadPipelineConfig — Pipeline configuration
-  ├─ 4. slippy.NewClickHouseStoreFromConfig — ClickHouse connection (skip migrations)
+  ├─ 4. slippy.NewClickHouseStoreFromConfig — ClickHouse (cfg.SkipMigrations)
   ├─ 5. slippy.NewGitHubClient    — GitHub App client for ancestry resolution
-  ├─ 6. connectCache()            — Optional Redis/Dragonfly (graceful fallback)
-  ├─ 7. buildHandler()            — Wire all components:
+  ├─ 6. slippy.NewClientWithDependencies — slippy.Client (with PipelineConfig)
+  ├─ 7. connectCache()            — Optional Redis/Dragonfly (graceful fallback)
+  ├─ 8. SlipWriterAdapter          — Optional (when SLIPPY_WRITE_API_KEY set)
+  ├─ 9. buildHandler()            — Wire all components:
   │     ├─ SlipStoreAdapter(store)
-  │     ├─ CachedSlipReader(SlipResolverAdapter(storeAdapter, githubClient))
+  │     ├─ CachedSlipReader(SlipResolverAdapter(storeAdapter, slippyClient))
   │     ├─ BuildInfoReader(session, reader)
   │     ├─ CIJobLogStore(session)
-  │     ├─ Auth middleware(apiKey)
-  │     └─ Register routes on huma API
-  └─ 8. HTTP server with graceful shutdown (SIGINT/SIGTERM, 15s timeout)
-```
-
-**Dependency wiring** (decorator chain for slip reads):
-
-```
-Handler → CachedSlipReader → SlipResolverAdapter → SlipStoreAdapter → ClickHouse
+  │     ├─ Auth middleware(readKey, writeKey)
+  │     ├─ Register read routes on legacy + /v1 group
+  │     └─ Register write routes on /v1 only group (if writer != nil)
+  └─ 10. HTTP server with graceful shutdown (SIGINT/SIGTERM, 15s timeout)
 ```
 
 ---
@@ -264,25 +283,35 @@ Handler → CachedSlipReader → SlipResolverAdapter → SlipStoreAdapter → Cl
 
 **File**: `internal/middleware/auth.go`
 
-- **Scheme**: Bearer token in `Authorization` header
+- **Scheme**: Two-key Bearer token in `Authorization` header
+- **Keys**:
+  - `SLIPPY_API_KEY` — grants access to read endpoints only
+  - `SLIPPY_WRITE_API_KEY` (optional) — grants access to both read and write endpoints (superset)
 - **Validation**: Constant-time comparison (`subtle.ConstantTimeCompare`) to prevent timing attacks
+- **Security scheme detection**: Middleware inspects `ctx.Operation().Security` map keys to distinguish `apiKey` (read) from `writeApiKey` (write) operations
 - **Behavior**:
   - Operations without security requirements skip auth (`/health`, `/docs`, `/openapi.json`)
+  - Write operations (`writeApiKey` security): only `SLIPPY_WRITE_API_KEY` accepted
+  - Read operations (`apiKey` security): either key accepted
   - Missing/malformed token → `401 Unauthorized`
   - Invalid token → `403 Forbidden`
-- **OTel**: Span with `auth.result` attribute
+- **OTel**: Span with `auth.result` and `auth.access_level` (`"read"` or `"write"`) attributes
 
 ---
 
 ## 9. Error Handling
 
-| Domain Error | HTTP Status | Description |
-|-------------|-------------|-------------|
-| `slippy.ErrSlipNotFound` | 404 Not Found | Routing slip does not exist |
-| `slippy.ErrInvalidCorrelationID` | 400 Bad Request | Malformed correlation ID |
-| `slippy.ErrInvalidRepository` | 400 Bad Request | Malformed repository string |
-| `domain.ErrInvalidCursor` | 400 Bad Request | Malformed pagination cursor |
-| Generic error | 500 Internal Server Error | Unexpected server error |
+| Domain Error | HTTP Status | Endpoints | Description |
+|-------------|-------------|-----------|-------------|
+| `slippy.ErrSlipNotFound` | 404 Not Found | Read + Write | Routing slip does not exist |
+| `slippy.ErrInvalidCorrelationID` | 400 Bad Request | Read + Write | Malformed correlation ID |
+| `slippy.ErrInvalidRepository` | 400 Bad Request | Read + Write | Malformed repository string |
+| `slippy.ErrInvalidConfiguration` | 400 Bad Request | Write | Invalid pipeline configuration |
+| `"invalid push options: ..."` | 400 Bad Request | Write | Missing required fields in create slip request |
+| `*slippy.StepError` | 422 Unprocessable Entity | Write | Step operation failed (e.g., invalid step name) |
+| `*slippy.SlipError` | 422 Unprocessable Entity | Write | Slip operation failed |
+| `domain.ErrInvalidCursor` | 400 Bad Request | Read | Malformed pagination cursor |
+| Generic error | 500 Internal Server Error | Read + Write | Unexpected server error |
 
 OTel spans distinguish client errors (not-found, invalid input → `Unset` status) from server errors (`Error` status).
 
@@ -292,7 +321,8 @@ OTel spans distinguish client errors (not-found, invalid input → `Unset` statu
 
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
-| `SLIPPY_API_KEY` | Yes | — | Bearer token for API authentication |
+| `SLIPPY_API_KEY` | Yes | — | Bearer token for read endpoint authentication |
+| `SLIPPY_WRITE_API_KEY` | No | — | Bearer token for write endpoints (enables write routes when set) |
 | `PORT` | No | 8080 | HTTP server port |
 | `SLIPPY_GITHUB_APP_ID` | Yes | — | GitHub App ID |
 | `SLIPPY_GITHUB_APP_PRIVATE_KEY` | Yes | — | GitHub App private key (PEM or file path) |
@@ -308,6 +338,7 @@ OTel spans distinguish client errors (not-found, invalid input → `Unset` statu
 | `DRAGONFLY_PORT` | No | 6379 | Cache port |
 | `DRAGONFLY_PASSWORD` | No | — | Cache auth |
 | `CACHE_TTL` | No | 10m | Cache TTL (Go duration) |
+| `SLIPPY_SKIP_MIGRATIONS` | No | true | Set to `false` to enable ClickHouse schema migrations at startup |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | No | — | Enables OTel when set |
 | `OTEL_SERVICE_NAME` | No | slippy-api | OTel service name |
 
@@ -323,6 +354,7 @@ OTel spans distinguish client errors (not-found, invalid input → `Unset` statu
 - `slippy-api/ancestry` — GitHub commit ancestry resolution
 - `slippy-api/buildinfo` — image tag resolution queries
 - `slippy-api/cijob` — CI job log queries
+- `slippy-api/writer` — write operations (create slip, step updates, image tags)
 
 **Export**: gRPC (default) or HTTP/protobuf, configurable via `OTEL_EXPORTER_OTLP_PROTOCOL`
 
@@ -358,8 +390,9 @@ OTel spans distinguish client errors (not-found, invalid input → `Unset` statu
 
 | Pattern | Where | Purpose |
 |---------|-------|---------|
-| **Adapter** | `SlipStoreAdapter` | Enforces read-only interface on read+write store |
+| **Adapter** | `SlipStoreAdapter`, `SlipWriterAdapter` | Enforce domain interfaces on upstream types |
 | **Decorator** | `CachedSlipReader`, `SlipResolverAdapter` | Layer caching and ancestry resolution transparently |
+| **Two-key Auth** | `middleware/auth.go` | Separate read (`apiKey`) and write (`writeApiKey`) security schemes |
 | **Dependency Injection** | All handlers | Receive interfaces, not implementations; wired in `main.go` |
 | **Clean Architecture** | `domain/` → `infrastructure/` → `handler/` | Inner layers have no knowledge of outer layers |
 | **Cursor Pagination** | `CIJobLogStore` | `timestamp\|cityHash64` composite cursor for stable paging |
