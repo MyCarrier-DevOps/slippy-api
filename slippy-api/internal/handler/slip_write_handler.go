@@ -71,9 +71,9 @@ type StepBody struct {
 // Body is a pointer so that the request body is optional in the OpenAPI spec —
 // pipeline-level steps don't need a body at all.
 type StepInput struct {
-	CorrelationID string    `path:"correlationID" doc:"Routing slip correlation ID"`
-	StepName      string    `path:"stepName"      doc:"Pipeline step name"`
-	Body          *StepBody `                                                       json:",omitempty"`
+	CorrelationID string `path:"correlationID" doc:"Routing slip correlation ID"`
+	StepName      string `path:"stepName"      doc:"Pipeline step name"`
+	Body          *StepBody
 }
 
 // componentName returns the component name from the optional body, or empty string if no body.

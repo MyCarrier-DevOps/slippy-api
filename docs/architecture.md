@@ -215,7 +215,7 @@ type CIJobLogReader interface {
                     OTel HTTP Instrumentation
                               │
                     Auth Middleware (two-key)
-                    apiKey=read, writeApiKey=read+write
+                    apiKey=read OR write key, writeApiKey=write key only
                               │
                         Huma Router
                               │
