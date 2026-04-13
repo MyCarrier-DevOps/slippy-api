@@ -1,7 +1,7 @@
 # Project State — Slippy Application
 
-> **Last Updated:** 2026-04-10
-> **Status:** Write API implemented (ADO-80684); all checks pass
+> **Last Updated:** 2026-04-13
+> **Status:** Write API implemented and end-to-end tested (ADO-80684); .dockerignore added; routing_slips write-back behaviour fully understood
 
 ## Overview
 
@@ -48,6 +48,24 @@ REST API for CI/CD routing slips. Provides read endpoints to query routing slips
 - Environment variable-based config (`config/config.go`)
 
 ## Recent Changes
+
+### 2026-04-13: End-to-end testing, .dockerignore, routing_slips write-back analysis
+
+**End-to-end test script** (`slippy-api/scripts/test-script.sh`):
+- Full pipeline simulation: create slip → unit_tests → secret_scan → builds (api+worker) → dev_deploy → dev_tests → hydrate trigger → final read-back
+- Step names confirmed from `workflow-core/workflows/templates/slip-routed/*.yaml`:
+  - `builds` (aggregate, with `component_name`), `unit_tests`, `secret_scan`, `dev_deploy`, `dev_tests`
+- Hydrate hack: re-completes `builds/api` after all steps to trigger aggregate write-back, flushing all `*_status` columns to `routing_slips`
+
+**`slippy-api/.dockerignore` added:**
+- Excludes `.env`/`.env.*`, `coverage.out`, `*.test`, `scripts/`, IDE dirs, `.git/`, `.github/`, `docs/`, `*.md`
+
+**routing_slips write-back behaviour (confirmed from goLibMyCarrier/slippy source):**
+- Pure pipeline steps (`unit_tests`, `secret_scan`, `dev_deploy`, `dev_tests`) write only to `slip_component_states` event log + `state_history` JSON via `AppendHistory`
+- `*_status` columns in `routing_slips` are updated only when aggregate steps (`builds`) trigger `updateAggregateStatusFromComponentStates` → `Load()` → `hydrateSlip()` → full `Update()`
+- `hydrateSlip` reads all steps from `slip_component_states` → all `*_status` columns are refreshed atomically in the same write-back
+- `GET /slips/{id}` always calls `hydrateSlip` in memory → always authoritative regardless of `routing_slips` column state
+- Dashboard query on `routing_slips.*_status` is reliable for abandoned/completed slips (abandonment triggers a full write-back) but lags for in-progress slips with no post-step aggregate activity
 
 ### 2026-04-10: ADO-80684 — SlipWriter Interface (Write API)
 **Feature:** Expanded slippy-api from read-only to read+write by adding 5 business-level write endpoints backed by `slippy.Client`.

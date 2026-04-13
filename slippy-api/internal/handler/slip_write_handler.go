@@ -114,6 +114,7 @@ func RegisterWriteRoutes(api huma.API, h *SlipWriteHandler) {
 		Summary:       "Create a new routing slip for a push event",
 		Security:      writeApiKeySecurity,
 		DefaultStatus: http.StatusCreated,
+		Tags:          []string{"v1"},
 	}, h.createSlip)
 
 	huma.Register(api, huma.Operation{
@@ -123,6 +124,7 @@ func RegisterWriteRoutes(api huma.API, h *SlipWriteHandler) {
 		Summary:       "Mark a pipeline step as running",
 		Security:      writeApiKeySecurity,
 		DefaultStatus: http.StatusNoContent,
+		Tags:          []string{"v1"},
 	}, h.startStep)
 
 	huma.Register(api, huma.Operation{
@@ -132,6 +134,7 @@ func RegisterWriteRoutes(api huma.API, h *SlipWriteHandler) {
 		Summary:       "Mark a pipeline step as completed",
 		Security:      writeApiKeySecurity,
 		DefaultStatus: http.StatusNoContent,
+		Tags:          []string{"v1"},
 	}, h.completeStep)
 
 	huma.Register(api, huma.Operation{
@@ -141,6 +144,7 @@ func RegisterWriteRoutes(api huma.API, h *SlipWriteHandler) {
 		Summary:       "Mark a pipeline step as failed",
 		Security:      writeApiKeySecurity,
 		DefaultStatus: http.StatusNoContent,
+		Tags:          []string{"v1"},
 	}, h.failStep)
 
 	huma.Register(api, huma.Operation{
@@ -150,6 +154,7 @@ func RegisterWriteRoutes(api huma.API, h *SlipWriteHandler) {
 		Summary:       "Record the built container image tag for a component",
 		Security:      writeApiKeySecurity,
 		DefaultStatus: http.StatusNoContent,
+		Tags:          []string{"v1"},
 	}, h.setImageTag)
 }
 

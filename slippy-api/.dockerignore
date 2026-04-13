@@ -1,0 +1,33 @@
+# Development environment
+.env
+.env.*
+
+# Test artifacts
+coverage.out
+*.test
+
+# Scripts (not needed in image)
+scripts/
+
+# Go build cache
+*.exe
+*.dll
+*.so
+*.dylib
+
+# IDE/editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# GitHub CI config
+.github/
+
+# Docs
+docs/
+*.md
