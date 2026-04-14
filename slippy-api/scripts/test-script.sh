@@ -21,6 +21,25 @@ check() {
   fi
 }
 
+# run_step <stepName> [label-prefix]
+# Starts and completes a pipeline-level step (no component_name body).
+run_step() {
+  local name=$1 prefix=${2:-}
+
+  step "${prefix}Start $name"
+  RAW=$(curl -s -w "\n%{http_code}" \
+    -X POST $BASE/v1/slips/$CORR/steps/$name/start \
+    -H "Authorization: Bearer $WRITE_API_KEY")
+  check "start $name" "$(echo "$RAW" | tail -1)" "$(echo "$RAW" | head -1)"
+  sleep 1
+
+  step "${prefix}Complete $name"
+  RAW=$(curl -s -w "\n%{http_code}" \
+    -X POST $BASE/v1/slips/$CORR/steps/$name/complete \
+    -H "Authorization: Bearer $WRITE_API_KEY")
+  check "complete $name" "$(echo "$RAW" | tail -1)" "$(echo "$RAW" | head -1)"
+}
+
 # ── 1. Create slip ────────────────────────────────────────────────────────────
 step "1. Create slip  corr=$CORR  sha=${SHA:0:12}..."
 RAW=$(curl -s -w "\n%{http_code}" -X POST $BASE/v1/slips \
@@ -44,46 +63,27 @@ echo "    status         : $(echo "$BODY" | jq -r '.slip.status')"
 echo "    ancestry       : $(echo "$BODY" | jq -r '.ancestry_resolved')"
 # builds is auto-started by CreateSlipForPush at the pipeline level
 
-# ── 2. Start + Complete unit_tests ─────────────────────────────────────────
-step "2. Start unit_tests"
-RAW=$(curl -s -w "\n%{http_code}" \
-  -X POST $BASE/v1/slips/$CORR/steps/unit_tests/start \
-  -H "Authorization: Bearer $WRITE_API_KEY")
-check "start unit_tests" "$(echo "$RAW" | tail -1)" "$(echo "$RAW" | head -1)"
-sleep 2
+# ── 2. unit_tests ─────────────────────────────────────────────────────────────
+run_step unit_tests "2. "
 
-step "2. Complete unit_tests"
-RAW=$(curl -s -w "\n%{http_code}" \
-  -X POST $BASE/v1/slips/$CORR/steps/unit_tests/complete \
-  -H "Authorization: Bearer $WRITE_API_KEY")
-check "complete unit_tests" "$(echo "$RAW" | tail -1)" "$(echo "$RAW" | head -1)"
+# ── 3. secret_scan ────────────────────────────────────────────────────────────
+run_step secret_scan "3. "
 
-# ── 2b. Start + Complete secret_scan ─────────────────────────────────────────
-step "2b. Start secret_scan"
-RAW=$(curl -s -w "\n%{http_code}" \
-  -X POST $BASE/v1/slips/$CORR/steps/secret_scan/start \
-  -H "Authorization: Bearer $WRITE_API_KEY")
-check "start secret_scan" "$(echo "$RAW" | tail -1)" "$(echo "$RAW" | head -1)"
-sleep 2
+# ── 4. package_artifact ───────────────────────────────────────────────────────
+run_step package_artifact "4. "
 
-step "2b. Complete secret_scan"
-RAW=$(curl -s -w "\n%{http_code}" \
-  -X POST $BASE/v1/slips/$CORR/steps/secret_scan/complete \
-  -H "Authorization: Bearer $WRITE_API_KEY")
-check "complete secret_scan" "$(echo "$RAW" | tail -1)" "$(echo "$RAW" | head -1)"
-
-# ── 3. Start + Complete builds (api + worker) ───────────────────────────────
+# ── 5. builds (aggregate: api + worker) ───────────────────────────────────────
 for COMPONENT in api worker; do
-  step "3. Start builds – $COMPONENT"
+  step "5. Start builds – $COMPONENT"
   RAW=$(curl -s -w "\n%{http_code}" \
     -X POST $BASE/v1/slips/$CORR/steps/builds/start \
     -H "Authorization: Bearer $WRITE_API_KEY" \
     -H "Content-Type: application/json" \
     -d "{\"component_name\": \"$COMPONENT\"}")
   check "start builds/$COMPONENT" "$(echo "$RAW" | tail -1)" "$(echo "$RAW" | head -1)"
-  sleep 2
+  sleep 1
 
-  step "3. Complete builds – $COMPONENT"
+  step "5. Complete builds – $COMPONENT"
   RAW=$(curl -s -w "\n%{http_code}" \
     -X POST $BASE/v1/slips/$CORR/steps/builds/complete \
     -H "Authorization: Bearer $WRITE_API_KEY" \
@@ -92,33 +92,30 @@ for COMPONENT in api worker; do
   check "complete builds/$COMPONENT" "$(echo "$RAW" | tail -1)" "$(echo "$RAW" | head -1)"
 done
 
-# ── 4. Start + Complete dev_deploy ───────────────────────────────────────────
-step "4. Start dev_deploy"
-RAW=$(curl -s -w "\n%{http_code}" \
-  -X POST $BASE/v1/slips/$CORR/steps/dev_deploy/start \
-  -H "Authorization: Bearer $WRITE_API_KEY")
-check "start dev_deploy" "$(echo "$RAW" | tail -1)" "$(echo "$RAW" | head -1)"
-sleep 2
+# ── 6. dev_deploy ─────────────────────────────────────────────────────────────
+run_step dev_deploy "6. "
 
-step "4. Complete dev_deploy"
-RAW=$(curl -s -w "\n%{http_code}" \
-  -X POST $BASE/v1/slips/$CORR/steps/dev_deploy/complete \
-  -H "Authorization: Bearer $WRITE_API_KEY")
-check "complete dev_deploy" "$(echo "$RAW" | tail -1)" "$(echo "$RAW" | head -1)"
+# ── 7. dev_tests ──────────────────────────────────────────────────────────────
+run_step dev_tests "7. "
 
-# ── 5. Start + Complete dev_tests ────────────────────────────────────────────
-step "5. Start dev_tests"
-RAW=$(curl -s -w "\n%{http_code}" \
-  -X POST $BASE/v1/slips/$CORR/steps/dev_tests/start \
-  -H "Authorization: Bearer $WRITE_API_KEY")
-check "start dev_tests" "$(echo "$RAW" | tail -1)" "$(echo "$RAW" | head -1)"
-sleep 2
+# ── 8. preprod_deploy ─────────────────────────────────────────────────────────
+run_step preprod_deploy "8. "
 
-step "5. Complete dev_tests"
-RAW=$(curl -s -w "\n%{http_code}" \
-  -X POST $BASE/v1/slips/$CORR/steps/dev_tests/complete \
-  -H "Authorization: Bearer $WRITE_API_KEY")
-check "complete dev_tests" "$(echo "$RAW" | tail -1)" "$(echo "$RAW" | head -1)"
+# ── 9. preprod_tests ──────────────────────────────────────────────────────────
+run_step preprod_tests "9. "
+
+# ── 10. prod_gate ─────────────────────────────────────────────────────────────
+run_step prod_gate "10. "
+
+# ── 11. prod_release_created ──────────────────────────────────────────────────
+run_step prod_release_created "11. "
+
+# ── 12. prod_deploy ───────────────────────────────────────────────────────────
+run_step prod_deploy "12. "
+
+# ── 13. prod_tests ────────────────────────────────────────────────────────────
+run_step prod_tests "13. "
+
 
 # ── Final read-back ───────────────────────────────────────────────────────────
 step "Final state — GET /slips/$CORR"
