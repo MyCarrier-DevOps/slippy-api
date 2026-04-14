@@ -155,11 +155,28 @@ jobs:
     outputs:
       changed: ${{ steps.check-diff.outputs.changed }}
     steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+
+      - name: Get GitHub App user info
+        id: app-user
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          slug=$(gh api /user --jq .login)
+          id=$(gh api /user --jq .id)
+          echo "name=${slug}" >> "$GITHUB_OUTPUT"
+          echo "email=${id}+${slug}@users.noreply.github.com" >> "$GITHUB_OUTPUT"
+
       - name: Checkout code
         uses: actions/checkout@v6
         with:
           ref: main
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
 
       - uses: actions/setup-go@v6
         with:
@@ -182,8 +199,8 @@ jobs:
       - name: Commit regenerated files
         if: steps.check-diff.outputs.changed == 'true'
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "${{ steps.app-user.outputs.name }}"
+          git config user.email "${{ steps.app-user.outputs.email }}"
           git add slippy-api/api/ slippy-client/client.gen.go slippy-client/go.mod slippy-client/go.sum
           git commit -m "chore: regenerate API contracts and Go client [skip ci]"
           git push
