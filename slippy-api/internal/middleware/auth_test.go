@@ -2,10 +2,16 @@ package middleware
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"errors"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
@@ -288,6 +294,60 @@ func TestRequiresWriteAccess(t *testing.T) {
 			assert.Equal(t, tt.expected, requiresWriteAccess(op))
 		})
 	}
+}
+
+// --- writeError body-writer failure path ---
+
+// errWriter always fails on Write. Used to exercise writeError's log path
+// when the response body cannot be flushed.
+type errWriter struct{}
+
+func (errWriter) Write(_ []byte) (int, error) { return 0, errors.New("write failed") }
+
+// stubHumaContext is a minimal huma.Context that records SetStatus/SetHeader
+// calls and returns a failing BodyWriter. Every other method is a zero-value
+// stub that exists only to satisfy the interface.
+type stubHumaContext struct {
+	statusSet int
+	headers   map[string]string
+}
+
+func (s *stubHumaContext) Operation() *huma.Operation  { return &huma.Operation{} }
+func (s *stubHumaContext) Context() context.Context    { return context.Background() }
+func (s *stubHumaContext) TLS() *tls.ConnectionState   { return nil }
+func (s *stubHumaContext) Version() huma.ProtoVersion  { return huma.ProtoVersion{} }
+func (s *stubHumaContext) Method() string              { return "" }
+func (s *stubHumaContext) Host() string                { return "" }
+func (s *stubHumaContext) RemoteAddr() string          { return "" }
+func (s *stubHumaContext) URL() url.URL                { return url.URL{} }
+func (s *stubHumaContext) Param(_ string) string       { return "" }
+func (s *stubHumaContext) Query(_ string) string       { return "" }
+func (s *stubHumaContext) Header(_ string) string      { return "" }
+func (s *stubHumaContext) EachHeader(_ func(string, string)) {}
+func (s *stubHumaContext) BodyReader() io.Reader       { return nil }
+func (s *stubHumaContext) GetMultipartForm() (*multipart.Form, error) {
+	return nil, errors.New("not supported")
+}
+func (s *stubHumaContext) SetReadDeadline(_ time.Time) error { return nil }
+func (s *stubHumaContext) SetStatus(code int)                { s.statusSet = code }
+func (s *stubHumaContext) Status() int                       { return s.statusSet }
+func (s *stubHumaContext) SetHeader(name, value string) {
+	if s.headers == nil {
+		s.headers = map[string]string{}
+	}
+	s.headers[name] = value
+}
+func (s *stubHumaContext) AppendHeader(name, value string) { s.SetHeader(name, value) }
+func (s *stubHumaContext) BodyWriter() io.Writer           { return errWriter{} }
+
+// TestWriteError_BodyWriterFailure ensures the defensive log branch fires when
+// BodyWriter().Write returns an error. Status and Content-Type must still be
+// set, and the function must not panic.
+func TestWriteError_BodyWriterFailure(t *testing.T) {
+	ctx := &stubHumaContext{}
+	writeError(ctx, http.StatusForbidden, "forbidden")
+	assert.Equal(t, http.StatusForbidden, ctx.statusSet)
+	assert.Equal(t, "application/json", ctx.headers["Content-Type"])
 }
 
 // --- extractBearerToken ---

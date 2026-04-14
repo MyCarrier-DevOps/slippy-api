@@ -296,3 +296,211 @@ func TestSlipWriterAdapter_SetComponentImageTag_NoPipelineConfig(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "no pipeline config")
 }
+
+// --- Hydration (hydrateAndPersist) ---
+//
+// "push_parsed" is a plain pipeline step in testPipelineConfigJSON (no aggregates field).
+// "builds_completed" is an aggregate step (aggregates "build").
+
+func TestSlipWriterAdapter_StartStep_PipelineStep_TriggersHydration(t *testing.T) {
+	hydrationSlip := &slippy.Slip{CorrelationID: "abc-123"}
+	var updateCalled bool
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			return nil
+		},
+		loadFn: func(_ context.Context, id string) (*slippy.Slip, error) {
+			assert.Equal(t, "abc-123", id)
+			return hydrationSlip, nil
+		},
+		updateFn: func(_ context.Context, slip *slippy.Slip) error {
+			updateCalled = true
+			assert.Equal(t, hydrationSlip, slip)
+			return nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	err := adapter.StartStep(context.Background(), "abc-123", "push_parsed", "")
+	require.NoError(t, err)
+	assert.True(t, updateCalled, "expected hydrateAndPersist to call Update for pipeline step")
+}
+
+func TestSlipWriterAdapter_CompleteStep_PipelineStep_TriggersHydration(t *testing.T) {
+	hydrationSlip := &slippy.Slip{CorrelationID: "abc-123"}
+	var updateCalled bool
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			return nil
+		},
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			return hydrationSlip, nil
+		},
+		updateFn: func(_ context.Context, _ *slippy.Slip) error {
+			updateCalled = true
+			return nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	err := adapter.CompleteStep(context.Background(), "abc-123", "push_parsed", "")
+	require.NoError(t, err)
+	assert.True(t, updateCalled, "expected hydrateAndPersist to call Update for pipeline step")
+}
+
+func TestSlipWriterAdapter_FailStep_PipelineStep_TriggersHydration(t *testing.T) {
+	hydrationSlip := &slippy.Slip{CorrelationID: "abc-123"}
+	var updateCalled bool
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			return nil
+		},
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			return hydrationSlip, nil
+		},
+		updateFn: func(_ context.Context, _ *slippy.Slip) error {
+			updateCalled = true
+			return nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	err := adapter.FailStep(context.Background(), "abc-123", "push_parsed", "", "test failure")
+	require.NoError(t, err)
+	assert.True(t, updateCalled, "expected hydrateAndPersist to call Update for pipeline step")
+}
+
+func TestSlipWriterAdapter_StartStep_ComponentStep_SkipsHydration(t *testing.T) {
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			return nil
+		},
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			t.Fatal("Load should not be called for component steps")
+			return nil, nil
+		},
+		updateFn: func(_ context.Context, _ *slippy.Slip) error {
+			t.Fatal("Update should not be called for component steps")
+			return nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	// componentName != "" → hydration must be skipped.
+	err := adapter.StartStep(context.Background(), "abc-123", "builds_completed", "api")
+	require.NoError(t, err)
+}
+
+func TestSlipWriterAdapter_CompleteStep_AggregateStep_SkipsHydration(t *testing.T) {
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			return nil
+		},
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			t.Fatal("Load should not be called: aggregate steps hydrate internally")
+			return nil, nil
+		},
+		updateFn: func(_ context.Context, _ *slippy.Slip) error {
+			t.Fatal("Update should not be called: aggregate steps hydrate internally")
+			return nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	// builds_completed is an aggregate step; even with empty componentName, hydration
+	// is skipped because the store path already calls Load + Update internally.
+	err := adapter.CompleteStep(context.Background(), "abc-123", "builds_completed", "")
+	require.NoError(t, err)
+}
+
+func TestSlipWriterAdapter_HydrationError_NonFatal(t *testing.T) {
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			return nil
+		},
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			return nil, errors.New("clickhouse unavailable")
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	// The step write succeeded; hydration failing must not propagate as an error.
+	err := adapter.CompleteStep(context.Background(), "abc-123", "push_parsed", "")
+	require.NoError(t, err)
+}
+
+func TestSlipWriterAdapter_StartStep_HydrationError_NonFatal(t *testing.T) {
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			return nil
+		},
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			return nil, errors.New("clickhouse unavailable")
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	err := adapter.StartStep(context.Background(), "abc-123", "push_parsed", "")
+	require.NoError(t, err)
+}
+
+func TestSlipWriterAdapter_FailStep_HydrationError_NonFatal(t *testing.T) {
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			return nil
+		},
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			return nil, errors.New("clickhouse unavailable")
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	err := adapter.FailStep(context.Background(), "abc-123", "push_parsed", "", "oops")
+	require.NoError(t, err)
+}
+
+// TestSlipWriterAdapter_HydrateAndPersist_UpdateError exercises hydrateAndPersist's
+// Update error path: Load returns a slip, but Store().Update fails. The write path
+// still succeeds because hydration errors are non-fatal.
+func TestSlipWriterAdapter_HydrateAndPersist_UpdateError(t *testing.T) {
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			return nil
+		},
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			return &slippy.Slip{CorrelationID: "abc-123"}, nil
+		},
+		updateFn: func(_ context.Context, _ *slippy.Slip) error {
+			return errors.New("update failed")
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	err := adapter.CompleteStep(context.Background(), "abc-123", "push_parsed", "")
+	require.NoError(t, err, "hydration update errors must not propagate")
+}
+
+// TestSlipWriterAdapter_IsPipelineStep_NilPipelineConfig exercises the fallback
+// branch where the client has no pipeline config — isPipelineStep returns true,
+// so hydration still runs.
+func TestSlipWriterAdapter_IsPipelineStep_NilPipelineConfig(t *testing.T) {
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			return nil
+		},
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			return &slippy.Slip{CorrelationID: "abc-123"}, nil
+		},
+		updateFn: func(_ context.Context, _ *slippy.Slip) error {
+			return nil
+		},
+	}
+	// Construct a client with no pipeline config so PipelineConfig() returns nil.
+	client := slippy.NewClientWithDependencies(store, &mockGitHubAPI{}, slippy.Config{})
+	adapter := NewSlipWriterAdapter(client)
+
+	// componentName empty and pipelineCfg nil → isPipelineStep returns true →
+	// hydrateAndPersist is invoked. Both Load and Update must be called.
+	err := adapter.CompleteStep(context.Background(), "abc-123", "anything", "")
+	require.NoError(t, err)
+}

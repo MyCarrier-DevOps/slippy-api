@@ -232,6 +232,56 @@ func TestBuildHandler_OpenAPISpecContainsV1Routes(t *testing.T) {
 	assert.Contains(t, paths, "/v1/slips/{correlationID}")
 }
 
+// --- Optional handler registration tests ---
+
+// TestBuildHandler_WithAllOptionalHandlers exercises the conditional branches
+// in buildHandler that register image-tag, ci-job-log, and write routes when
+// their respective readers/writer are non-nil.
+func TestBuildHandler_WithAllOptionalHandlers(t *testing.T) {
+	cfg := &config.Config{APIKey: "test-key", WriteAPIKey: "write-key", Port: 8080}
+	reader := newStubSlipReader()
+
+	h := buildHandler(cfg, reader, &stubSlipWriter{}, &stubImageTagReader{}, &stubCIJobLogReader{})
+	require.NotNil(t, h)
+
+	// The OpenAPI spec should now contain paths registered via each optional handler.
+	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var spec map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&spec))
+	paths, ok := spec["paths"].(map[string]any)
+	require.True(t, ok)
+
+	// Image tag routes registered (expect a /v1/image-tags or similar path).
+	// Write routes registered on /v1 only.
+	var hasWriteRoute, hasImageTagRoute, hasCIJobLogRoute bool
+	for path := range paths {
+		if strings.Contains(path, "image-tag") || strings.Contains(path, "imagetag") {
+			hasImageTagRoute = true
+		}
+		if strings.Contains(path, "ci-job-log") || strings.Contains(path, "cijoblog") || strings.Contains(path, "logs") {
+			hasCIJobLogRoute = true
+		}
+		if strings.HasPrefix(path, "/v1/") && (strings.Contains(path, "slip") || strings.Contains(path, "step")) {
+			// Write routes register under /v1 for slip/step mutation endpoints.
+			// Any /v1/slips* POST/PUT/etc. indicates the writer path was exercised.
+			if ops, ok := paths[path].(map[string]any); ok {
+				for method := range ops {
+					if method == "post" || method == "put" || method == "patch" {
+						hasWriteRoute = true
+					}
+				}
+			}
+		}
+	}
+	assert.True(t, hasImageTagRoute, "expected image tag route to be registered")
+	assert.True(t, hasCIJobLogRoute, "expected ci job log route to be registered")
+	assert.True(t, hasWriteRoute, "expected write route to be registered")
+}
+
 // --- Spec generation (gated behind GENERATE_SPEC=1) ---
 
 func TestGenerateOpenAPISpec(t *testing.T) {

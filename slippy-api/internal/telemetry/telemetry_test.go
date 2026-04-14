@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
 )
 
 // shutdownQuickly calls shutdown with a short timeout so tests don't block
@@ -159,4 +160,57 @@ func TestParseEndpoint(t *testing.T) {
 func TestNoopShutdown(t *testing.T) {
 	err := noopShutdown(context.Background())
 	assert.NoError(t, err)
+}
+
+// TestNewMetricExporter_UnsupportedProtocol exercises the default branch of
+// newMetricExporter directly. Init's metric-error branch is unreachable via
+// the public entrypoint because newTraceExporter fails first on the same
+// protocol, so test the metric exporter directly to avoid dead coverage.
+func TestNewMetricExporter_UnsupportedProtocol(t *testing.T) {
+	_, err := newMetricExporter(context.Background(), "invalid", "localhost:4317", false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported OTEL_EXPORTER_OTLP_PROTOCOL")
+}
+
+// TestNewMetricExporter_GRPCAndHTTP exercises the grpc and http/protobuf
+// branches of newMetricExporter directly. The underlying New() calls with
+// WithInsecure succeed without a running collector.
+func TestNewMetricExporter_GRPCAndHTTP(t *testing.T) {
+	ctx := context.Background()
+	exp, err := newMetricExporter(ctx, protocolGRPC, "localhost:4317", false)
+	require.NoError(t, err)
+	require.NotNil(t, exp)
+	shutdownExporterQuickly(t, exp.Shutdown)
+
+	exp, err = newMetricExporter(ctx, protocolHTTP, "localhost:4318", true)
+	require.NoError(t, err)
+	require.NotNil(t, exp)
+	shutdownExporterQuickly(t, exp.Shutdown)
+}
+
+func shutdownExporterQuickly(t *testing.T, fn func(context.Context) error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_ = fn(ctx)
+}
+
+// TestSetupTestTracing covers testutil.go: the helper installs an in-memory
+// span recorder, returns it, and the cleanup restores the previous provider.
+// Other packages' tests use this helper but their coverage does not count
+// toward this package's statistics.
+func TestSetupTestTracing(t *testing.T) {
+	prev := otel.GetTracerProvider()
+	recorder, cleanup := SetupTestTracing()
+	require.NotNil(t, recorder)
+	require.NotNil(t, cleanup)
+	assert.NotEqual(t, prev, otel.GetTracerProvider(), "expected tracer provider to change")
+
+	// Exercise the recorder: start and end a span, verify it is captured.
+	_, span := otel.Tracer("testutil-test").Start(context.Background(), "op")
+	span.End()
+	assert.Len(t, recorder.Ended(), 1)
+
+	cleanup()
+	assert.Equal(t, prev, otel.GetTracerProvider(), "expected tracer provider to be restored")
 }

@@ -120,17 +120,6 @@ RAW=$(curl -s -w "\n%{http_code}" \
   -H "Authorization: Bearer $WRITE_API_KEY")
 check "complete dev_tests" "$(echo "$RAW" | tail -1)" "$(echo "$RAW" | head -1)"
 
-# ── Hydrate: re-complete builds/api to trigger aggregate write-back ───────────
-# This forces hydrateSlip → full routing_slips row update so all *_status columns
-# (dev_deploy_status, dev_tests_status, etc.) are flushed to the DB.
-step "Hydrate — re-complete builds/api"
-RAW=$(curl -s -w "\n%{http_code}" \
-  -X POST $BASE/v1/slips/$CORR/steps/builds/complete \
-  -H "Authorization: Bearer $WRITE_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"component_name": "api"}')
-check "hydrate builds/api" "$(echo "$RAW" | tail -1)" "$(echo "$RAW" | head -1)"
-
 # ── Final read-back ───────────────────────────────────────────────────────────
 step "Final state — GET /slips/$CORR"
 RAW=$(curl -s -w "\n%{http_code}" $BASE/slips/$CORR \

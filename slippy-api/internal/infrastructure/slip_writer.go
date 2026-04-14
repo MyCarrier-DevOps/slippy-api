@@ -70,6 +70,11 @@ func (a *SlipWriterAdapter) StartStep(ctx context.Context, correlationID, stepNa
 		recordWriterError(span, err)
 		return err
 	}
+	if a.isPipelineStep(stepName, componentName) {
+		if err := a.hydrateAndPersist(ctx, correlationID); err != nil {
+			span.AddEvent("hydration failed", trace.WithAttributes(attribute.String("error", err.Error())))
+		}
+	}
 	return nil
 }
 
@@ -88,6 +93,11 @@ func (a *SlipWriterAdapter) CompleteStep(ctx context.Context, correlationID, ste
 		recordWriterError(span, err)
 		return err
 	}
+	if a.isPipelineStep(stepName, componentName) {
+		if err := a.hydrateAndPersist(ctx, correlationID); err != nil {
+			span.AddEvent("hydration failed", trace.WithAttributes(attribute.String("error", err.Error())))
+		}
+	}
 	return nil
 }
 
@@ -105,6 +115,11 @@ func (a *SlipWriterAdapter) FailStep(ctx context.Context, correlationID, stepNam
 	if err := a.client.FailStep(ctx, correlationID, stepName, componentName, reason); err != nil {
 		recordWriterError(span, err)
 		return err
+	}
+	if a.isPipelineStep(stepName, componentName) {
+		if err := a.hydrateAndPersist(ctx, correlationID); err != nil {
+			span.AddEvent("hydration failed", trace.WithAttributes(attribute.String("error", err.Error())))
+		}
 	}
 	return nil
 }
@@ -127,6 +142,56 @@ func (a *SlipWriterAdapter) SetComponentImageTag(
 		recordWriterError(span, err)
 		return err
 	}
+	return nil
+}
+
+// isPipelineStep reports whether a step transition should trigger a post-write
+// hydration. Returns true only when componentName is empty (not a component-level
+// event) and the step is not an aggregate step (aggregate steps invoke
+// updateAggregateStatusFromComponentStatesWithHistory internally, which already
+// calls Load + Update, so we must not duplicate that work).
+func (a *SlipWriterAdapter) isPipelineStep(stepName, componentName string) bool {
+	if componentName != "" {
+		return false
+	}
+	if pipelineCfg := a.client.PipelineConfig(); pipelineCfg != nil {
+		return !pipelineCfg.IsAggregateStep(stepName)
+	}
+	return true
+}
+
+// hydrateAndPersist reads the current slip state from ClickHouse (which invokes
+// hydrateSlip to recompute all *_status columns from slip_component_states), then
+// persists the hydrated row back via Update. This flushes correct *_status values
+// for pipeline steps, whose AppendHistory path copies columns verbatim and would
+// otherwise leave *_status stale until the next aggregate write.
+//
+// Update is called directly on the store rather than through Client because Client
+// does not expose an Update method. This intentionally bypasses any future
+// Client-level hooks around Update; revisit if Client gains such hooks.
+//
+// Errors are returned to the caller but treated as non-fatal — the step event is
+// already durably recorded in slip_component_states.
+func (a *SlipWriterAdapter) hydrateAndPersist(ctx context.Context, correlationID string) error {
+	ctx, span := otel.Tracer(writerTracerName).Start(ctx, "writer.hydrateAndPersist",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("slip.correlation_id", correlationID),
+		),
+	)
+	defer span.End()
+
+	slip, err := a.client.Load(ctx, correlationID)
+	if err != nil {
+		recordWriterError(span, err)
+		return fmt.Errorf("hydrateAndPersist: load failed: %w", err)
+	}
+
+	if err := a.client.Store().Update(ctx, slip); err != nil {
+		recordWriterError(span, err)
+		return fmt.Errorf("hydrateAndPersist: update failed: %w", err)
+	}
+
 	return nil
 }
 
