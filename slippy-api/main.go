@@ -39,25 +39,24 @@ func main() {
 func buildHandler(
 	cfg *config.Config,
 	reader domain.SlipReader,
+	writer domain.SlipWriter,
 	imageTagReader domain.ImageTagReader,
 	ciJobLogReader domain.CIJobLogReader,
 ) http.Handler {
 	mux := http.NewServeMux()
 	apiConfig := huma.DefaultConfig("Slippy API", "1.0.0")
-	apiConfig.Info.Description = "Read-only API for CI/CD routing slips"
+	apiConfig.Info.Description = "API for CI/CD routing slips"
 
-	// Define the API key security scheme used by protected operations.
+	// Define the security schemes used by protected operations.
 	apiConfig.Components.SecuritySchemes = map[string]*huma.SecurityScheme{
-		"apiKey": {
-			Type:   "http",
-			Scheme: "bearer",
-		},
+		"apiKey":      {Type: "http", Scheme: "bearer"},
+		"writeApiKey": {Type: "http", Scheme: "bearer"},
 	}
 
 	api := humago.New(mux, apiConfig)
 
 	// Register authentication middleware.
-	api.UseMiddleware(middleware.NewAPIKeyAuth(cfg.APIKey))
+	api.UseMiddleware(middleware.NewAPIKeyAuth(cfg.APIKey, cfg.WriteAPIKey))
 
 	// Register routes on both unversioned (legacy) and /v1 paths.
 	// The empty prefix keeps existing routes unchanged for backward compatibility.
@@ -78,6 +77,13 @@ func buildHandler(
 	if ciJobLogReader != nil {
 		clh := handler.NewCIJobLogHandler(ciJobLogReader)
 		handler.RegisterCIJobLogRoutes(grp, clh)
+	}
+
+	// Register write routes on v1 only (no legacy unversioned paths).
+	if writer != nil {
+		v1Only := huma.NewGroup(api, "/v1")
+		wh := handler.NewSlipWriteHandler(writer)
+		handler.RegisterWriteRoutes(v1Only, wh)
 	}
 
 	// Wrap with OpenTelemetry instrumentation.
@@ -153,7 +159,7 @@ func run() error {
 		return fmt.Errorf("clickhouse config: %w", err)
 	}
 	store, err := slippy.NewClickHouseStoreFromConfig(chCfg, slippy.ClickHouseStoreOptions{
-		SkipMigrations: true, // read-only API — no schema changes
+		SkipMigrations: cfg.SkipMigrations,
 		PipelineConfig: pipelineCfg,
 		Database:       cfg.SlipDatabase,
 	})
@@ -183,7 +189,8 @@ func run() error {
 		return fmt.Errorf("github client: %w", ghErr)
 	}
 	slippyClient := slippy.NewClientWithDependencies(store, ghClient, slippy.Config{
-		AncestryDepth: cfg.AncestryDepth,
+		AncestryDepth:  cfg.AncestryDepth,
+		PipelineConfig: pipelineCfg,
 	})
 	slipReader := infrastructure.NewSlipResolverAdapter(slippyClient, adapter)
 	log.Printf("github ancestry resolution enabled (depth=%d)", cfg.AncestryDepth)
@@ -200,8 +207,16 @@ func run() error {
 	// Uses the same ClickHouse session to query observability.ciJob.
 	ciJobLogReader := infrastructure.NewCIJobLogStore(store.Session())
 
+	// --- Optional write support ---
+	// When SLIPPY_WRITE_API_KEY is configured, expose write endpoints.
+	var writer domain.SlipWriter
+	if cfg.WriteAPIKey != "" {
+		writer = infrastructure.NewSlipWriterAdapter(slippyClient)
+		log.Printf("write endpoints enabled")
+	}
+
 	// --- HTTP Server ---
-	otelHandler := buildHandler(cfg, reader, imageTagReader, ciJobLogReader)
+	otelHandler := buildHandler(cfg, reader, writer, imageTagReader, ciJobLogReader)
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
 		Handler:           otelHandler,

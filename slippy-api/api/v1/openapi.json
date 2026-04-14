@@ -100,6 +100,23 @@
         ],
         "type": "object"
       },
+      "ComponentDefinitionInput": {
+        "additionalProperties": false,
+        "properties": {
+          "dockerfile_path": {
+            "description": "Path to Dockerfile",
+            "type": "string"
+          },
+          "name": {
+            "description": "Component identifier",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
       "ComponentStepData": {
         "additionalProperties": false,
         "properties": {
@@ -133,6 +150,91 @@
         "required": [
           "component",
           "status"
+        ],
+        "type": "object"
+      },
+      "CreateSlipInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/CreateSlipInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "branch": {
+            "description": "Git branch name",
+            "type": "string"
+          },
+          "commit_message": {
+            "description": "Commit message (enables squash merge PR-based ancestry)",
+            "type": "string"
+          },
+          "commit_sha": {
+            "description": "Full git commit SHA",
+            "type": "string"
+          },
+          "components": {
+            "description": "Components to track in aggregate steps",
+            "items": {
+              "$ref": "#/components/schemas/ComponentDefinitionInput"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "correlation_id": {
+            "description": "Unique slip identifier (from Kafka event)",
+            "type": "string"
+          },
+          "repository": {
+            "description": "Full repository name (owner/repo)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "correlation_id",
+          "repository",
+          "branch",
+          "commit_sha"
+        ],
+        "type": "object"
+      },
+      "CreateSlipOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/CreateSlipOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "ancestry_resolved": {
+            "type": "boolean"
+          },
+          "slip": {
+            "$ref": "#/components/schemas/Slip"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "slip",
+          "ancestry_resolved"
         ],
         "type": "object"
       },
@@ -215,6 +317,32 @@
             "type": "string"
           }
         },
+        "type": "object"
+      },
+      "FailStepInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/FailStepInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "component_name": {
+            "description": "Component name (required for aggregate steps, empty for pipeline steps)",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Failure reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
         "type": "object"
       },
       "FindAllByCommitsItem": {
@@ -385,6 +513,28 @@
         ],
         "type": "object"
       },
+      "SetImageTagInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/SetImageTagInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "image_tag": {
+            "description": "Container image tag (e.g. 26.09.aef1234)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "image_tag"
+        ],
+        "type": "object"
+      },
       "Slip": {
         "additionalProperties": false,
         "properties": {
@@ -534,17 +684,40 @@
           "status"
         ],
         "type": "object"
+      },
+      "StepBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/StepBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "component_name": {
+            "description": "Component name (required for aggregate steps, empty for pipeline steps)",
+            "type": "string"
+          }
+        },
+        "type": "object"
       }
     },
     "securitySchemes": {
       "apiKey": {
         "scheme": "bearer",
         "type": "http"
+      },
+      "writeApiKey": {
+        "scheme": "bearer",
+        "type": "http"
       }
     }
   },
   "info": {
-    "description": "Read-only API for CI/CD routing slips",
+    "description": "API for CI/CD routing slips",
     "title": "Slippy API",
     "version": "1.0.0"
   },
@@ -1290,6 +1463,52 @@
         ]
       }
     },
+    "/v1/slips": {
+      "post": {
+        "operationId": "create-slip",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSlipInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateSlipOutputBody"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "writeApiKey": []
+          }
+        ],
+        "summary": "Create a new routing slip for a push event",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
     "/v1/slips/by-commit/{owner}/{repo}/{commitSHA}": {
       "get": {
         "operationId": "v1-get-slip-by-commit",
@@ -1504,6 +1723,67 @@
         ]
       }
     },
+    "/v1/slips/{correlationID}/components/{componentName}/image-tag": {
+      "put": {
+        "operationId": "set-image-tag",
+        "parameters": [
+          {
+            "description": "Routing slip correlation ID",
+            "in": "path",
+            "name": "correlationID",
+            "required": true,
+            "schema": {
+              "description": "Routing slip correlation ID",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Component name",
+            "in": "path",
+            "name": "componentName",
+            "required": true,
+            "schema": {
+              "description": "Component name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetImageTagInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "writeApiKey": []
+          }
+        ],
+        "summary": "Record the built container image tag for a component",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
     "/v1/slips/{correlationID}/image-tags": {
       "get": {
         "description": "Looks up the slip by correlation ID, determines build_scope from ci.repoproperties, and returns per-component image tags. For build_scope=all, all components share the slip-computed tag (YY.WW.SHA7). For build_scope=modified, each component carries its actual tag from ci.buildinfo.",
@@ -1548,6 +1828,187 @@
           }
         ],
         "summary": "Resolve per-component image tags for a routing slip",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/v1/slips/{correlationID}/steps/{stepName}/complete": {
+      "post": {
+        "operationId": "complete-step",
+        "parameters": [
+          {
+            "description": "Routing slip correlation ID",
+            "in": "path",
+            "name": "correlationID",
+            "required": true,
+            "schema": {
+              "description": "Routing slip correlation ID",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Pipeline step name",
+            "in": "path",
+            "name": "stepName",
+            "required": true,
+            "schema": {
+              "description": "Pipeline step name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StepBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "writeApiKey": []
+          }
+        ],
+        "summary": "Mark a pipeline step as completed",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/v1/slips/{correlationID}/steps/{stepName}/fail": {
+      "post": {
+        "operationId": "fail-step",
+        "parameters": [
+          {
+            "description": "Routing slip correlation ID",
+            "in": "path",
+            "name": "correlationID",
+            "required": true,
+            "schema": {
+              "description": "Routing slip correlation ID",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Pipeline step name",
+            "in": "path",
+            "name": "stepName",
+            "required": true,
+            "schema": {
+              "description": "Pipeline step name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FailStepInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "writeApiKey": []
+          }
+        ],
+        "summary": "Mark a pipeline step as failed",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/v1/slips/{correlationID}/steps/{stepName}/start": {
+      "post": {
+        "operationId": "start-step",
+        "parameters": [
+          {
+            "description": "Routing slip correlation ID",
+            "in": "path",
+            "name": "correlationID",
+            "required": true,
+            "schema": {
+              "description": "Routing slip correlation ID",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Pipeline step name",
+            "in": "path",
+            "name": "stepName",
+            "required": true,
+            "schema": {
+              "description": "Pipeline step name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StepBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "writeApiKey": []
+          }
+        ],
+        "summary": "Mark a pipeline step as running",
         "tags": [
           "v1"
         ]

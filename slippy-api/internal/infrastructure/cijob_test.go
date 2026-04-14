@@ -521,6 +521,80 @@ func TestQueryLogs_EmptyCorrelationID(t *testing.T) {
 	assert.Contains(t, err.Error(), "correlation ID is required")
 }
 
+// TestQueryLogs_ScanError exercises the Scan error path.
+func TestQueryLogs_ScanError(t *testing.T) {
+	session := &clickhousetest.MockSession{
+		QueryWithArgsFunc: func(_ context.Context, _ string, _ ...any) (ch.Rows, error) {
+			return &clickhousetest.MockRows{
+				NextData: []bool{true},
+				ScanErr:  errors.New("scan failure"),
+			}, nil
+		},
+	}
+
+	store := NewCIJobLogStore(session)
+	result, err := store.QueryLogs(context.Background(), &domain.CIJobLogQuery{
+		CorrelationID: "corr-scan",
+		Limit:         10,
+		Sort:          domain.SortDesc,
+	})
+
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "failed to scan ci job log row")
+}
+
+// TestQueryLogs_RowsErr exercises the rows.Err path after iteration.
+func TestQueryLogs_RowsErr(t *testing.T) {
+	session := &clickhousetest.MockSession{
+		QueryWithArgsFunc: func(_ context.Context, _ string, _ ...any) (ch.Rows, error) {
+			return &clickhousetest.MockRows{
+				NextData: []bool{},
+				ErrErr:   errors.New("rows iteration failure"),
+			}, nil
+		},
+	}
+
+	store := NewCIJobLogStore(session)
+	result, err := store.QueryLogs(context.Background(), &domain.CIJobLogQuery{
+		CorrelationID: "corr-rows",
+		Limit:         10,
+		Sort:          domain.SortDesc,
+	})
+
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "error iterating ci job log rows")
+}
+
+// TestQueryLogs_CloseError exercises the deferred Close error path.
+// The happy path produces a non-nil result, then deferred Close returns an
+// error which overrides the nil err.
+func TestQueryLogs_CloseError(t *testing.T) {
+	ts := time.Date(2026, 3, 10, 12, 0, 0, 0, time.UTC)
+	session := &clickhousetest.MockSession{
+		QueryWithArgsFunc: func(_ context.Context, _ string, _ ...any) (ch.Rows, error) {
+			return &clickhousetest.MockRows{
+				NextData: []bool{true},
+				ScanFunc: scannerFor([][]any{
+					{ts, "INFO", "s", "c", "cl", "az", "p", "n", "m", "i", "j", "r", "im", "b", uint64(1)},
+				}),
+				CloseErr: errors.New("close failure"),
+			}, nil
+		},
+	}
+
+	store := NewCIJobLogStore(session)
+	_, err := store.QueryLogs(context.Background(), &domain.CIJobLogQuery{
+		CorrelationID: "corr-close",
+		Limit:         10,
+		Sort:          domain.SortDesc,
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to close rows")
+}
+
 func TestQueryLogs_ZeroLimit(t *testing.T) {
 	store := NewCIJobLogStore(&clickhousetest.MockSession{})
 	result, err := store.QueryLogs(context.Background(), &domain.CIJobLogQuery{

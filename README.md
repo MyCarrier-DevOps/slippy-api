@@ -1,10 +1,10 @@
 # slippy-api
 
-Read-only REST API for querying CI/CD routing slips stored in ClickHouse. Built with [huma v2](https://huma.rocks/) on Go's standard library `net/http`, with optional Dragonfly/Redis caching and OpenTelemetry instrumentation.
+REST API for querying and managing CI/CD routing slips stored in ClickHouse. Built with [huma v2](https://huma.rocks/) on Go's standard library `net/http`, with optional Dragonfly/Redis caching and OpenTelemetry instrumentation.
 
 ## Overview
 
-Slippy API provides a lightweight, read-only HTTP interface for querying routing slips — the state-tracking records that follow a code change through the CI/CD pipeline. Each routing slip captures a correlation ID, repository, branch, commit SHA, pipeline step statuses, and a full audit history.
+Slippy API provides a lightweight HTTP interface for querying and writing routing slips — the state-tracking records that follow a code change through the CI/CD pipeline. Each routing slip captures a correlation ID, repository, branch, commit SHA, pipeline step statuses, and a full audit history.
 
 The API is backed by the shared [`goLibMyCarrier/slippy`](https://github.com/MyCarrier-DevOps/goLibMyCarrier/tree/main/slippy) library for ClickHouse persistence and exposes an auto-generated OpenAPI 3.1 specification.
 
@@ -27,8 +27,8 @@ The application follows Clean Architecture with clear dependency boundaries:
 
 | Layer | Package | Responsibility |
 |---|---|---|
-| **Domain** | `internal/domain` | `SlipReader` / `ImageTagReader` / `CIJobLogReader` interfaces, type aliases for upstream `Slip`/`SlipWithCommit` |
-| **Infrastructure** | `internal/infrastructure` | `SlipStoreAdapter` (read-only adapter), `SlipResolverAdapter` (ancestry resolution via `slippy.Client.ResolveSlip()`), `CachedSlipReader` (Dragonfly/Redis decorator), `BuildInfoReader` (image tag resolution), `CIJobLogStore` (CI job log queries) |
+| **Domain** | `internal/domain` | `SlipReader` / `SlipWriter` / `ImageTagReader` / `CIJobLogReader` interfaces, type aliases for upstream `Slip`/`SlipWithCommit` |
+| **Infrastructure** | `internal/infrastructure` | `SlipStoreAdapter` (read-only adapter), `SlipWriterAdapter` (write ops backed by `*slippy.Client`, with OTel instrumentation), `SlipResolverAdapter` (ancestry resolution via `slippy.Client.ResolveSlip()`), `CachedSlipReader` (Dragonfly/Redis decorator), `BuildInfoReader` (image tag resolution), `CIJobLogStore` (CI job log queries) |
 | **Handler** | `internal/handler` | HTTP route registration, request/response types, error mapping |
 | **Middleware** | `internal/middleware` | Bearer token authentication with constant-time comparison |
 | **Config** | `internal/config` | Environment variable loading and validation |
@@ -37,6 +37,8 @@ The application follows Clean Architecture with clear dependency boundaries:
 ## API Endpoints
 
 All endpoints except `/health`, `/openapi.json`, and `/docs` require a `Bearer` token in the `Authorization` header.
+
+### Read Endpoints
 
 | Method | Path | Description |
 |---|---|---|
@@ -49,6 +51,18 @@ All endpoints except `/health`, `/openapi.json`, and `/docs` require a `Bearer` 
 | `GET` | `/logs/{correlationID}` | Query CI job logs with cursor pagination and per-column filtering |
 | `GET` | `/openapi.json` | Auto-generated OpenAPI 3.1 specification |
 | `GET` | `/docs` | Interactive API documentation (Stoplight Elements) |
+
+### Write Endpoints
+
+Write endpoints are available on the `/v1` prefix only and require `SLIPPY_WRITE_API_KEY` to be configured. When that variable is absent the server starts in read-only mode and these routes are not registered.
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/v1/slips` | Create a routing slip for a push event (201 Created) |
+| `POST` | `/v1/slips/{correlationID}/steps/{stepName}/start` | Mark a pipeline step as running (204 No Content) |
+| `POST` | `/v1/slips/{correlationID}/steps/{stepName}/complete` | Mark a pipeline step as completed (204 No Content) |
+| `POST` | `/v1/slips/{correlationID}/steps/{stepName}/fail` | Mark a pipeline step as failed (204 No Content) |
+| `PUT` | `/v1/slips/{correlationID}/components/{componentName}/image-tag` | Set the built container image tag for a component (204 No Content) |
 
 ### Request/Response Examples
 
@@ -140,6 +154,29 @@ curl -H "Authorization: Bearer $API_KEY" \
 
 Supported query filters: `level`, `service`, `component`, `cluster`, `cloud`, `environment`, `namespace`, `message`, `ci_job_instance`, `ci_job_type`, `build_repository`, `build_image`, `build_branch`. Page size is controlled via `limit` (1–1000, default 100). Sort order via `sort` (`asc` or `desc`, default `desc`). Pagination uses an opaque `cursor` returned in `next_page`.
 
+**POST /v1/slips**
+
+```bash
+curl -X POST -H "Authorization: Bearer $WRITE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"correlation_id":"abc-123-def","repository":"MyCarrier-DevOps/my-service","branch":"main","commit_sha":"a1b2c3d4e5f6"}' \
+  https://slippy-api.example.com/v1/slips
+```
+
+```json
+{
+  "slip": {
+    "correlation_id": "abc-123-def",
+    "repository": "MyCarrier-DevOps/my-service",
+    "branch": "main",
+    "commit_sha": "a1b2c3d4e5f6",
+    "status": "in_progress",
+    "created_at": "2026-04-13T08:00:00Z"
+  },
+  "ancestry_resolved": false
+}
+```
+
 ### Error Responses
 
 | Status | Condition |
@@ -148,6 +185,7 @@ Supported query filters: `level`, `service`, `component`, `cluster`, `cloud`, `e
 | `401` | Missing or malformed `Authorization` header |
 | `403` | Invalid API key |
 | `404` | Slip not found |
+| `422` | Step or slip is in an invalid state for the requested transition |
 | `500` | Internal server error |
 
 All errors follow the standard format:
@@ -186,10 +224,14 @@ All configuration is via environment variables. No config files, no Vault.
 | `CLICKHOUSE_PORT` | ClickHouse port | `9440` |
 | `CLICKHOUSE_SKIP_VERIFY` | Skip TLS verification | `false` |
 | `K8S_NAMESPACE` | Kubernetes namespace; `-test` or `-dev` suffix selects `ci_test` database | _(ci)_ |
+| `SLIPPY_WRITE_API_KEY` | Bearer token for write endpoints; enables write mode when set | _(disabled, read-only)_ |
+| `SLIPPY_SKIP_MIGRATIONS` | Skip ClickHouse schema migrations at startup | `true` |
 | `DRAGONFLY_HOST` | Dragonfly/Redis host (enables caching when set) | _(disabled)_ |
 | `DRAGONFLY_PORT` | Dragonfly/Redis port | `6379` |
 | `DRAGONFLY_PASSWORD` | Dragonfly/Redis password | _(empty)_ |
 | `CACHE_TTL` | Cache entry time-to-live (Go duration) | `10m` |
+
+> Write endpoints are conditionally registered — when `SLIPPY_WRITE_API_KEY` is absent the server starts in read-only mode and no write routes are exposed.
 
 > Caching is automatically enabled when `DRAGONFLY_HOST` is set. If the Dragonfly ping fails at startup, caching is disabled gracefully and the API falls through to ClickHouse directly.
 
@@ -230,7 +272,7 @@ slippy-api/                          # Repository root
         ├── domain/
         │   ├── ci_job_log.go        # CIJobLogReader interface, log query/result types
         │   ├── image_tag.go         # ImageTagReader interface, ImageTagResult type
-        │   └── slip.go              # SlipReader interface, type aliases
+        │   └── slip.go              # SlipReader / SlipWriter interfaces, type aliases
         ├── handler/
         │   ├── ci_job_log_handler.go     # GET /logs/{correlationID}
         │   ├── ci_job_log_handler_test.go
@@ -238,8 +280,10 @@ slippy-api/                          # Repository root
         │   ├── health_test.go
         │   ├── image_tag_handler.go      # GET /slips/{correlationID}/image-tags
         │   ├── image_tag_handler_test.go
-        │   ├── slip_handler.go          # Slip CRUD routes + error mapping
-        │   └── slip_handler_test.go
+        │   ├── slip_handler.go          # Read routes + error mapping
+        │   ├── slip_handler_test.go
+        │   ├── slip_write_handler.go    # POST+PUT /v1/slips write routes
+        │   └── slip_write_handler_test.go
         ├── infrastructure/
         │   ├── buildinfo.go         # BuildInfoReader (image tags from ci.buildinfo)
         │   ├── buildinfo_test.go
@@ -249,6 +293,8 @@ slippy-api/                          # Repository root
         │   ├── cijob_test.go
         │   ├── ancestry.go          # SlipResolverAdapter (ancestry resolution)
         │   ├── ancestry_test.go
+        │   ├── slip_writer.go       # SlipWriterAdapter (wraps *slippy.Client for write ops)
+        │   ├── slip_writer_test.go
         │   ├── store.go             # SlipStoreAdapter (read-only adapter)
         │   └── store_test.go
         ├── middleware/
@@ -330,7 +376,7 @@ docker run -p 8080:8080 \
 
 ## Key Design Decisions
 
-- **Read-only**: The API only exposes read operations. The `SlipStoreAdapter` enforces this by adapting the upstream read+write `SlipStore` to the narrow `SlipReader` interface.
+- **Conditional write mode**: Write endpoints are opt-in via `SLIPPY_WRITE_API_KEY`. When that variable is set, `SlipWriterAdapter` (wrapping `*slippy.Client`, not the raw `SlipStore`) is wired up and the 5 write routes are registered on `/v1` only. When absent, the server runs purely read-only and write routes are never mounted. Using `*slippy.Client` rather than `SlipStore` directly means ancestry resolution, atomic step+history writes, and pipeline config lookups are handled by the library — not reimplemented here.
 - **Ancestry resolution**: `SlipResolverAdapter` delegates all commit-based lookups to `slippy.Client.ResolveSlip()`. When a direct ClickHouse lookup returns `ErrSlipNotFound`, the adapter walks backwards through commit history via the GitHub GraphQL API to find an ancestor with a routing slip.
 - **Cursor pagination with composite cursor**: The `/logs` endpoint uses a `timestamp|cityHash64` composite cursor to guarantee no data loss when multiple rows share the same nanosecond timestamp. Uses `LIMIT n+1` peek to determine next-page existence without a separate COUNT query.
 - **huma v2 + humago**: Code-first API framework with auto-generated OpenAPI 3.1 spec. Uses Go's standard library `net/http.ServeMux` via the humago adapter — no Gin, no Echo.

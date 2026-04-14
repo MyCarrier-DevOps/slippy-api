@@ -97,7 +97,7 @@ func buildTestServer(apiKey string, reader domain.SlipReader, rdb redis.Cmdable,
 	api := humago.New(mux, apiConfig)
 
 	// Wire auth middleware
-	api.UseMiddleware(middleware.NewAPIKeyAuth(apiKey))
+	api.UseMiddleware(middleware.NewAPIKeyAuth(apiKey, ""))
 
 	// Wire cache decorator around the reader
 	cachedReader := infrastructure.NewCachedSlipReader(reader, rdb, cacheTTL)

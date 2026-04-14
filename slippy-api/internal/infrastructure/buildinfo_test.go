@@ -450,6 +450,232 @@ func TestResolveImageTags_UnknownBuildScope_DefaultsToAll(t *testing.T) {
 	assert.Equal(t, "26.04.ccc3333", result.Tags["svc"])
 }
 
+// TestResolveImageTags_RepoPropertiesScanError exercises queryBuildScope's
+// Scan error path. Scan errors on the build_scope lookup are non-fatal —
+// ResolveImageTags defaults to "all" and the call still succeeds.
+func TestResolveImageTags_RepoPropertiesScanError(t *testing.T) {
+	slip := testSlip("corr-scan-err", "MyCarrier-Engineering/MC.Svc", "main", "abc1234",
+		time.Date(2026, 2, 25, 0, 0, 0, 0, time.UTC))
+
+	reader := &buildInfoMockReader{
+		loadFn: func(_ context.Context, _ string) (*domain.Slip, error) {
+			return slip, nil
+		},
+	}
+
+	session := &clickhousetest.MockSession{
+		QueryWithArgsFunc: func(_ context.Context, query string, _ ...any) (ch.Rows, error) {
+			switch {
+			case strings.Contains(query, "ci.repoproperties"):
+				return &clickhousetest.MockRows{
+					NextData: []bool{true},
+					ScanErr:  errors.New("scan failure"),
+				}, nil
+			case strings.Contains(query, "ci.buildinfo"):
+				return &clickhousetest.MockRows{
+					NextData: []bool{true},
+					ScanData: [][]any{{"svc", "26.09.abc1234"}},
+				}, nil
+			}
+			return nil, errors.New("unexpected query")
+		},
+	}
+
+	bir := NewBuildInfoReader(session, reader)
+	result, err := bir.ResolveImageTags(context.Background(), "corr-scan-err")
+	require.NoError(t, err)
+	assert.Equal(t, domain.BuildScopeAll, result.BuildScope)
+}
+
+// TestResolveImageTags_RepoPropertiesRowsErr exercises queryBuildScope's
+// rows.Err path. Same as the scan error case, this is non-fatal.
+func TestResolveImageTags_RepoPropertiesRowsErr(t *testing.T) {
+	slip := testSlip("corr-rows-err", "MyCarrier-Engineering/MC.Svc", "main", "abc1234",
+		time.Date(2026, 2, 25, 0, 0, 0, 0, time.UTC))
+
+	reader := &buildInfoMockReader{
+		loadFn: func(_ context.Context, _ string) (*domain.Slip, error) {
+			return slip, nil
+		},
+	}
+
+	session := &clickhousetest.MockSession{
+		QueryWithArgsFunc: func(_ context.Context, query string, _ ...any) (ch.Rows, error) {
+			switch {
+			case strings.Contains(query, "ci.repoproperties"):
+				return &clickhousetest.MockRows{
+					NextData: []bool{},
+					ErrErr:   errors.New("rows iteration failure"),
+				}, nil
+			case strings.Contains(query, "ci.buildinfo"):
+				return &clickhousetest.MockRows{
+					NextData: []bool{true},
+					ScanData: [][]any{{"svc", "26.09.abc1234"}},
+				}, nil
+			}
+			return nil, errors.New("unexpected query")
+		},
+	}
+
+	bir := NewBuildInfoReader(session, reader)
+	result, err := bir.ResolveImageTags(context.Background(), "corr-rows-err")
+	require.NoError(t, err)
+	assert.Equal(t, domain.BuildScopeAll, result.BuildScope)
+}
+
+// TestResolveImageTags_RepoPropertiesCloseError exercises queryBuildScope's
+// deferred Close error path. The happy path returns "all", then close fails,
+// and the deferred block overrides err. The caller (ResolveImageTags) treats
+// this as a non-fatal fallback.
+func TestResolveImageTags_RepoPropertiesCloseError(t *testing.T) {
+	slip := testSlip("corr-close-err", "MyCarrier-Engineering/MC.Svc", "main", "abc1234",
+		time.Date(2026, 2, 25, 0, 0, 0, 0, time.UTC))
+
+	reader := &buildInfoMockReader{
+		loadFn: func(_ context.Context, _ string) (*domain.Slip, error) {
+			return slip, nil
+		},
+	}
+
+	session := &clickhousetest.MockSession{
+		QueryWithArgsFunc: func(_ context.Context, query string, _ ...any) (ch.Rows, error) {
+			switch {
+			case strings.Contains(query, "ci.repoproperties"):
+				return &clickhousetest.MockRows{
+					NextData: []bool{},
+					CloseErr: errors.New("close failure"),
+				}, nil
+			case strings.Contains(query, "ci.buildinfo"):
+				return &clickhousetest.MockRows{
+					NextData: []bool{true},
+					ScanData: [][]any{{"svc", "26.09.abc1234"}},
+				}, nil
+			}
+			return nil, errors.New("unexpected query")
+		},
+	}
+
+	bir := NewBuildInfoReader(session, reader)
+	result, err := bir.ResolveImageTags(context.Background(), "corr-close-err")
+	require.NoError(t, err)
+	assert.Equal(t, domain.BuildScopeAll, result.BuildScope)
+}
+
+// TestResolveImageTags_BuildInfoScanError exercises queryBuildInfo's Scan error path.
+// This error propagates — ResolveImageTags fails.
+func TestResolveImageTags_BuildInfoScanError(t *testing.T) {
+	slip := testSlip("corr-bi-scan", "MyCarrier-Engineering/MC.Svc", "main", "abc1234",
+		time.Date(2026, 2, 25, 0, 0, 0, 0, time.UTC))
+
+	reader := &buildInfoMockReader{
+		loadFn: func(_ context.Context, _ string) (*domain.Slip, error) {
+			return slip, nil
+		},
+	}
+
+	session := &clickhousetest.MockSession{
+		QueryWithArgsFunc: func(_ context.Context, query string, _ ...any) (ch.Rows, error) {
+			switch {
+			case strings.Contains(query, "ci.repoproperties"):
+				return &clickhousetest.MockRows{
+					NextData: []bool{true},
+					ScanData: [][]any{{"all"}},
+				}, nil
+			case strings.Contains(query, "ci.buildinfo"):
+				return &clickhousetest.MockRows{
+					NextData: []bool{true},
+					ScanErr:  errors.New("scan failure"),
+				}, nil
+			}
+			return nil, errors.New("unexpected query")
+		},
+	}
+
+	bir := NewBuildInfoReader(session, reader)
+	result, err := bir.ResolveImageTags(context.Background(), "corr-bi-scan")
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "failed to scan ci.buildinfo row")
+}
+
+// TestResolveImageTags_BuildInfoRowsErr exercises queryBuildInfo's rows.Err path.
+func TestResolveImageTags_BuildInfoRowsErr(t *testing.T) {
+	slip := testSlip("corr-bi-rows", "MyCarrier-Engineering/MC.Svc", "main", "abc1234",
+		time.Date(2026, 2, 25, 0, 0, 0, 0, time.UTC))
+
+	reader := &buildInfoMockReader{
+		loadFn: func(_ context.Context, _ string) (*domain.Slip, error) {
+			return slip, nil
+		},
+	}
+
+	session := &clickhousetest.MockSession{
+		QueryWithArgsFunc: func(_ context.Context, query string, _ ...any) (ch.Rows, error) {
+			switch {
+			case strings.Contains(query, "ci.repoproperties"):
+				return &clickhousetest.MockRows{
+					NextData: []bool{true},
+					ScanData: [][]any{{"all"}},
+				}, nil
+			case strings.Contains(query, "ci.buildinfo"):
+				return &clickhousetest.MockRows{
+					NextData: []bool{},
+					ErrErr:   errors.New("rows iteration failure"),
+				}, nil
+			}
+			return nil, errors.New("unexpected query")
+		},
+	}
+
+	bir := NewBuildInfoReader(session, reader)
+	result, err := bir.ResolveImageTags(context.Background(), "corr-bi-rows")
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "error iterating ci.buildinfo rows")
+}
+
+// TestResolveImageTags_BuildInfoCloseError exercises queryBuildInfo's deferred
+// Close error path. Normally the no-rows case returns errNoBuildInfoRows, which
+// is already non-nil — so the close error is suppressed. This test covers the
+// specific case where the data phase returns a non-empty result: the named
+// return `err` starts nil, the happy path `return result, nil` fires, then the
+// deferred Close overrides err to the close error.
+func TestResolveImageTags_BuildInfoCloseError(t *testing.T) {
+	slip := testSlip("corr-bi-close", "MyCarrier-Engineering/MC.Svc", "main", "abc1234",
+		time.Date(2026, 2, 25, 0, 0, 0, 0, time.UTC))
+
+	reader := &buildInfoMockReader{
+		loadFn: func(_ context.Context, _ string) (*domain.Slip, error) {
+			return slip, nil
+		},
+	}
+
+	session := &clickhousetest.MockSession{
+		QueryWithArgsFunc: func(_ context.Context, query string, _ ...any) (ch.Rows, error) {
+			switch {
+			case strings.Contains(query, "ci.repoproperties"):
+				return &clickhousetest.MockRows{
+					NextData: []bool{true},
+					ScanData: [][]any{{"all"}},
+				}, nil
+			case strings.Contains(query, "ci.buildinfo"):
+				return &clickhousetest.MockRows{
+					NextData: []bool{true},
+					ScanData: [][]any{{"svc", "26.09.abc1234"}},
+					CloseErr: errors.New("close failure"),
+				}, nil
+			}
+			return nil, errors.New("unexpected query")
+		},
+	}
+
+	bir := NewBuildInfoReader(session, reader)
+	result, err := bir.ResolveImageTags(context.Background(), "corr-bi-close")
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "failed to close rows")
+}
+
 func TestResolveImageTags_NoRepoPropertiesRow_DefaultsToAll(t *testing.T) {
 	slip := testSlip("corr-007", "MyCarrier-Engineering/MC.New", "main", "ddd4444eee",
 		time.Date(2026, 2, 25, 0, 0, 0, 0, time.UTC))

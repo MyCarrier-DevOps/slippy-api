@@ -25,7 +25,7 @@ func setupTracingTestAPI(apiKey string) http.Handler {
 	mux := http.NewServeMux()
 	cfg := huma.DefaultConfig("Test", "1.0.0")
 	api := humago.New(mux, cfg)
-	api.UseMiddleware(NewAPIKeyAuth(apiKey))
+	api.UseMiddleware(NewAPIKeyAuth(apiKey, ""))
 
 	// Register a protected endpoint.
 	huma.Register(api, huma.Operation{
@@ -127,7 +127,7 @@ func TestAuth_NoSecurity_NoSpan(t *testing.T) {
 	mux := http.NewServeMux()
 	cfg := huma.DefaultConfig("Test", "1.0.0")
 	api := humago.New(mux, cfg)
-	api.UseMiddleware(NewAPIKeyAuth("test-key"))
+	api.UseMiddleware(NewAPIKeyAuth("test-key", ""))
 
 	// Register an unprotected endpoint (no Security requirement).
 	huma.Register(api, huma.Operation{

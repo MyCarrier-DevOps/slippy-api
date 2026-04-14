@@ -14,6 +14,16 @@ type Slip = slippy.Slip
 // SlipWithCommit pairs a slip with the commit SHA that matched it.
 type SlipWithCommit = slippy.SlipWithCommit
 
+// Write-related type aliases — decouple domain consumers from the library package.
+type (
+	StepStatus          = slippy.StepStatus
+	StateHistoryEntry   = slippy.StateHistoryEntry
+	AncestryEntry       = slippy.AncestryEntry
+	PushOptions         = slippy.PushOptions
+	CreateSlipResult    = slippy.CreateSlipResult
+	ComponentDefinition = slippy.ComponentDefinition
+)
+
 // SlipReader defines the read-only interface for querying routing slips.
 // This is the contract that handlers depend on — implementations include the
 // ClickHouse store adapter and the caching decorator.
@@ -30,4 +40,25 @@ type SlipReader interface {
 
 	// FindAllByCommits finds all slips matching any commit in the ordered list.
 	FindAllByCommits(ctx context.Context, repository string, commits []string) ([]SlipWithCommit, error)
+}
+
+// SlipWriter defines the write interface for mutating routing slips.
+// Methods map to business-level operations used by pushhookparser (slip creation)
+// and Slippy CI CLI (pre-job/post-job step lifecycle).
+type SlipWriter interface {
+	// CreateSlipForPush creates a new routing slip for a git push event,
+	// including ancestry resolution and ancestor abandonment/promotion.
+	CreateSlipForPush(ctx context.Context, opts PushOptions) (*CreateSlipResult, error)
+
+	// StartStep marks a pipeline step as running.
+	StartStep(ctx context.Context, correlationID, stepName, componentName string) error
+
+	// CompleteStep marks a pipeline step as completed.
+	CompleteStep(ctx context.Context, correlationID, stepName, componentName string) error
+
+	// FailStep marks a pipeline step as failed with a reason.
+	FailStep(ctx context.Context, correlationID, stepName, componentName, reason string) error
+
+	// SetComponentImageTag records the built container image tag for a component.
+	SetComponentImageTag(ctx context.Context, correlationID, componentName, imageTag string) error
 }
