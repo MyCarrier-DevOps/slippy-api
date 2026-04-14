@@ -732,7 +732,10 @@
             "description": "Error"
           }
         },
-        "summary": "Health check endpoint"
+        "summary": "Health check endpoint",
+        "tags": [
+          "v1"
+        ]
       }
     },
     "/logs/{correlationID}": {
@@ -947,7 +950,10 @@
             "apiKey": []
           }
         ],
-        "summary": "Query CI job logs by correlation ID"
+        "summary": "Query CI job logs by correlation ID",
+        "tags": [
+          "v1"
+        ]
       }
     },
     "/slips": {
@@ -990,7 +996,10 @@
             "writeApiKey": []
           }
         ],
-        "summary": "Create a new routing slip for a push event"
+        "summary": "Create a new routing slip for a push event",
+        "tags": [
+          "v1"
+        ]
       }
     },
     "/slips/by-commit/{owner}/{repo}/{commitSHA}": {
@@ -1055,7 +1064,10 @@
             "apiKey": []
           }
         ],
-        "summary": "Get a routing slip by repository and commit SHA"
+        "summary": "Get a routing slip by repository and commit SHA",
+        "tags": [
+          "v1"
+        ]
       }
     },
     "/slips/find-all-by-commits": {
@@ -1102,7 +1114,10 @@
             "apiKey": []
           }
         ],
-        "summary": "Find all matching routing slips for a list of commits"
+        "summary": "Find all matching routing slips for a list of commits",
+        "tags": [
+          "v1"
+        ]
       }
     },
     "/slips/find-by-commits": {
@@ -1145,7 +1160,10 @@
             "apiKey": []
           }
         ],
-        "summary": "Find the first matching routing slip for a list of commits"
+        "summary": "Find the first matching routing slip for a list of commits",
+        "tags": [
+          "v1"
+        ]
       }
     },
     "/slips/{correlationID}": {
@@ -1190,7 +1208,10 @@
             "apiKey": []
           }
         ],
-        "summary": "Get a routing slip by correlation ID"
+        "summary": "Get a routing slip by correlation ID",
+        "tags": [
+          "v1"
+        ]
       }
     },
     "/slips/{correlationID}/components/{componentName}/image-tag": {
@@ -1248,7 +1269,10 @@
             "writeApiKey": []
           }
         ],
-        "summary": "Record the built container image tag for a component"
+        "summary": "Record the built container image tag for a component",
+        "tags": [
+          "v1"
+        ]
       }
     },
     "/slips/{correlationID}/image-tags": {
@@ -1294,7 +1318,10 @@
             "apiKey": []
           }
         ],
-        "summary": "Resolve per-component image tags for a routing slip"
+        "summary": "Resolve per-component image tags for a routing slip",
+        "tags": [
+          "v1"
+        ]
       }
     },
     "/slips/{correlationID}/steps/{stepName}/complete": {
@@ -1351,7 +1378,10 @@
             "writeApiKey": []
           }
         ],
-        "summary": "Mark a pipeline step as completed"
+        "summary": "Mark a pipeline step as completed",
+        "tags": [
+          "v1"
+        ]
       }
     },
     "/slips/{correlationID}/steps/{stepName}/fail": {
@@ -1409,7 +1439,10 @@
             "writeApiKey": []
           }
         ],
-        "summary": "Mark a pipeline step as failed"
+        "summary": "Mark a pipeline step as failed",
+        "tags": [
+          "v1"
+        ]
       }
     },
     "/slips/{correlationID}/steps/{stepName}/start": {
@@ -1466,7 +1499,10 @@
             "writeApiKey": []
           }
         ],
-        "summary": "Mark a pipeline step as running"
+        "summary": "Mark a pipeline step as running",
+        "tags": [
+          "v1"
+        ]
       }
     }
   }

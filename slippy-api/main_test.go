@@ -317,8 +317,8 @@ func TestGenerateOpenAPISpec(t *testing.T) {
 }
 
 // buildV1OnlySpec filters the full spec to v1 paths only, strips the /v1 prefix,
-// cleans up v1- operation ID prefixes, removes the v1 tag, and downconverts
-// OpenAPI 3.1 nullable syntax to 3.0.3.
+// cleans up v1- operation ID prefixes, and downconverts OpenAPI 3.1 nullable
+// syntax to 3.0.3. The "v1" tag is preserved for Swagger UI grouping.
 func buildV1OnlySpec(t *testing.T, full map[string]any) map[string]any {
 	t.Helper()
 
@@ -343,7 +343,7 @@ func buildV1OnlySpec(t *testing.T, full map[string]any) map[string]any {
 			stripped = "/"
 		}
 
-		// Clean operation IDs and remove v1 tag from each method.
+		// Clean operation IDs on each method.
 		methodMap, ok := methods.(map[string]any)
 		if !ok {
 			continue
@@ -355,19 +355,6 @@ func buildV1OnlySpec(t *testing.T, full map[string]any) map[string]any {
 			}
 			if id, ok := op["operationId"].(string); ok {
 				op["operationId"] = strings.TrimPrefix(id, "v1-")
-			}
-			if tags, ok := op["tags"].([]any); ok {
-				filtered := make([]any, 0, len(tags))
-				for _, tag := range tags {
-					if tag != "v1" {
-						filtered = append(filtered, tag)
-					}
-				}
-				if len(filtered) > 0 {
-					op["tags"] = filtered
-				} else {
-					delete(op, "tags")
-				}
 			}
 		}
 		newPaths[stripped] = methods
