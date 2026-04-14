@@ -167,8 +167,8 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          slug=$(gh api /user --jq .login)
-          id=$(gh api /user --jq .id)
+          slug="${{ steps.app-token.outputs.app-slug }}[bot]"
+          id=$(gh api "/users/${slug}" --jq .id)
           echo "name=${slug}" >> "$GITHUB_OUTPUT"
           echo "email=${id}+${slug}@users.noreply.github.com" >> "$GITHUB_OUTPUT"
 
