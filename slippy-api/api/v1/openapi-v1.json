@@ -990,10 +990,7 @@
             "writeApiKey": []
           }
         ],
-        "summary": "Create a new routing slip for a push event",
-        "tags": [
-          "v1"
-        ]
+        "summary": "Create a new routing slip for a push event"
       }
     },
     "/slips/by-commit/{owner}/{repo}/{commitSHA}": {
@@ -1251,10 +1248,7 @@
             "writeApiKey": []
           }
         ],
-        "summary": "Record the built container image tag for a component",
-        "tags": [
-          "v1"
-        ]
+        "summary": "Record the built container image tag for a component"
       }
     },
     "/slips/{correlationID}/image-tags": {
@@ -1357,10 +1351,7 @@
             "writeApiKey": []
           }
         ],
-        "summary": "Mark a pipeline step as completed",
-        "tags": [
-          "v1"
-        ]
+        "summary": "Mark a pipeline step as completed"
       }
     },
     "/slips/{correlationID}/steps/{stepName}/fail": {
@@ -1418,10 +1409,7 @@
             "writeApiKey": []
           }
         ],
-        "summary": "Mark a pipeline step as failed",
-        "tags": [
-          "v1"
-        ]
+        "summary": "Mark a pipeline step as failed"
       }
     },
     "/slips/{correlationID}/steps/{stepName}/start": {
@@ -1478,10 +1466,7 @@
             "writeApiKey": []
           }
         ],
-        "summary": "Mark a pipeline step as running",
-        "tags": [
-          "v1"
-        ]
+        "summary": "Mark a pipeline step as running"
       }
     }
   }
