@@ -26,6 +26,7 @@ type mockWriter struct {
 	startStepFn            func(ctx context.Context, correlationID, stepName, componentName string) error
 	completeStepFn         func(ctx context.Context, correlationID, stepName, componentName string) error
 	failStepFn             func(ctx context.Context, correlationID, stepName, componentName, reason string) error
+	skipStepFn             func(ctx context.Context, correlationID, stepName, componentName, reason string) error
 	setComponentImageTagFn func(ctx context.Context, correlationID, componentName, imageTag string) error
 }
 
@@ -40,6 +41,9 @@ func (m *mockWriter) CompleteStep(ctx context.Context, cID, step, comp string) e
 }
 func (m *mockWriter) FailStep(ctx context.Context, cID, step, comp, reason string) error {
 	return m.failStepFn(ctx, cID, step, comp, reason)
+}
+func (m *mockWriter) SkipStep(ctx context.Context, cID, step, comp, reason string) error {
+	return m.skipStepFn(ctx, cID, step, comp, reason)
 }
 func (m *mockWriter) SetComponentImageTag(ctx context.Context, cID, comp, tag string) error {
 	return m.setComponentImageTagFn(ctx, cID, comp, tag)
@@ -318,6 +322,104 @@ func TestFailStep_NotFound(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// --- SkipStep tests ---
+
+func TestSkipStep_Success(t *testing.T) {
+	w := &mockWriter{
+		skipStepFn: func(_ context.Context, cID, step, comp, reason string) error {
+			assert.Equal(t, "abc-123", cID)
+			assert.Equal(t, "prod_rollback_status", step)
+			assert.Equal(t, "", comp)
+			assert.Equal(t, "alert-gate passed", reason)
+			return nil
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	body := `{"reason":"alert-gate passed"}`
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/prod_rollback_status/skip", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+func TestSkipStep_WithComponent(t *testing.T) {
+	w := &mockWriter{
+		skipStepFn: func(_ context.Context, cID, step, comp, reason string) error {
+			assert.Equal(t, "abc-123", cID)
+			assert.Equal(t, "builds_completed", step)
+			assert.Equal(t, "api", comp)
+			assert.Equal(t, "not needed", reason)
+			return nil
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	body := `{"component_name":"api","reason":"not needed"}`
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/builds_completed/skip", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+func TestSkipStep_NoBody(t *testing.T) {
+	w := &mockWriter{
+		skipStepFn: func(_ context.Context, cID, step, comp, reason string) error {
+			assert.Equal(t, "abc-123", cID)
+			assert.Equal(t, "prod_rollback_status", step)
+			assert.Equal(t, "", comp)
+			assert.Equal(t, "", reason)
+			return nil
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/prod_rollback_status/skip", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+func TestSkipStep_NotFound(t *testing.T) {
+	w := &mockWriter{
+		skipStepFn: func(_ context.Context, _, _, _, _ string) error {
+			return slippy.ErrSlipNotFound
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	body := `{"reason":"skip it"}`
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/builds_completed/skip", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestSkipStep_InternalError(t *testing.T) {
+	w := &mockWriter{
+		skipStepFn: func(_ context.Context, _, _, _, _ string) error {
+			return errors.New("database error")
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	body := `{"reason":"skip it"}`
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/builds_completed/skip", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
 // --- SetImageTag tests ---

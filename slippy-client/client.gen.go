@@ -237,6 +237,18 @@ type SetImageTagInputBody struct {
 	ImageTag string `json:"image_tag"`
 }
 
+// SkipStepInputBody defines model for SkipStepInputBody.
+type SkipStepInputBody struct {
+	// Schema A URL to the JSON Schema for this object.
+	Schema *string `json:"$schema,omitempty"`
+
+	// ComponentName Component name (required for aggregate steps, empty for pipeline steps)
+	ComponentName *string `json:"component_name,omitempty"`
+
+	// Reason Skip reason
+	Reason *string `json:"reason,omitempty"`
+}
+
 // Slip defines model for Slip.
 type Slip struct {
 	// Schema A URL to the JSON Schema for this object.
@@ -355,6 +367,9 @@ type CompleteStepJSONRequestBody = StepBody
 
 // FailStepJSONRequestBody defines body for FailStep for application/json ContentType.
 type FailStepJSONRequestBody = FailStepInputBody
+
+// SkipStepJSONRequestBody defines body for SkipStep for application/json ContentType.
+type SkipStepJSONRequestBody = SkipStepInputBody
 
 // StartStepJSONRequestBody defines body for StartStep for application/json ContentType.
 type StartStepJSONRequestBody = StepBody
@@ -476,6 +491,11 @@ type ClientInterface interface {
 	FailStepWithBody(ctx context.Context, correlationID string, stepName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	FailStep(ctx context.Context, correlationID string, stepName string, body FailStepJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SkipStepWithBody request with any body
+	SkipStepWithBody(ctx context.Context, correlationID string, stepName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	SkipStep(ctx context.Context, correlationID string, stepName string, body SkipStepJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// StartStepWithBody request with any body
 	StartStepWithBody(ctx context.Context, correlationID string, stepName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -677,6 +697,30 @@ func (c *Client) FailStepWithBody(ctx context.Context, correlationID string, ste
 
 func (c *Client) FailStep(ctx context.Context, correlationID string, stepName string, body FailStepJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewFailStepRequest(c.Server, correlationID, stepName, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SkipStepWithBody(ctx context.Context, correlationID string, stepName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSkipStepRequestWithBody(c.Server, correlationID, stepName, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SkipStep(ctx context.Context, correlationID string, stepName string, body SkipStepJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSkipStepRequest(c.Server, correlationID, stepName, body)
 	if err != nil {
 		return nil, err
 	}
@@ -1432,6 +1476,60 @@ func NewFailStepRequestWithBody(server string, correlationID string, stepName st
 	return req, nil
 }
 
+// NewSkipStepRequest calls the generic SkipStep builder with application/json body
+func NewSkipStepRequest(server string, correlationID string, stepName string, body SkipStepJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSkipStepRequestWithBody(server, correlationID, stepName, "application/json", bodyReader)
+}
+
+// NewSkipStepRequestWithBody generates requests for SkipStep with any type of body
+func NewSkipStepRequestWithBody(server string, correlationID string, stepName string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "correlationID", correlationID, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "stepName", stepName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/slips/%s/steps/%s/skip", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewStartStepRequest calls the generic StartStep builder with application/json body
 func NewStartStepRequest(server string, correlationID string, stepName string, body StartStepJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -1573,6 +1671,11 @@ type ClientWithResponsesInterface interface {
 	FailStepWithBodyWithResponse(ctx context.Context, correlationID string, stepName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*FailStepResponse, error)
 
 	FailStepWithResponse(ctx context.Context, correlationID string, stepName string, body FailStepJSONRequestBody, reqEditors ...RequestEditorFn) (*FailStepResponse, error)
+
+	// SkipStepWithBodyWithResponse request with any body
+	SkipStepWithBodyWithResponse(ctx context.Context, correlationID string, stepName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SkipStepResponse, error)
+
+	SkipStepWithResponse(ctx context.Context, correlationID string, stepName string, body SkipStepJSONRequestBody, reqEditors ...RequestEditorFn) (*SkipStepResponse, error)
 
 	// StartStepWithBodyWithResponse request with any body
 	StartStepWithBodyWithResponse(ctx context.Context, correlationID string, stepName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*StartStepResponse, error)
@@ -1830,6 +1933,28 @@ func (r FailStepResponse) StatusCode() int {
 	return 0
 }
 
+type SkipStepResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r SkipStepResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SkipStepResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type StartStepResponse struct {
 	Body                          []byte
 	HTTPResponse                  *http.Response
@@ -1997,6 +2122,23 @@ func (c *ClientWithResponses) FailStepWithResponse(ctx context.Context, correlat
 		return nil, err
 	}
 	return ParseFailStepResponse(rsp)
+}
+
+// SkipStepWithBodyWithResponse request with arbitrary body returning *SkipStepResponse
+func (c *ClientWithResponses) SkipStepWithBodyWithResponse(ctx context.Context, correlationID string, stepName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SkipStepResponse, error) {
+	rsp, err := c.SkipStepWithBody(ctx, correlationID, stepName, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSkipStepResponse(rsp)
+}
+
+func (c *ClientWithResponses) SkipStepWithResponse(ctx context.Context, correlationID string, stepName string, body SkipStepJSONRequestBody, reqEditors ...RequestEditorFn) (*SkipStepResponse, error) {
+	rsp, err := c.SkipStep(ctx, correlationID, stepName, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSkipStepResponse(rsp)
 }
 
 // StartStepWithBodyWithResponse request with arbitrary body returning *StartStepResponse
@@ -2341,6 +2483,32 @@ func ParseFailStepResponse(rsp *http.Response) (*FailStepResponse, error) {
 	}
 
 	response := &FailStepResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSkipStepResponse parses an HTTP response from a SkipStepWithResponse call
+func ParseSkipStepResponse(rsp *http.Response) (*SkipStepResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SkipStepResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

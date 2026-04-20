@@ -79,6 +79,7 @@ func (s *stubSlipWriter) CreateSlipForPush(
 func (s *stubSlipWriter) StartStep(_ context.Context, _, _, _ string) error    { return nil }
 func (s *stubSlipWriter) CompleteStep(_ context.Context, _, _, _ string) error { return nil }
 func (s *stubSlipWriter) FailStep(_ context.Context, _, _, _, _ string) error  { return nil }
+func (s *stubSlipWriter) SkipStep(_ context.Context, _, _, _, _ string) error  { return nil }
 func (s *stubSlipWriter) SetComponentImageTag(_ context.Context, _, _, _ string) error {
 	return nil
 }

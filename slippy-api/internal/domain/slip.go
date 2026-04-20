@@ -59,6 +59,9 @@ type SlipWriter interface {
 	// FailStep marks a pipeline step as failed with a reason.
 	FailStep(ctx context.Context, correlationID, stepName, componentName, reason string) error
 
+	// SkipStep marks a pipeline step as skipped with an optional reason.
+	SkipStep(ctx context.Context, correlationID, stepName, componentName, reason string) error
+
 	// SetComponentImageTag records the built container image tag for a component.
 	SetComponentImageTag(ctx context.Context, correlationID, componentName, imageTag string) error
 }

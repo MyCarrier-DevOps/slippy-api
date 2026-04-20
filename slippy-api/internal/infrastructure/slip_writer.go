@@ -124,6 +124,29 @@ func (a *SlipWriterAdapter) FailStep(ctx context.Context, correlationID, stepNam
 	return nil
 }
 
+func (a *SlipWriterAdapter) SkipStep(ctx context.Context, correlationID, stepName, componentName, reason string) error {
+	ctx, span := otel.Tracer(writerTracerName).Start(ctx, "writer.SkipStep",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("slip.correlation_id", correlationID),
+			attribute.String("slip.step_name", stepName),
+			attribute.String("slip.component_name", componentName),
+		),
+	)
+	defer span.End()
+
+	if err := a.client.SkipStep(ctx, correlationID, stepName, componentName, reason); err != nil {
+		recordWriterError(span, err)
+		return err
+	}
+	if a.isPipelineStep(stepName, componentName) {
+		if err := a.hydrateAndPersist(ctx, correlationID); err != nil {
+			span.AddEvent("hydration failed", trace.WithAttributes(attribute.String("error", err.Error())))
+		}
+	}
+	return nil
+}
+
 func (a *SlipWriterAdapter) SetComponentImageTag(
 	ctx context.Context,
 	correlationID, componentName, imageTag string,
