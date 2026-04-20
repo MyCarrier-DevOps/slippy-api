@@ -98,10 +98,26 @@ type FailStepInput struct {
 type SkipStepInput struct {
 	CorrelationID string `path:"correlationID" doc:"Routing slip correlation ID"`
 	StepName      string `path:"stepName"      doc:"Pipeline step name"`
-	Body          struct {
+	Body          *struct {
 		ComponentName string `json:"component_name,omitempty" doc:"Component name (required for aggregate steps, empty for pipeline steps)"`
 		Reason        string `json:"reason,omitempty" doc:"Skip reason"`
 	}
+}
+
+// componentName returns the component name from the optional body, or empty string if no body.
+func (s *SkipStepInput) componentName() string {
+	if s.Body == nil {
+		return ""
+	}
+	return s.Body.ComponentName
+}
+
+// reason returns the skip reason from the optional body, or empty string if no body.
+func (s *SkipStepInput) reason() string {
+	if s.Body == nil {
+		return ""
+	}
+	return s.Body.Reason
 }
 
 // SetImageTagInput captures path params and body for setting an image tag.
@@ -287,7 +303,7 @@ func (h *SlipWriteHandler) skipStep(ctx context.Context, input *SkipStepInput) (
 		trace.WithAttributes(
 			attribute.String("slip.correlation_id", input.CorrelationID),
 			attribute.String("slip.step_name", input.StepName),
-			attribute.String("slip.component_name", input.Body.ComponentName),
+			attribute.String("slip.component_name", input.componentName()),
 		),
 	)
 	defer span.End()
@@ -296,8 +312,8 @@ func (h *SlipWriteHandler) skipStep(ctx context.Context, input *SkipStepInput) (
 		ctx,
 		input.CorrelationID,
 		input.StepName,
-		input.Body.ComponentName,
-		input.Body.Reason,
+		input.componentName(),
+		input.reason(),
 	); err != nil {
 		recordHandlerError(span, err)
 		return nil, mapWriteError(err)

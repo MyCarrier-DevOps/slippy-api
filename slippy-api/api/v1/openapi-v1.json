@@ -1500,8 +1500,7 @@
                 "$ref": "#/components/schemas/SkipStepInputBody"
               }
             }
-          },
-          "required": true
+          }
         },
         "responses": {
           "204": {

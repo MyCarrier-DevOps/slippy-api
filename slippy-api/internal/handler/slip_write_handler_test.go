@@ -388,6 +388,25 @@ func TestSkipStep_NoBody(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
+func TestSkipStep_NilBody(t *testing.T) {
+	w := &mockWriter{
+		skipStepFn: func(_ context.Context, cID, step, comp, reason string) error {
+			assert.Equal(t, "abc-123", cID)
+			assert.Equal(t, "prod_rollback_status", step)
+			assert.Equal(t, "", comp)
+			assert.Equal(t, "", reason)
+			return nil
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/prod_rollback_status/skip", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
 func TestSkipStep_NotFound(t *testing.T) {
 	w := &mockWriter{
 		skipStepFn: func(_ context.Context, _, _, _, _ string) error {
