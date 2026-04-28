@@ -115,6 +115,13 @@ func (s *stubAutomationTestsReader) QueryTests(
 	return &domain.AutomationTestsResult{}, nil
 }
 
+func (s *stubAutomationTestsReader) LoadTestByID(
+	_ context.Context,
+	_ *domain.LoadTestByIDQuery,
+) (*domain.AutomationTestResult, error) {
+	return nil, domain.ErrTestNotFound
+}
+
 // --- buildHandler tests ---
 
 func TestBuildHandler_HealthEndpoint(t *testing.T) {

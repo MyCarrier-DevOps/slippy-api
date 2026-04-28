@@ -35,6 +35,182 @@
         ],
         "type": "object"
       },
+      "AutomationTestResult": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/AutomationTestResult.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "attempt": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "branch_name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "duration": {
+            "format": "double",
+            "type": "number"
+          },
+          "environment_name": {
+            "type": "string"
+          },
+          "feature": {
+            "type": "string"
+          },
+          "release_id": {
+            "type": "string"
+          },
+          "result_message": {
+            "type": "string"
+          },
+          "result_status": {
+            "type": "string"
+          },
+          "scenario_execution_status": {
+            "type": "string"
+          },
+          "scenario_info_description": {
+            "type": "string"
+          },
+          "scenario_info_tags": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "scenario_info_title": {
+            "type": "string"
+          },
+          "stack_name": {
+            "type": "string"
+          },
+          "stack_trace": {
+            "type": "string"
+          },
+          "stage": {
+            "type": "string"
+          },
+          "start_time": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "test_id": {
+            "type": "string"
+          },
+          "test_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "feature",
+          "test_name",
+          "result_status",
+          "duration",
+          "release_id",
+          "stack_name",
+          "stage",
+          "environment_name",
+          "attempt",
+          "start_time",
+          "test_id"
+        ],
+        "type": "object"
+      },
+      "AutomationTestRunResult": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "attempt_id": {
+            "type": "string"
+          },
+          "batch_id": {
+            "type": "string"
+          },
+          "branch_name": {
+            "type": "string"
+          },
+          "correlation_id": {
+            "type": "string"
+          },
+          "environment_name": {
+            "type": "string"
+          },
+          "error_message": {
+            "type": "string"
+          },
+          "failed": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "finish_time": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "job_number": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "passed": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "release_id": {
+            "type": "string"
+          },
+          "stack_name": {
+            "type": "string"
+          },
+          "stage": {
+            "type": "string"
+          },
+          "start_time": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "test_run_id": {
+            "type": "string"
+          },
+          "total_test_job_count": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "outcome",
+          "passed",
+          "failed",
+          "start_time",
+          "finish_time",
+          "release_id",
+          "attempt",
+          "stage",
+          "environment_name",
+          "stack_name",
+          "total_test_job_count"
+        ],
+        "type": "object"
+      },
       "CIJobLog": {
         "additionalProperties": false,
         "properties": {
@@ -411,6 +587,37 @@
         ],
         "type": "object"
       },
+      "GetAutomationTestResultsOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/GetAutomationTestResultsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "count": {
+            "description": "Number of runs returned",
+            "format": "int64",
+            "type": "integer"
+          },
+          "runs": {
+            "items": {
+              "$ref": "#/components/schemas/AutomationTestRunResult"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "runs",
+          "count"
+        ],
+        "type": "object"
+      },
       "GetLogsOutputBody": {
         "additionalProperties": false,
         "properties": {
@@ -442,6 +649,41 @@
         },
         "required": [
           "logs",
+          "count"
+        ],
+        "type": "object"
+      },
+      "GetTestsOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/GetTestsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "count": {
+            "description": "Number of tests in this page",
+            "format": "int64",
+            "type": "integer"
+          },
+          "next_page": {
+            "description": "URL path for the next page of results",
+            "type": "string"
+          },
+          "tests": {
+            "items": {
+              "$ref": "#/components/schemas/AutomationTestResult"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "tests",
           "count"
         ],
         "type": "object"
@@ -730,6 +972,622 @@
   },
   "openapi": "3.0.3",
   "paths": {
+    "/automation-test-results/by-correlation/{correlationID}": {
+      "get": {
+        "description": "Returns rows from autotest_results.RunResults for the given slip correlation ID, optionally filtered by environment, stack, stage, or attempt. Defaults to the latest attempt per (Environment, Stack, Stage) tuple.",
+        "operationId": "get-automation-test-results",
+        "parameters": [
+          {
+            "description": "Slip correlation ID (UUID)",
+            "in": "path",
+            "name": "correlationID",
+            "required": true,
+            "schema": {
+              "description": "Slip correlation ID (UUID)",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by EnvironmentName (exact)",
+            "explode": false,
+            "in": "query",
+            "name": "environment",
+            "schema": {
+              "description": "Filter by EnvironmentName (exact)",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by StackName (exact)",
+            "explode": false,
+            "in": "query",
+            "name": "stack",
+            "schema": {
+              "description": "Filter by StackName (exact)",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by Stage / test category, e.g. FeatureCoreApi, PreprodCoreApi, FeatureUI (exact)",
+            "explode": false,
+            "in": "query",
+            "name": "stage",
+            "schema": {
+              "description": "Filter by Stage / test category, e.g. FeatureCoreApi, PreprodCoreApi, FeatureUI (exact)",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Specific Attempt to fetch. When omitted, returns the latest attempt per (Environment, Stack, Stage).",
+            "explode": false,
+            "in": "query",
+            "name": "attempt",
+            "schema": {
+              "description": "Specific Attempt to fetch. When omitted, returns the latest attempt per (Environment, Stack, Stage).",
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetAutomationTestResultsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "summary": "Get automation test-suite run results by correlation ID"
+      }
+    },
+    "/automation-test-results/by-correlation/{correlationID}/tests": {
+      "get": {
+        "description": "Resolves the matching RunResults rows for the correlation ID (with the same environment/stack/stage/attempt filters as the parent endpoint), then returns the individual TestResults rows within each run's StartTime window. Defaults to ResultStatus='Failed'; pass `status=` empty to widen.",
+        "operationId": "get-automation-test-results-tests",
+        "parameters": [
+          {
+            "description": "Slip correlation ID (UUID)",
+            "in": "path",
+            "name": "correlationID",
+            "required": true,
+            "schema": {
+              "description": "Slip correlation ID (UUID)",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter parent runs by EnvironmentName (case-insensitive)",
+            "explode": false,
+            "in": "query",
+            "name": "environment",
+            "schema": {
+              "description": "Filter parent runs by EnvironmentName (case-insensitive)",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter parent runs by StackName (case-insensitive)",
+            "explode": false,
+            "in": "query",
+            "name": "stack",
+            "schema": {
+              "description": "Filter parent runs by StackName (case-insensitive)",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter parent runs by Stage / test category (case-insensitive)",
+            "explode": false,
+            "in": "query",
+            "name": "stage",
+            "schema": {
+              "description": "Filter parent runs by Stage / test category (case-insensitive)",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Specific Attempt to fetch. When omitted, resolves to the latest attempt per (Environment, Stack, Stage).",
+            "explode": false,
+            "in": "query",
+            "name": "attempt",
+            "schema": {
+              "description": "Specific Attempt to fetch. When omitted, resolves to the latest attempt per (Environment, Stack, Stage).",
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "ResultStatus filter (case-insensitive ILIKE). Defaults to 'Failed'; pass '*' or 'all' to disable the filter and return every status.",
+            "explode": false,
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "description": "ResultStatus filter (case-insensitive ILIKE). Defaults to 'Failed'; pass '*' or 'all' to disable the filter and return every status.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Page size",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "default": 100,
+              "description": "Page size",
+              "format": "int64",
+              "maximum": 1000,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Pagination cursor from a previous response",
+            "explode": false,
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "description": "Pagination cursor from a previous response",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetTestsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "summary": "Drill into individual test results for a slip's runs"
+      }
+    },
+    "/automation-test-results/by-correlation/{correlationID}/tests/{testId}": {
+      "get": {
+        "description": "Resolves the matching RunResults rows for the correlation ID (using the same environment/stack/stage/attempt filters), derives a StartTime window for partition pruning, then returns the single TestResults row matching the given TestId. Returns 404 when no matching test exists in scope.",
+        "operationId": "get-automation-test-result-by-id-correlation",
+        "parameters": [
+          {
+            "description": "Slip correlation ID (UUID)",
+            "in": "path",
+            "name": "correlationID",
+            "required": true,
+            "schema": {
+              "description": "Slip correlation ID (UUID)",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Test row ID (UUID) from a /tests response",
+            "in": "path",
+            "name": "testId",
+            "required": true,
+            "schema": {
+              "description": "Test row ID (UUID) from a /tests response",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter parent runs by EnvironmentName (case-insensitive)",
+            "explode": false,
+            "in": "query",
+            "name": "environment",
+            "schema": {
+              "description": "Filter parent runs by EnvironmentName (case-insensitive)",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter parent runs by StackName (case-insensitive)",
+            "explode": false,
+            "in": "query",
+            "name": "stack",
+            "schema": {
+              "description": "Filter parent runs by StackName (case-insensitive)",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter parent runs by Stage / test category (case-insensitive)",
+            "explode": false,
+            "in": "query",
+            "name": "stage",
+            "schema": {
+              "description": "Filter parent runs by Stage / test category (case-insensitive)",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Specific Attempt to fetch. When omitted, resolves to the latest attempt per (Environment, Stack, Stage).",
+            "explode": false,
+            "in": "query",
+            "name": "attempt",
+            "schema": {
+              "description": "Specific Attempt to fetch. When omitted, resolves to the latest attempt per (Environment, Stack, Stage).",
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutomationTestResult"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "summary": "Get a single test result (with stack trace) by TestId"
+      }
+    },
+    "/automation-test-results/by-release/{releaseId}": {
+      "get": {
+        "description": "Returns rows from autotest_results.RunResults whose ReleaseId contains the given substring (matched as ILIKE %x%). Useful for searching by short SHA or partial release identifier (e.g. `26.04`). Defaults to the latest attempt per (ReleaseId, Environment, Stack, Stage) tuple.",
+        "operationId": "get-automation-test-results-by-release",
+        "parameters": [
+          {
+            "description": "Release ID substring; matched as ILIKE %x% against ReleaseId. Minimum 7 chars (short SHA length).",
+            "in": "path",
+            "name": "releaseId",
+            "required": true,
+            "schema": {
+              "description": "Release ID substring; matched as ILIKE %x% against ReleaseId. Minimum 7 chars (short SHA length).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by EnvironmentName (exact)",
+            "explode": false,
+            "in": "query",
+            "name": "environment",
+            "schema": {
+              "description": "Filter by EnvironmentName (exact)",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by StackName (exact)",
+            "explode": false,
+            "in": "query",
+            "name": "stack",
+            "schema": {
+              "description": "Filter by StackName (exact)",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by Stage / test category, e.g. FeatureCoreApi, PreprodCoreApi, FeatureUI (exact)",
+            "explode": false,
+            "in": "query",
+            "name": "stage",
+            "schema": {
+              "description": "Filter by Stage / test category, e.g. FeatureCoreApi, PreprodCoreApi, FeatureUI (exact)",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Specific Attempt to fetch. When omitted, returns the latest attempt per (ReleaseId, Environment, Stack, Stage).",
+            "explode": false,
+            "in": "query",
+            "name": "attempt",
+            "schema": {
+              "description": "Specific Attempt to fetch. When omitted, returns the latest attempt per (ReleaseId, Environment, Stack, Stage).",
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetAutomationTestResultsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "summary": "Get automation test-suite run results by release ID substring"
+      }
+    },
+    "/automation-test-results/by-release/{releaseId}/tests": {
+      "get": {
+        "description": "Resolves the matching RunResults rows for the release-ID substring (with the same environment/stack/stage/attempt filters as the parent endpoint), then returns the individual TestResults rows within each run's StartTime window. Defaults to ResultStatus='Failed'; pass `status=` empty to widen.",
+        "operationId": "get-automation-test-results-by-release-tests",
+        "parameters": [
+          {
+            "description": "Release ID substring (min 7 chars). Resolves matching runs first, then drills into their tests.",
+            "in": "path",
+            "name": "releaseId",
+            "required": true,
+            "schema": {
+              "description": "Release ID substring (min 7 chars). Resolves matching runs first, then drills into their tests.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter parent runs by EnvironmentName (case-insensitive)",
+            "explode": false,
+            "in": "query",
+            "name": "environment",
+            "schema": {
+              "description": "Filter parent runs by EnvironmentName (case-insensitive)",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter parent runs by StackName (case-insensitive)",
+            "explode": false,
+            "in": "query",
+            "name": "stack",
+            "schema": {
+              "description": "Filter parent runs by StackName (case-insensitive)",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter parent runs by Stage / test category (case-insensitive)",
+            "explode": false,
+            "in": "query",
+            "name": "stage",
+            "schema": {
+              "description": "Filter parent runs by Stage / test category (case-insensitive)",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Specific Attempt to fetch. When omitted, resolves to the latest attempt per (ReleaseId, Environment, Stack, Stage).",
+            "explode": false,
+            "in": "query",
+            "name": "attempt",
+            "schema": {
+              "description": "Specific Attempt to fetch. When omitted, resolves to the latest attempt per (ReleaseId, Environment, Stack, Stage).",
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "ResultStatus filter (case-insensitive ILIKE). Defaults to 'Failed'; pass '*' or 'all' to disable the filter and return every status.",
+            "explode": false,
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "description": "ResultStatus filter (case-insensitive ILIKE). Defaults to 'Failed'; pass '*' or 'all' to disable the filter and return every status.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Page size",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "default": 100,
+              "description": "Page size",
+              "format": "int64",
+              "maximum": 1000,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Pagination cursor from a previous response",
+            "explode": false,
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "description": "Pagination cursor from a previous response",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetTestsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "summary": "Drill into individual test results by release ID substring"
+      }
+    },
+    "/automation-test-results/by-release/{releaseId}/tests/{testId}": {
+      "get": {
+        "description": "Resolves the matching RunResults rows for the release-ID substring, derives a StartTime window for partition pruning, then returns the single TestResults row matching the given TestId. Returns 404 when no matching test exists in scope.",
+        "operationId": "get-automation-test-result-by-id-release",
+        "parameters": [
+          {
+            "description": "Release ID substring (min 7 chars)",
+            "in": "path",
+            "name": "releaseId",
+            "required": true,
+            "schema": {
+              "description": "Release ID substring (min 7 chars)",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Test row ID (UUID) from a /tests response",
+            "in": "path",
+            "name": "testId",
+            "required": true,
+            "schema": {
+              "description": "Test row ID (UUID) from a /tests response",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter parent runs by EnvironmentName (case-insensitive)",
+            "explode": false,
+            "in": "query",
+            "name": "environment",
+            "schema": {
+              "description": "Filter parent runs by EnvironmentName (case-insensitive)",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter parent runs by StackName (case-insensitive)",
+            "explode": false,
+            "in": "query",
+            "name": "stack",
+            "schema": {
+              "description": "Filter parent runs by StackName (case-insensitive)",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter parent runs by Stage / test category (case-insensitive)",
+            "explode": false,
+            "in": "query",
+            "name": "stage",
+            "schema": {
+              "description": "Filter parent runs by Stage / test category (case-insensitive)",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Specific Attempt to fetch. When omitted, resolves to the latest attempt per (ReleaseId, Environment, Stack, Stage).",
+            "explode": false,
+            "in": "query",
+            "name": "attempt",
+            "schema": {
+              "description": "Specific Attempt to fetch. When omitted, resolves to the latest attempt per (ReleaseId, Environment, Stack, Stage).",
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutomationTestResult"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "summary": "Get a single test result (with stack trace) by TestId via release ID"
+      }
+    },
     "/health": {
       "get": {
         "operationId": "health-check",

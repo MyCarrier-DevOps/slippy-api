@@ -4,10 +4,16 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // ErrInvalidTestsCursor indicates the cursor parameter could not be parsed.
 var ErrInvalidTestsCursor = errors.New("invalid tests cursor")
+
+// ErrTestNotFound indicates that no row exists in TestResults for the given
+// (TestId, run keys, time window).
+var ErrTestNotFound = errors.New("test not found")
 
 // AutomationTestResult is one row from autotest_results.TestResults — the
 // outcome of a single test scenario within a test-suite run.
@@ -64,8 +70,20 @@ type AutomationTestsResult struct {
 	Count      int                    `json:"count"`
 }
 
+// LoadTestByIDQuery defines parameters for fetching a single TestResults row
+// by its UUID. Runs/MinStart/MaxFinish constrain the lookup to a specific
+// run scope (so the same TestId from an unrelated correlationId/release
+// won't leak across) and give ClickHouse the partition predicate it needs.
+type LoadTestByIDQuery struct {
+	Runs      []ResolvedRunKey
+	MinStart  time.Time
+	MaxFinish time.Time
+	TestID    uuid.UUID
+}
+
 // AutomationTestsReader queries individual test results from the
 // autotest_results.TestResults table.
 type AutomationTestsReader interface {
 	QueryTests(ctx context.Context, q *AutomationTestsQuery) (*AutomationTestsResult, error)
+	LoadTestByID(ctx context.Context, q *LoadTestByIDQuery) (*AutomationTestResult, error)
 }

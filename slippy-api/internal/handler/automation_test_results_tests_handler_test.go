@@ -17,14 +17,28 @@ import (
 )
 
 type mockAutomationTestsReader struct {
-	queryFn func(ctx context.Context, q *domain.AutomationTestsQuery) (*domain.AutomationTestsResult, error)
+	queryFn  func(ctx context.Context, q *domain.AutomationTestsQuery) (*domain.AutomationTestsResult, error)
+	loadByID func(ctx context.Context, q *domain.LoadTestByIDQuery) (*domain.AutomationTestResult, error)
 }
 
 func (m *mockAutomationTestsReader) QueryTests(
 	ctx context.Context,
 	q *domain.AutomationTestsQuery,
 ) (*domain.AutomationTestsResult, error) {
+	if m.queryFn == nil {
+		return &domain.AutomationTestsResult{}, nil
+	}
 	return m.queryFn(ctx, q)
+}
+
+func (m *mockAutomationTestsReader) LoadTestByID(
+	ctx context.Context,
+	q *domain.LoadTestByIDQuery,
+) (*domain.AutomationTestResult, error) {
+	if m.loadByID == nil {
+		return nil, domain.ErrTestNotFound
+	}
+	return m.loadByID(ctx, q)
 }
 
 type testsResponse struct {
@@ -400,6 +414,260 @@ func TestGetTestsByRelease_NextPageURL(t *testing.T) {
 	assert.Contains(t, body.NextPage, "/v1/automation-test-results/by-release/abc1234/tests?")
 	assert.Contains(t, body.NextPage, "cursor=")
 	assert.Contains(t, body.NextPage, "attempt=3")
+}
+
+// --- single-test (stack-trace) drilldown ---------------------------------
+
+func TestGetTestByCorrelationID_Success(t *testing.T) {
+	corrID := uuid.MustParse("aaaaaaaa-1111-1111-1111-111111111111")
+	testID := uuid.MustParse("bbbbbbbb-1111-1111-1111-111111111111")
+	tStart := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	tFinish := tStart.Add(time.Minute)
+
+	parent := &mockAutomationTestResultsReader{
+		queryFn: func(_ context.Context, _ *domain.AutomationTestResultsQuery) (*domain.AutomationTestResultsResult, error) {
+			return resolvedRunsFor(tStart, tFinish), nil
+		},
+	}
+	tests := &mockAutomationTestsReader{
+		loadByID: func(_ context.Context, q *domain.LoadTestByIDQuery) (*domain.AutomationTestResult, error) {
+			assert.Equal(t, testID, q.TestID)
+			require.Len(t, q.Runs, 1)
+			assert.Equal(t, "26.04.abc1234", q.Runs[0].ReleaseID)
+			assert.Equal(t, tStart, q.MinStart)
+			assert.Equal(t, tFinish.Add(5*time.Minute), q.MaxFinish)
+			return &domain.AutomationTestResult{
+				TestID:       testID.String(),
+				TestName:     "TestThing",
+				Feature:      "FeatureCoreApi",
+				ResultStatus: "Failed",
+				StackTrace:   "panic: oh no\n  at line 1",
+			}, nil
+		},
+	}
+
+	handler := setupAutomationTestResultsTestAPIWithTests(parent, tests)
+	req := httptest.NewRequest(http.MethodGet,
+		"/automation-test-results/by-correlation/"+corrID.String()+"/tests/"+testID.String(), nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var body domain.AutomationTestResult
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&body))
+	assert.Equal(t, testID.String(), body.TestID)
+	assert.Equal(t, "panic: oh no\n  at line 1", body.StackTrace)
+}
+
+func TestGetTestByCorrelationID_InvalidCorrelationID(t *testing.T) {
+	parent := &mockAutomationTestResultsReader{}
+	tests := &mockAutomationTestsReader{
+		loadByID: func(_ context.Context, _ *domain.LoadTestByIDQuery) (*domain.AutomationTestResult, error) {
+			t.Fatal("loadByID should not be called for invalid correlationID")
+			return nil, nil
+		},
+	}
+	handler := setupAutomationTestResultsTestAPIWithTests(parent, tests)
+	testID := uuid.MustParse("bbbbbbbb-1111-1111-1111-111111111111")
+	req := httptest.NewRequest(http.MethodGet,
+		"/automation-test-results/by-correlation/not-a-uuid/tests/"+testID.String(), nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestGetTestByCorrelationID_InvalidTestID(t *testing.T) {
+	parent := &mockAutomationTestResultsReader{}
+	tests := &mockAutomationTestsReader{
+		loadByID: func(_ context.Context, _ *domain.LoadTestByIDQuery) (*domain.AutomationTestResult, error) {
+			t.Fatal("loadByID should not be called for invalid testId")
+			return nil, nil
+		},
+	}
+	handler := setupAutomationTestResultsTestAPIWithTests(parent, tests)
+	corrID := uuid.MustParse("aaaaaaaa-1111-1111-1111-111111111111")
+	req := httptest.NewRequest(http.MethodGet,
+		"/automation-test-results/by-correlation/"+corrID.String()+"/tests/not-a-uuid", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestGetTestByCorrelationID_RunResolutionError(t *testing.T) {
+	corrID := uuid.MustParse("aaaaaaaa-2222-2222-2222-222222222222")
+	testID := uuid.MustParse("bbbbbbbb-2222-2222-2222-222222222222")
+	parent := &mockAutomationTestResultsReader{
+		queryFn: func(_ context.Context, _ *domain.AutomationTestResultsQuery) (*domain.AutomationTestResultsResult, error) {
+			return nil, errors.New("clickhouse down")
+		},
+	}
+	tests := &mockAutomationTestsReader{
+		loadByID: func(_ context.Context, _ *domain.LoadTestByIDQuery) (*domain.AutomationTestResult, error) {
+			t.Fatal("loadByID should not be called when run resolution fails")
+			return nil, nil
+		},
+	}
+	handler := setupAutomationTestResultsTestAPIWithTests(parent, tests)
+	req := httptest.NewRequest(http.MethodGet,
+		"/automation-test-results/by-correlation/"+corrID.String()+"/tests/"+testID.String(), nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+func TestGetTestByCorrelationID_EmptyResolvedRuns404(t *testing.T) {
+	corrID := uuid.MustParse("aaaaaaaa-3333-3333-3333-333333333333")
+	testID := uuid.MustParse("bbbbbbbb-3333-3333-3333-333333333333")
+	parent := &mockAutomationTestResultsReader{
+		queryFn: func(_ context.Context, _ *domain.AutomationTestResultsQuery) (*domain.AutomationTestResultsResult, error) {
+			return &domain.AutomationTestResultsResult{Runs: nil}, nil
+		},
+	}
+	tests := &mockAutomationTestsReader{
+		loadByID: func(_ context.Context, _ *domain.LoadTestByIDQuery) (*domain.AutomationTestResult, error) {
+			t.Fatal("loadByID should not be called when no runs match")
+			return nil, nil
+		},
+	}
+	handler := setupAutomationTestResultsTestAPIWithTests(parent, tests)
+	req := httptest.NewRequest(http.MethodGet,
+		"/automation-test-results/by-correlation/"+corrID.String()+"/tests/"+testID.String(), nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestGetTestByCorrelationID_TestNotFound404(t *testing.T) {
+	corrID := uuid.MustParse("aaaaaaaa-4444-4444-4444-444444444444")
+	testID := uuid.MustParse("bbbbbbbb-4444-4444-4444-444444444444")
+	tStart := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+
+	parent := &mockAutomationTestResultsReader{
+		queryFn: func(_ context.Context, _ *domain.AutomationTestResultsQuery) (*domain.AutomationTestResultsResult, error) {
+			return resolvedRunsFor(tStart, tStart.Add(time.Minute)), nil
+		},
+	}
+	tests := &mockAutomationTestsReader{
+		loadByID: func(_ context.Context, _ *domain.LoadTestByIDQuery) (*domain.AutomationTestResult, error) {
+			return nil, domain.ErrTestNotFound
+		},
+	}
+	handler := setupAutomationTestResultsTestAPIWithTests(parent, tests)
+	req := httptest.NewRequest(http.MethodGet,
+		"/automation-test-results/by-correlation/"+corrID.String()+"/tests/"+testID.String(), nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestGetTestByCorrelationID_LoadError500(t *testing.T) {
+	corrID := uuid.MustParse("aaaaaaaa-5555-5555-5555-555555555555")
+	testID := uuid.MustParse("bbbbbbbb-5555-5555-5555-555555555555")
+	tStart := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+
+	parent := &mockAutomationTestResultsReader{
+		queryFn: func(_ context.Context, _ *domain.AutomationTestResultsQuery) (*domain.AutomationTestResultsResult, error) {
+			return resolvedRunsFor(tStart, tStart.Add(time.Minute)), nil
+		},
+	}
+	tests := &mockAutomationTestsReader{
+		loadByID: func(_ context.Context, _ *domain.LoadTestByIDQuery) (*domain.AutomationTestResult, error) {
+			return nil, errors.New("clickhouse exploded")
+		},
+	}
+	handler := setupAutomationTestResultsTestAPIWithTests(parent, tests)
+	req := httptest.NewRequest(http.MethodGet,
+		"/automation-test-results/by-correlation/"+corrID.String()+"/tests/"+testID.String(), nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+func TestGetTestByRelease_Success(t *testing.T) {
+	testID := uuid.MustParse("cccccccc-1111-1111-1111-111111111111")
+	tStart := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+
+	parent := &mockAutomationTestResultsReader{
+		queryByReleaseFn: func(_ context.Context, q *domain.AutomationTestResultsByReleaseQuery) (*domain.AutomationTestResultsResult, error) {
+			assert.Equal(t, "abc1234", q.ReleaseIDSubstring)
+			return resolvedRunsFor(tStart, tStart.Add(time.Minute)), nil
+		},
+	}
+	tests := &mockAutomationTestsReader{
+		loadByID: func(_ context.Context, q *domain.LoadTestByIDQuery) (*domain.AutomationTestResult, error) {
+			assert.Equal(t, testID, q.TestID)
+			return &domain.AutomationTestResult{
+				TestID:       testID.String(),
+				TestName:     "TestX",
+				ResultStatus: "Failed",
+				StackTrace:   "boom",
+			}, nil
+		},
+	}
+	handler := setupAutomationTestResultsTestAPIWithTests(parent, tests)
+	req := httptest.NewRequest(http.MethodGet,
+		"/automation-test-results/by-release/abc1234/tests/"+testID.String(), nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var body domain.AutomationTestResult
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&body))
+	assert.Equal(t, "boom", body.StackTrace)
+}
+
+func TestGetTestByRelease_TooShort(t *testing.T) {
+	testID := uuid.MustParse("cccccccc-2222-2222-2222-222222222222")
+	parent := &mockAutomationTestResultsReader{}
+	tests := &mockAutomationTestsReader{
+		loadByID: func(_ context.Context, _ *domain.LoadTestByIDQuery) (*domain.AutomationTestResult, error) {
+			t.Fatal("loadByID should not be called for too-short releaseId")
+			return nil, nil
+		},
+	}
+	handler := setupAutomationTestResultsTestAPIWithTests(parent, tests)
+	req := httptest.NewRequest(http.MethodGet,
+		"/automation-test-results/by-release/abc123/tests/"+testID.String(), nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestGetTestByRelease_InvalidTestID(t *testing.T) {
+	parent := &mockAutomationTestResultsReader{}
+	tests := &mockAutomationTestsReader{
+		loadByID: func(_ context.Context, _ *domain.LoadTestByIDQuery) (*domain.AutomationTestResult, error) {
+			t.Fatal("loadByID should not be called for invalid testId")
+			return nil, nil
+		},
+	}
+	handler := setupAutomationTestResultsTestAPIWithTests(parent, tests)
+	req := httptest.NewRequest(http.MethodGet,
+		"/automation-test-results/by-release/abc1234/tests/not-a-uuid", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestGetTestByRelease_TestNotFound(t *testing.T) {
+	testID := uuid.MustParse("cccccccc-3333-3333-3333-333333333333")
+	tStart := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	parent := &mockAutomationTestResultsReader{
+		queryByReleaseFn: func(_ context.Context, _ *domain.AutomationTestResultsByReleaseQuery) (*domain.AutomationTestResultsResult, error) {
+			return resolvedRunsFor(tStart, tStart.Add(time.Minute)), nil
+		},
+	}
+	tests := &mockAutomationTestsReader{
+		loadByID: func(_ context.Context, _ *domain.LoadTestByIDQuery) (*domain.AutomationTestResult, error) {
+			return nil, domain.ErrTestNotFound
+		},
+	}
+	handler := setupAutomationTestResultsTestAPIWithTests(parent, tests)
+	req := httptest.NewRequest(http.MethodGet,
+		"/automation-test-results/by-release/abc1234/tests/"+testID.String(), nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
 // --- registration gating --------------------------------------------------

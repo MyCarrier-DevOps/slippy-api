@@ -117,6 +117,35 @@ type GetTestsOutput struct {
 	}
 }
 
+// GetTestByCorrelationIDInput captures path and query parameters for the
+// single-test lookup nested under a slip's correlation ID. The optional
+// environment/stack/stage/attempt filters narrow which parent runs are used
+// to derive the StartTime window; they don't have to match the run that
+// produced the test (the lookup is by TestId, which is globally unique).
+type GetTestByCorrelationIDInput struct {
+	CorrelationID string `path:"correlationID" doc:"Slip correlation ID (UUID)"`
+	TestID        string `path:"testId"        doc:"Test row ID (UUID) from a /tests response"`
+	Environment   string `                     doc:"Filter parent runs by EnvironmentName (case-insensitive)"                                                 query:"environment"`
+	Stack         string `                     doc:"Filter parent runs by StackName (case-insensitive)"                                                       query:"stack"`
+	Stage         string `                     doc:"Filter parent runs by Stage / test category (case-insensitive)"                                           query:"stage"`
+	Attempt       uint32 `                     doc:"Specific Attempt to fetch. When omitted, resolves to the latest attempt per (Environment, Stack, Stage)." query:"attempt"`
+}
+
+// GetTestByReleaseInput is the by-release counterpart.
+type GetTestByReleaseInput struct {
+	ReleaseID   string `path:"releaseId" doc:"Release ID substring (min 7 chars)"`
+	TestID      string `path:"testId"    doc:"Test row ID (UUID) from a /tests response"`
+	Environment string `                 doc:"Filter parent runs by EnvironmentName (case-insensitive)"                                                            query:"environment"`
+	Stack       string `                 doc:"Filter parent runs by StackName (case-insensitive)"                                                                  query:"stack"`
+	Stage       string `                 doc:"Filter parent runs by Stage / test category (case-insensitive)"                                                      query:"stage"`
+	Attempt     uint32 `                 doc:"Specific Attempt to fetch. When omitted, resolves to the latest attempt per (ReleaseId, Environment, Stack, Stage)." query:"attempt"`
+}
+
+// GetTestOutput wraps a single test result (full row including stack_trace).
+type GetTestOutput struct {
+	Body domain.AutomationTestResult
+}
+
 // minReleaseIDLength is the minimum accepted length for the release-id path
 // parameter. It matches the length of a short (7-char) Git SHA.
 const minReleaseIDLength = 7
@@ -175,6 +204,29 @@ func RegisterAutomationTestResultsRoutes(api huma.API, h *AutomationTestResultsH
 				"ResultStatus='Failed'; pass `status=` empty to widen.",
 			Security: apiKeySecurity,
 		}, h.getTestsByRelease)
+
+		huma.Register(api, huma.Operation{
+			OperationID: "get-automation-test-result-by-id-correlation",
+			Method:      http.MethodGet,
+			Path:        "/automation-test-results/by-correlation/{correlationID}/tests/{testId}",
+			Summary:     "Get a single test result (with stack trace) by TestId",
+			Description: "Resolves the matching RunResults rows for the correlation ID (using the same " +
+				"environment/stack/stage/attempt filters), derives a StartTime window for partition " +
+				"pruning, then returns the single TestResults row matching the given TestId. " +
+				"Returns 404 when no matching test exists in scope.",
+			Security: apiKeySecurity,
+		}, h.getTestByCorrelationID)
+
+		huma.Register(api, huma.Operation{
+			OperationID: "get-automation-test-result-by-id-release",
+			Method:      http.MethodGet,
+			Path:        "/automation-test-results/by-release/{releaseId}/tests/{testId}",
+			Summary:     "Get a single test result (with stack trace) by TestId via release ID",
+			Description: "Resolves the matching RunResults rows for the release-ID substring, derives " +
+				"a StartTime window for partition pruning, then returns the single TestResults row " +
+				"matching the given TestId. Returns 404 when no matching test exists in scope.",
+			Security: apiKeySecurity,
+		}, h.getTestByRelease)
 	}
 }
 
@@ -451,6 +503,136 @@ func setIfNonEmpty(v url.Values, key, val string) {
 	if val != "" {
 		v.Set(key, val)
 	}
+}
+
+// loadTestByID is the shared back half of getTestByCorrelationID and
+// getTestByRelease. It expects already-resolved runs and the parsed TestId,
+// and translates domain.ErrTestNotFound into a 404.
+func (h *AutomationTestResultsHandler) loadTestByID(
+	ctx context.Context,
+	span trace.Span,
+	runs []domain.AutomationTestRunResult,
+	testID uuid.UUID,
+) (*domain.AutomationTestResult, error) {
+	if len(runs) == 0 {
+		return nil, huma.NewError(http.StatusNotFound, "test not found")
+	}
+	keys, minStart, maxFinish := runsToKeysAndWindow(runs)
+	span.SetAttributes(
+		attribute.Int("test.runs_count", len(keys)),
+		attribute.String("test.test_id", testID.String()),
+	)
+	res, err := h.testsReader.LoadTestByID(ctx, &domain.LoadTestByIDQuery{
+		Runs:      keys,
+		MinStart:  minStart,
+		MaxFinish: maxFinish,
+		TestID:    testID,
+	})
+	if err != nil {
+		recordHandlerError(span, err)
+		if errors.Is(err, domain.ErrTestNotFound) {
+			return nil, huma.NewError(http.StatusNotFound, "test not found")
+		}
+		return nil, huma.NewError(http.StatusInternalServerError, "internal error")
+	}
+	return res, nil
+}
+
+func (h *AutomationTestResultsHandler) getTestByCorrelationID(
+	ctx context.Context,
+	input *GetTestByCorrelationIDInput,
+) (*GetTestOutput, error) {
+	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.getTestByCorrelationID",
+		trace.WithAttributes(
+			attribute.String("test.correlation_id", input.CorrelationID),
+			attribute.String("test.test_id", input.TestID),
+			attribute.String("test.environment", input.Environment),
+			attribute.String("test.stack", input.Stack),
+			attribute.String("test.stage", input.Stage),
+			attribute.Int("test.attempt", int(input.Attempt)),
+		),
+	)
+	defer span.End()
+
+	correlationID, err := uuid.Parse(input.CorrelationID)
+	if err != nil {
+		recordHandlerError(span, err)
+		return nil, huma.NewError(http.StatusBadRequest, "invalid correlationID")
+	}
+	testID, err := uuid.Parse(input.TestID)
+	if err != nil {
+		recordHandlerError(span, err)
+		return nil, huma.NewError(http.StatusBadRequest, "invalid testId")
+	}
+
+	runsResult, err := h.reader.QueryAutomationTestResults(ctx, &domain.AutomationTestResultsQuery{
+		CorrelationID: correlationID,
+		Environment:   input.Environment,
+		Stack:         input.Stack,
+		Stage:         input.Stage,
+		Attempt:       input.Attempt,
+	})
+	if err != nil {
+		recordHandlerError(span, err)
+		return nil, huma.NewError(http.StatusInternalServerError, "internal error")
+	}
+
+	res, err := h.loadTestByID(ctx, span, runsResult.Runs, testID)
+	if err != nil {
+		return nil, err
+	}
+	span.SetStatus(codes.Ok, "")
+	return &GetTestOutput{Body: *res}, nil
+}
+
+func (h *AutomationTestResultsHandler) getTestByRelease(
+	ctx context.Context,
+	input *GetTestByReleaseInput,
+) (*GetTestOutput, error) {
+	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.getTestByRelease",
+		trace.WithAttributes(
+			attribute.String("test.release_id", input.ReleaseID),
+			attribute.String("test.test_id", input.TestID),
+			attribute.String("test.environment", input.Environment),
+			attribute.String("test.stack", input.Stack),
+			attribute.String("test.stage", input.Stage),
+			attribute.Int("test.attempt", int(input.Attempt)),
+		),
+	)
+	defer span.End()
+
+	if len(input.ReleaseID) < minReleaseIDLength {
+		err := fmt.Errorf("releaseId must be at least %d characters", minReleaseIDLength)
+		recordHandlerError(span, err)
+		return nil, huma.NewError(http.StatusBadRequest, err.Error())
+	}
+	testID, err := uuid.Parse(input.TestID)
+	if err != nil {
+		recordHandlerError(span, err)
+		return nil, huma.NewError(http.StatusBadRequest, "invalid testId")
+	}
+
+	runsResult, err := h.reader.QueryAutomationTestResultsByRelease(
+		ctx,
+		&domain.AutomationTestResultsByReleaseQuery{
+			ReleaseIDSubstring: input.ReleaseID,
+			Environment:        input.Environment,
+			Stack:              input.Stack,
+			Stage:              input.Stage,
+			Attempt:            input.Attempt,
+		},
+	)
+	if err != nil {
+		recordHandlerError(span, err)
+		return nil, huma.NewError(http.StatusInternalServerError, "internal error")
+	}
+
+	res, err := h.loadTestByID(ctx, span, runsResult.Runs, testID)
+	if err != nil {
+		return nil, err
+	}
+	span.SetStatus(codes.Ok, "")
+	return &GetTestOutput{Body: *res}, nil
 }
 
 func (h *AutomationTestResultsHandler) getAutomationTestResults(

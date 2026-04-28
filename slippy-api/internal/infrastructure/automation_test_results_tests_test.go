@@ -392,3 +392,178 @@ func TestEncodeParseTestsCursor_RoundTrip(t *testing.T) {
 	assert.Equal(t, ts, gotTS)
 	assert.Equal(t, id, gotID)
 }
+
+// --- LoadTestByID tests ---------------------------------------------------
+
+func TestLoadTestByID_Success(t *testing.T) {
+	ts := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	testID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+
+	session := &clickhousetest.MockSession{
+		QueryWithArgsFunc: func(_ context.Context, query string, args ...any) (ch.Rows, error) {
+			assert.Contains(t, query, "autotest_results.TestResults")
+			assert.Contains(t, query, "TestId = {testId:UUID}")
+			assert.Contains(t, query, "StartTime >= {minStart:DateTime}")
+			assert.Contains(t, query, "StartTime <= {maxFinish:DateTime}")
+			// run-tuple OR clause should be present
+			assert.Contains(t, query, "ReleaseId = {r0:String}")
+			// LIMIT 1 (no fetchLimit / cursor / status)
+			assert.Contains(t, query, "LIMIT 1")
+			assert.NotContains(t, query, "fetchLimit")
+			assert.NotContains(t, query, "ResultStatus ILIKE")
+			// Confirm testId param
+			for _, a := range args {
+				if np, ok := a.(driver.NamedValue); ok && np.Name == "testId" {
+					assert.Equal(t, testID, np.Value)
+				}
+			}
+			return &clickhousetest.MockRows{
+				NextData: []bool{true},
+				ScanFunc: scannerFor([][]any{
+					testResultSeed(ts, testID, "Failed"),
+				}),
+			}, nil
+		},
+	}
+
+	store := NewAutomationTestsStore(session)
+	result, err := store.LoadTestByID(context.Background(), &domain.LoadTestByIDQuery{
+		Runs:      []domain.ResolvedRunKey{defaultRunKey()},
+		MinStart:  ts.Add(-time.Hour),
+		MaxFinish: ts.Add(time.Hour),
+		TestID:    testID,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, testID.String(), result.TestID)
+	assert.Equal(t, "Failed", result.ResultStatus)
+	assert.Equal(t, "trace", result.StackTrace)
+}
+
+func TestLoadTestByID_NotFound(t *testing.T) {
+	testID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+
+	session := &clickhousetest.MockSession{
+		QueryWithArgsFunc: func(_ context.Context, _ string, _ ...any) (ch.Rows, error) {
+			return &clickhousetest.MockRows{NextData: []bool{}}, nil
+		},
+	}
+
+	store := NewAutomationTestsStore(session)
+	result, err := store.LoadTestByID(context.Background(), &domain.LoadTestByIDQuery{
+		Runs:   []domain.ResolvedRunKey{defaultRunKey()},
+		TestID: testID,
+	})
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.True(t, errors.Is(err, domain.ErrTestNotFound))
+}
+
+func TestLoadTestByID_EmptyRunsReturnsNotFound(t *testing.T) {
+	testID := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+	session := &clickhousetest.MockSession{
+		QueryWithArgsFunc: func(_ context.Context, _ string, _ ...any) (ch.Rows, error) {
+			t.Fatal("session should not be called when Runs is empty")
+			return nil, nil
+		},
+	}
+	store := NewAutomationTestsStore(session)
+	result, err := store.LoadTestByID(context.Background(), &domain.LoadTestByIDQuery{
+		Runs:   nil,
+		TestID: testID,
+	})
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.True(t, errors.Is(err, domain.ErrTestNotFound))
+}
+
+func TestLoadTestByID_NilQuery(t *testing.T) {
+	store := NewAutomationTestsStore(&clickhousetest.MockSession{})
+	_, err := store.LoadTestByID(context.Background(), nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "query must not be nil")
+}
+
+func TestLoadTestByID_NilTestID(t *testing.T) {
+	store := NewAutomationTestsStore(&clickhousetest.MockSession{})
+	_, err := store.LoadTestByID(context.Background(), &domain.LoadTestByIDQuery{
+		Runs: []domain.ResolvedRunKey{defaultRunKey()},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "test ID is required")
+}
+
+func TestLoadTestByID_QueryError(t *testing.T) {
+	testID := uuid.MustParse("44444444-4444-4444-4444-444444444444")
+	session := &clickhousetest.MockSession{
+		QueryWithArgsFunc: func(_ context.Context, _ string, _ ...any) (ch.Rows, error) {
+			return nil, errors.New("connection refused")
+		},
+	}
+	store := NewAutomationTestsStore(session)
+	_, err := store.LoadTestByID(context.Background(), &domain.LoadTestByIDQuery{
+		Runs:   []domain.ResolvedRunKey{defaultRunKey()},
+		TestID: testID,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to load automation test")
+}
+
+func TestLoadTestByID_ScanError(t *testing.T) {
+	testID := uuid.MustParse("55555555-5555-5555-5555-555555555555")
+	session := &clickhousetest.MockSession{
+		QueryWithArgsFunc: func(_ context.Context, _ string, _ ...any) (ch.Rows, error) {
+			return &clickhousetest.MockRows{
+				NextData: []bool{true},
+				ScanErr:  errors.New("scan failure"),
+			}, nil
+		},
+	}
+	store := NewAutomationTestsStore(session)
+	_, err := store.LoadTestByID(context.Background(), &domain.LoadTestByIDQuery{
+		Runs:   []domain.ResolvedRunKey{defaultRunKey()},
+		TestID: testID,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to scan automation test row")
+}
+
+func TestLoadTestByID_RowsErrBeforeNext(t *testing.T) {
+	testID := uuid.MustParse("66666666-6666-6666-6666-666666666666")
+	session := &clickhousetest.MockSession{
+		QueryWithArgsFunc: func(_ context.Context, _ string, _ ...any) (ch.Rows, error) {
+			return &clickhousetest.MockRows{
+				NextData: []bool{},
+				ErrErr:   errors.New("rows iteration failure"),
+			}, nil
+		},
+	}
+	store := NewAutomationTestsStore(session)
+	_, err := store.LoadTestByID(context.Background(), &domain.LoadTestByIDQuery{
+		Runs:   []domain.ResolvedRunKey{defaultRunKey()},
+		TestID: testID,
+	})
+	require.Error(t, err)
+	assert.True(t, strings.Contains(err.Error(), "error iterating automation test rows"))
+}
+
+func TestLoadTestByID_CloseError(t *testing.T) {
+	ts := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	testID := uuid.MustParse("77777777-7777-7777-7777-777777777777")
+	session := &clickhousetest.MockSession{
+		QueryWithArgsFunc: func(_ context.Context, _ string, _ ...any) (ch.Rows, error) {
+			return &clickhousetest.MockRows{
+				NextData: []bool{true},
+				ScanFunc: scannerFor([][]any{testResultSeed(ts, testID, "Failed")}),
+				CloseErr: errors.New("close failure"),
+			}, nil
+		},
+	}
+	store := NewAutomationTestsStore(session)
+	_, err := store.LoadTestByID(context.Background(), &domain.LoadTestByIDQuery{
+		Runs:   []domain.ResolvedRunKey{defaultRunKey()},
+		TestID: testID,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to close rows")
+}
