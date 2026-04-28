@@ -19,6 +19,11 @@ import (
 
 const automationTestResultsTracerName = "slippy-api/automation-testresults"
 
+// runResultsSelectColumns is the column list shared by all RunResults queries.
+const runResultsSelectColumns = `Outcome, Passed, Failed, StartTime, FinishTime, ReleaseId, Attempt, Stage,
+	EnvironmentName, StackName, ErrorMessage, BranchName, AttemptId,
+	TestRunId, CorrelationId, JobNumber, BatchId, TotalTestJobCount`
+
 // AutomationTestResultsStore queries autotest_results.RunResults from ClickHouse.
 type AutomationTestResultsStore struct {
 	session ch.ClickhouseSessionInterface
@@ -32,13 +37,13 @@ func NewAutomationTestResultsStore(session ch.ClickhouseSessionInterface) *Autom
 var _ domain.AutomationTestResultsReader = (*AutomationTestResultsStore)(nil)
 
 // QueryAutomationTestResults returns RunResults rows for the given correlation ID,
-// optionally filtered by environment / stack / stage / attempt. When LatestOnly is
-// true and Attempt is unset, the result is collapsed to the highest Attempt per
-// (EnvironmentName, StackName, Stage) tuple via ClickHouse `LIMIT 1 BY`.
+// optionally filtered by environment / stack / stage / attempt. When Attempt is 0,
+// the result is collapsed to the highest Attempt per (EnvironmentName, StackName,
+// Stage) tuple via ClickHouse `LIMIT 1 BY`.
 func (s *AutomationTestResultsStore) QueryAutomationTestResults(
 	ctx context.Context,
 	q *domain.AutomationTestResultsQuery,
-) (result *domain.AutomationTestResultsResult, err error) {
+) (*domain.AutomationTestResultsResult, error) {
 	if q == nil {
 		return nil, errors.New("query must not be nil")
 	}
@@ -57,52 +62,129 @@ func (s *AutomationTestResultsStore) QueryAutomationTestResults(
 			attribute.String("test.stack", q.Stack),
 			attribute.String("test.stage", q.Stage),
 			attribute.Int("test.attempt", int(q.Attempt)),
-			attribute.Bool("test.latest_only", q.LatestOnly),
 		),
 	)
 	defer span.End()
 
 	conditions := []string{"CorrelationId = {correlationId:UUID}"}
 	args := []any{ch.Named("correlationId", q.CorrelationID)}
-
-	if q.Environment != "" {
-		conditions = append(conditions, "EnvironmentName = {environment:String}")
-		args = append(args, ch.Named("environment", q.Environment))
-	}
-	if q.Stack != "" {
-		conditions = append(conditions, "StackName = {stack:String}")
-		args = append(args, ch.Named("stack", q.Stack))
-	}
-	if q.Stage != "" {
-		conditions = append(conditions, "Stage = {stage:String}")
-		args = append(args, ch.Named("stage", q.Stage))
-	}
-	if q.Attempt > 0 {
-		conditions = append(conditions, "Attempt = {attempt:UInt32}")
-		args = append(args, ch.Named("attempt", q.Attempt))
-	}
+	conditions, args = appendCommonFilters(conditions, args, q.Environment, q.Stack, q.Stage, q.Attempt)
 
 	limitClause := ""
-	if q.Attempt == 0 && q.LatestOnly {
+	if q.Attempt == 0 {
 		limitClause = " LIMIT 1 BY (EnvironmentName, StackName, Stage)"
 	}
 
 	query := fmt.Sprintf(
-		`SELECT Outcome, Passed, Failed, StartTime, FinishTime, ReleaseId, Attempt, Stage,
-		        EnvironmentName, StackName, ErrorMessage, BranchName, AttemptId,
-		        TestRunId, CorrelationId, JobNumber, BatchId, TotalTestJobCount
+		`SELECT %s
 		FROM autotest_results.RunResults
 		WHERE %s
 		ORDER BY EnvironmentName, StackName, Stage, Attempt DESC, StartTime DESC%s`,
+		runResultsSelectColumns,
 		strings.Join(conditions, " AND "),
 		limitClause,
 	)
 
+	return s.runQuery(ctx, span, query, args, "automation test results")
+}
+
+// QueryAutomationTestResultsByRelease returns RunResults rows whose ReleaseId
+// contains the given substring (matched via `ILIKE %x%`), optionally filtered
+// by environment / stack / stage / attempt. When Attempt is 0, results are
+// collapsed to the highest Attempt per (ReleaseId, EnvironmentName, StackName,
+// Stage) tuple so each matched release retains its own latest attempt.
+func (s *AutomationTestResultsStore) QueryAutomationTestResultsByRelease(
+	ctx context.Context,
+	q *domain.AutomationTestResultsByReleaseQuery,
+) (*domain.AutomationTestResultsResult, error) {
+	if q == nil {
+		return nil, errors.New("query must not be nil")
+	}
+	if q.ReleaseIDSubstring == "" {
+		return nil, errors.New("release ID substring is required")
+	}
+
+	ctx, span := otel.Tracer(automationTestResultsTracerName).Start(
+		ctx, "automationtestresults.QueryByRelease",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("db.system", "clickhouse"),
+			attribute.String("db.operation", "QueryAutomationTestResultsByRelease"),
+			attribute.String("test.release_id_substring", q.ReleaseIDSubstring),
+			attribute.String("test.environment", q.Environment),
+			attribute.String("test.stack", q.Stack),
+			attribute.String("test.stage", q.Stage),
+			attribute.Int("test.attempt", int(q.Attempt)),
+		),
+	)
+	defer span.End()
+
+	conditions := []string{"ReleaseId ILIKE {releaseId:String}"}
+	args := []any{ch.Named("releaseId", "%"+q.ReleaseIDSubstring+"%")}
+	conditions, args = appendCommonFilters(conditions, args, q.Environment, q.Stack, q.Stage, q.Attempt)
+
+	limitClause := ""
+	if q.Attempt == 0 {
+		limitClause = " LIMIT 1 BY (ReleaseId, EnvironmentName, StackName, Stage)"
+	}
+
+	query := fmt.Sprintf(
+		`SELECT %s
+		FROM autotest_results.RunResults
+		WHERE %s
+		ORDER BY ReleaseId, EnvironmentName, StackName, Stage, Attempt DESC, StartTime DESC%s`,
+		runResultsSelectColumns,
+		strings.Join(conditions, " AND "),
+		limitClause,
+	)
+
+	return s.runQuery(ctx, span, query, args, "automation test results by release")
+}
+
+// appendCommonFilters appends the optional environment/stack/stage/attempt
+// filters shared by both query methods, returning the updated slices. The
+// string filters use ILIKE for case-insensitive matching since the source
+// data has inconsistent casing.
+func appendCommonFilters(
+	inConditions []string,
+	inArgs []any,
+	environment, stack, stage string,
+	attempt uint32,
+) (conditions []string, args []any) {
+	conditions, args = inConditions, inArgs
+	if environment != "" {
+		conditions = append(conditions, "EnvironmentName ILIKE {environment:String}")
+		args = append(args, ch.Named("environment", environment))
+	}
+	if stack != "" {
+		conditions = append(conditions, "StackName ILIKE {stack:String}")
+		args = append(args, ch.Named("stack", stack))
+	}
+	if stage != "" {
+		conditions = append(conditions, "Stage ILIKE {stage:String}")
+		args = append(args, ch.Named("stage", stage))
+	}
+	if attempt > 0 {
+		conditions = append(conditions, "Attempt = {attempt:UInt32}")
+		args = append(args, ch.Named("attempt", attempt))
+	}
+	return conditions, args
+}
+
+// runQuery executes the prepared query, scans every row, and returns the
+// result. The opLabel is folded into error messages for context.
+func (s *AutomationTestResultsStore) runQuery(
+	ctx context.Context,
+	span trace.Span,
+	query string,
+	args []any,
+	opLabel string,
+) (result *domain.AutomationTestResultsResult, err error) {
 	rows, err := s.session.QueryWithArgs(ctx, query, args...)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, fmt.Sprintf("query failed: %v", err))
-		return nil, fmt.Errorf("failed to query automation test results: %w", err)
+		return nil, fmt.Errorf("failed to query %s: %w", opLabel, err)
 	}
 	defer func() {
 		if closeErr := rows.Close(); err == nil && closeErr != nil {
@@ -123,7 +205,7 @@ func (s *AutomationTestResultsStore) QueryAutomationTestResults(
 			&row.AttemptID, &testRunID, &corrID, &row.JobNumber, &batchID,
 			&row.TotalTestJobCount,
 		); scanErr != nil {
-			return nil, fmt.Errorf("failed to scan automation test results row: %w", scanErr)
+			return nil, fmt.Errorf("failed to scan %s row: %w", opLabel, scanErr)
 		}
 		if testRunID != nil {
 			s := testRunID.String()
@@ -141,7 +223,7 @@ func (s *AutomationTestResultsStore) QueryAutomationTestResults(
 	}
 
 	if rowsErr := rows.Err(); rowsErr != nil {
-		return nil, fmt.Errorf("error iterating automation test results rows: %w", rowsErr)
+		return nil, fmt.Errorf("error iterating %s rows: %w", opLabel, rowsErr)
 	}
 
 	result = &domain.AutomationTestResultsResult{

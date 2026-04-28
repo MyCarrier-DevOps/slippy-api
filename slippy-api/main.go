@@ -35,8 +35,8 @@ func main() {
 
 // buildHandler creates the fully-wired HTTP handler with auth, routes, and
 // OpenTelemetry instrumentation. This is extracted from run() for testability.
-// The imageTagReader, ciJobLogReader, and automationTestResultsReader are
-// optional — if nil, their endpoints are not registered.
+// The imageTagReader, ciJobLogReader, automationTestResultsReader, and
+// automationTestsReader are optional — if nil, their endpoints are not registered.
 func buildHandler(
 	cfg *config.Config,
 	reader domain.SlipReader,
@@ -44,6 +44,7 @@ func buildHandler(
 	imageTagReader domain.ImageTagReader,
 	ciJobLogReader domain.CIJobLogReader,
 	automationTestResultsReader domain.AutomationTestResultsReader,
+	automationTestsReader domain.AutomationTestsReader,
 ) http.Handler {
 	mux := http.NewServeMux()
 	apiConfig := huma.DefaultConfig("Slippy API", "1.0.0")
@@ -84,9 +85,11 @@ func buildHandler(
 	// Register v1-only routes (no legacy unversioned paths) below.
 	v1Only := huma.NewGroup(api, "/v1")
 
-	// Automation test results: v1-only.
+	// Automation test results: v1-only. The optional automationTestsReader
+	// powers the per-test drill-down endpoints; when nil, only the parent
+	// run-summary routes are registered.
 	if automationTestResultsReader != nil {
-		atrh := handler.NewAutomationTestResultsHandler(automationTestResultsReader)
+		atrh := handler.NewAutomationTestResultsHandler(automationTestResultsReader, automationTestsReader)
 		handler.RegisterAutomationTestResultsRoutes(v1Only, atrh)
 	}
 
@@ -221,6 +224,10 @@ func run() error {
 	// Uses the same ClickHouse session to query autotest_results.RunResults.
 	automationTestResultsReader := infrastructure.NewAutomationTestResultsStore(store.Session())
 
+	// --- Automation tests (per-test) reader ---
+	// Uses the same ClickHouse session to query autotest_results.TestResults.
+	automationTestsReader := infrastructure.NewAutomationTestsStore(store.Session())
+
 	// --- Optional write support ---
 	// When SLIPPY_WRITE_API_KEY is configured, expose write endpoints.
 	var writer domain.SlipWriter
@@ -230,7 +237,10 @@ func run() error {
 	}
 
 	// --- HTTP Server ---
-	otelHandler := buildHandler(cfg, reader, writer, imageTagReader, ciJobLogReader, automationTestResultsReader)
+	otelHandler := buildHandler(
+		cfg, reader, writer, imageTagReader, ciJobLogReader,
+		automationTestResultsReader, automationTestsReader,
+	)
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
 		Handler:           otelHandler,

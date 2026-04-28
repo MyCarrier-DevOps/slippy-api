@@ -99,13 +99,29 @@ func (s *stubAutomationTestResultsReader) QueryAutomationTestResults(
 	return &domain.AutomationTestResultsResult{}, nil
 }
 
+func (s *stubAutomationTestResultsReader) QueryAutomationTestResultsByRelease(
+	_ context.Context,
+	_ *domain.AutomationTestResultsByReleaseQuery,
+) (*domain.AutomationTestResultsResult, error) {
+	return &domain.AutomationTestResultsResult{}, nil
+}
+
+type stubAutomationTestsReader struct{}
+
+func (s *stubAutomationTestsReader) QueryTests(
+	_ context.Context,
+	_ *domain.AutomationTestsQuery,
+) (*domain.AutomationTestsResult, error) {
+	return &domain.AutomationTestsResult{}, nil
+}
+
 // --- buildHandler tests ---
 
 func TestBuildHandler_HealthEndpoint(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil)
 	require.NotNil(t, h)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -123,7 +139,7 @@ func TestBuildHandler_AuthRequired(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil)
 
 	// Request without auth header should be rejected
 	req := httptest.NewRequest(http.MethodGet, "/slips/test-corr-001", nil)
@@ -136,7 +152,7 @@ func TestBuildHandler_AuthSuccess(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil)
 
 	// Request with valid auth header should succeed
 	req := httptest.NewRequest(http.MethodGet, "/slips/test-corr-001", nil)
@@ -154,7 +170,7 @@ func TestBuildHandler_OpenAPISpec(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
 	w := httptest.NewRecorder()
@@ -176,7 +192,7 @@ func TestBuildHandler_V1HealthEndpoint(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
 	w := httptest.NewRecorder()
@@ -193,7 +209,7 @@ func TestBuildHandler_V1AuthRequired(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/slips/test-corr-001", nil)
 	w := httptest.NewRecorder()
@@ -205,7 +221,7 @@ func TestBuildHandler_V1AuthSuccess(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/slips/test-corr-001", nil)
 	req.Header.Set("Authorization", "Bearer test-key")
@@ -222,7 +238,7 @@ func TestBuildHandler_OpenAPISpecContainsV1Routes(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
 	w := httptest.NewRecorder()
@@ -258,6 +274,7 @@ func TestBuildHandler_WithAllOptionalHandlers(t *testing.T) {
 		&stubImageTagReader{},
 		&stubCIJobLogReader{},
 		&stubAutomationTestResultsReader{},
+		&stubAutomationTestsReader{},
 	)
 	require.NotNil(t, h)
 
@@ -316,6 +333,7 @@ func TestGenerateOpenAPISpec(t *testing.T) {
 		&stubImageTagReader{},
 		&stubCIJobLogReader{},
 		&stubAutomationTestResultsReader{},
+		&stubAutomationTestsReader{},
 	)
 
 	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)

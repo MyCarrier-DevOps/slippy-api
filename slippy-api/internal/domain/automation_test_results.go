@@ -32,13 +32,27 @@ type AutomationTestRunResult struct {
 
 // AutomationTestResultsQuery defines parameters for querying RunResults rows
 // by correlation ID with optional environment/stack/stage/attempt filters.
+// When Attempt is 0, results are collapsed to the latest attempt per
+// (EnvironmentName, StackName, Stage) tuple.
 type AutomationTestResultsQuery struct {
 	CorrelationID uuid.UUID
 	Environment   string
 	Stack         string
 	Stage         string
-	Attempt       uint32 // 0 == not provided
-	LatestOnly    bool   // when true and Attempt == 0, return latest per (Env, Stack, Stage)
+	Attempt       uint32 // 0 == fetch latest
+}
+
+// AutomationTestResultsByReleaseQuery defines parameters for querying
+// RunResults rows whose ReleaseId contains the given substring (ILIKE %x%).
+// When Attempt is 0, results are collapsed to the latest attempt per
+// (ReleaseId, EnvironmentName, StackName, Stage) tuple so each matched
+// release retains its own latest attempt.
+type AutomationTestResultsByReleaseQuery struct {
+	ReleaseIDSubstring string
+	Environment        string
+	Stack              string
+	Stage              string
+	Attempt            uint32 // 0 == fetch latest
 }
 
 // AutomationTestResultsResult contains query results.
@@ -52,5 +66,10 @@ type AutomationTestResultsReader interface {
 	QueryAutomationTestResults(
 		ctx context.Context,
 		q *AutomationTestResultsQuery,
+	) (*AutomationTestResultsResult, error)
+
+	QueryAutomationTestResultsByRelease(
+		ctx context.Context,
+		q *AutomationTestResultsByReleaseQuery,
 	) (*AutomationTestResultsResult, error)
 }

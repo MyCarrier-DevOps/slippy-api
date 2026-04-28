@@ -19,7 +19,8 @@ import (
 )
 
 type mockAutomationTestResultsReader struct {
-	queryFn func(ctx context.Context, q *domain.AutomationTestResultsQuery) (*domain.AutomationTestResultsResult, error)
+	queryFn          func(ctx context.Context, q *domain.AutomationTestResultsQuery) (*domain.AutomationTestResultsResult, error)
+	queryByReleaseFn func(ctx context.Context, q *domain.AutomationTestResultsByReleaseQuery) (*domain.AutomationTestResultsResult, error)
 }
 
 func (m *mockAutomationTestResultsReader) QueryAutomationTestResults(
@@ -29,12 +30,26 @@ func (m *mockAutomationTestResultsReader) QueryAutomationTestResults(
 	return m.queryFn(ctx, q)
 }
 
+func (m *mockAutomationTestResultsReader) QueryAutomationTestResultsByRelease(
+	ctx context.Context,
+	q *domain.AutomationTestResultsByReleaseQuery,
+) (*domain.AutomationTestResultsResult, error) {
+	return m.queryByReleaseFn(ctx, q)
+}
+
 func setupAutomationTestResultsTestAPI(reader domain.AutomationTestResultsReader) http.Handler {
+	return setupAutomationTestResultsTestAPIWithTests(reader, nil)
+}
+
+func setupAutomationTestResultsTestAPIWithTests(
+	reader domain.AutomationTestResultsReader,
+	testsReader domain.AutomationTestsReader,
+) http.Handler {
 	mux := http.NewServeMux()
 	config := huma.DefaultConfig("Test Slippy API", "0.0.1")
 	api := humago.New(mux, config)
 
-	h := NewAutomationTestResultsHandler(reader)
+	h := NewAutomationTestResultsHandler(reader, testsReader)
 	RegisterAutomationTestResultsRoutes(api, h)
 
 	return mux
@@ -53,7 +68,7 @@ func TestGetAutomationTestResults_Success(t *testing.T) {
 	mock := &mockAutomationTestResultsReader{
 		queryFn: func(_ context.Context, q *domain.AutomationTestResultsQuery) (*domain.AutomationTestResultsResult, error) {
 			assert.Equal(t, corrID, q.CorrelationID)
-			assert.True(t, q.LatestOnly)
+			assert.Equal(t, uint32(0), q.Attempt)
 			return &domain.AutomationTestResultsResult{
 				Runs: []domain.AutomationTestRunResult{
 					{
@@ -75,7 +90,7 @@ func TestGetAutomationTestResults_Success(t *testing.T) {
 	}
 
 	handler := setupAutomationTestResultsTestAPI(mock)
-	req := httptest.NewRequest(http.MethodGet, "/automation-test-results/"+corrID.String(), nil)
+	req := httptest.NewRequest(http.MethodGet, "/automation-test-results/by-correlation/"+corrID.String(), nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
@@ -98,7 +113,7 @@ func TestGetAutomationTestResults_InvalidUUID(t *testing.T) {
 	}
 
 	handler := setupAutomationTestResultsTestAPI(mock)
-	req := httptest.NewRequest(http.MethodGet, "/automation-test-results/not-a-uuid", nil)
+	req := httptest.NewRequest(http.MethodGet, "/automation-test-results/by-correlation/not-a-uuid", nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
@@ -115,7 +130,7 @@ func TestGetAutomationTestResults_ReaderError(t *testing.T) {
 	}
 
 	handler := setupAutomationTestResultsTestAPI(mock)
-	req := httptest.NewRequest(http.MethodGet, "/automation-test-results/"+corrID.String(), nil)
+	req := httptest.NewRequest(http.MethodGet, "/automation-test-results/by-correlation/"+corrID.String(), nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
@@ -132,7 +147,7 @@ func TestGetAutomationTestResults_EmptyResults(t *testing.T) {
 	}
 
 	handler := setupAutomationTestResultsTestAPI(mock)
-	req := httptest.NewRequest(http.MethodGet, "/automation-test-results/"+corrID.String(), nil)
+	req := httptest.NewRequest(http.MethodGet, "/automation-test-results/by-correlation/"+corrID.String(), nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
@@ -155,7 +170,6 @@ func TestGetAutomationTestResults_FiltersPassedToReader(t *testing.T) {
 			assert.Equal(t, "stk1", q.Stack)
 			assert.Equal(t, "FeatureCoreApi", q.Stage)
 			assert.Equal(t, uint32(3), q.Attempt)
-			assert.False(t, q.LatestOnly)
 			return &domain.AutomationTestResultsResult{Runs: []domain.AutomationTestRunResult{}, Count: 0}, nil
 		},
 	}
@@ -163,8 +177,8 @@ func TestGetAutomationTestResults_FiltersPassedToReader(t *testing.T) {
 	handler := setupAutomationTestResultsTestAPI(mock)
 	req := httptest.NewRequest(
 		http.MethodGet,
-		"/automation-test-results/"+corrID.String()+
-			"?environment=prod&stack=stk1&stage=FeatureCoreApi&attempt=3&latest_only=false",
+		"/automation-test-results/by-correlation/"+corrID.String()+
+			"?environment=prod&stack=stk1&stage=FeatureCoreApi&attempt=3",
 		nil,
 	)
 	w := httptest.NewRecorder()
@@ -173,19 +187,137 @@ func TestGetAutomationTestResults_FiltersPassedToReader(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
-func TestGetAutomationTestResults_DefaultLatestOnlyTrue(t *testing.T) {
-	corrID := uuid.MustParse("55555555-5555-5555-5555-555555555555")
+// --- by-release tests -----------------------------------------------------
+
+func TestGetAutomationTestResultsByRelease_Success(t *testing.T) {
+	tStart := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	tFinish := tStart.Add(time.Minute)
 
 	mock := &mockAutomationTestResultsReader{
-		queryFn: func(_ context.Context, q *domain.AutomationTestResultsQuery) (*domain.AutomationTestResultsResult, error) {
-			assert.True(t, q.LatestOnly, "latest_only should default to true when omitted")
+		queryByReleaseFn: func(_ context.Context, q *domain.AutomationTestResultsByReleaseQuery) (*domain.AutomationTestResultsResult, error) {
+			assert.Equal(t, "abc1234", q.ReleaseIDSubstring)
 			assert.Equal(t, uint32(0), q.Attempt)
+			return &domain.AutomationTestResultsResult{
+				Runs: []domain.AutomationTestRunResult{
+					{
+						Outcome:         "Passed",
+						Passed:          5,
+						Failed:          1,
+						StartTime:       tStart,
+						FinishTime:      tFinish,
+						ReleaseID:       "26.04.abc1234",
+						Attempt:         1,
+						Stage:           "FeatureCoreApi",
+						EnvironmentName: "prod",
+						StackName:       "stk1",
+					},
+				},
+				Count: 1,
+			}, nil
+		},
+	}
+
+	handler := setupAutomationTestResultsTestAPI(mock)
+	req := httptest.NewRequest(http.MethodGet, "/automation-test-results/by-release/abc1234", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var body automationTestResultsResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&body))
+	assert.Equal(t, 1, body.Count)
+	require.Len(t, body.Runs, 1)
+	assert.Equal(t, "26.04.abc1234", body.Runs[0].ReleaseID)
+}
+
+func TestGetAutomationTestResultsByRelease_TooShort(t *testing.T) {
+	mock := &mockAutomationTestResultsReader{
+		queryByReleaseFn: func(_ context.Context, _ *domain.AutomationTestResultsByReleaseQuery) (*domain.AutomationTestResultsResult, error) {
+			t.Fatal("reader should not be called for too-short releaseId")
+			return nil, nil
+		},
+	}
+
+	handler := setupAutomationTestResultsTestAPI(mock)
+	// "abc123" is only 6 chars; min is 7
+	req := httptest.NewRequest(http.MethodGet, "/automation-test-results/by-release/abc123", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestGetAutomationTestResultsByRelease_ReaderError(t *testing.T) {
+	mock := &mockAutomationTestResultsReader{
+		queryByReleaseFn: func(_ context.Context, _ *domain.AutomationTestResultsByReleaseQuery) (*domain.AutomationTestResultsResult, error) {
+			return nil, errors.New("clickhouse connection lost")
+		},
+	}
+
+	handler := setupAutomationTestResultsTestAPI(mock)
+	req := httptest.NewRequest(http.MethodGet, "/automation-test-results/by-release/abc1234", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+func TestGetAutomationTestResultsByRelease_EmptyResults(t *testing.T) {
+	mock := &mockAutomationTestResultsReader{
+		queryByReleaseFn: func(_ context.Context, _ *domain.AutomationTestResultsByReleaseQuery) (*domain.AutomationTestResultsResult, error) {
+			return &domain.AutomationTestResultsResult{Runs: nil, Count: 0}, nil
+		},
+	}
+
+	handler := setupAutomationTestResultsTestAPI(mock)
+	req := httptest.NewRequest(http.MethodGet, "/automation-test-results/by-release/abc1234", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var body automationTestResultsResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&body))
+	assert.Equal(t, 0, body.Count)
+	assert.NotNil(t, body.Runs)
+	assert.Empty(t, body.Runs)
+}
+
+func TestGetAutomationTestResultsByRelease_FiltersPassedToReader(t *testing.T) {
+	mock := &mockAutomationTestResultsReader{
+		queryByReleaseFn: func(_ context.Context, q *domain.AutomationTestResultsByReleaseQuery) (*domain.AutomationTestResultsResult, error) {
+			assert.Equal(t, "abc1234", q.ReleaseIDSubstring)
+			assert.Equal(t, "prod", q.Environment)
+			assert.Equal(t, "stk1", q.Stack)
+			assert.Equal(t, "FeatureCoreApi", q.Stage)
+			assert.Equal(t, uint32(2), q.Attempt)
 			return &domain.AutomationTestResultsResult{Runs: []domain.AutomationTestRunResult{}, Count: 0}, nil
 		},
 	}
 
 	handler := setupAutomationTestResultsTestAPI(mock)
-	req := httptest.NewRequest(http.MethodGet, "/automation-test-results/"+corrID.String(), nil)
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/automation-test-results/by-release/abc1234?environment=prod&stack=stk1&stage=FeatureCoreApi&attempt=2",
+		nil,
+	)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestGetAutomationTestResultsByRelease_DefaultAttemptZero(t *testing.T) {
+	mock := &mockAutomationTestResultsReader{
+		queryByReleaseFn: func(_ context.Context, q *domain.AutomationTestResultsByReleaseQuery) (*domain.AutomationTestResultsResult, error) {
+			assert.Equal(t, uint32(0), q.Attempt, "attempt should default to 0 (latest) when omitted")
+			return &domain.AutomationTestResultsResult{Runs: []domain.AutomationTestRunResult{}, Count: 0}, nil
+		},
+	}
+
+	handler := setupAutomationTestResultsTestAPI(mock)
+	req := httptest.NewRequest(http.MethodGet, "/automation-test-results/by-release/abc1234", nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 

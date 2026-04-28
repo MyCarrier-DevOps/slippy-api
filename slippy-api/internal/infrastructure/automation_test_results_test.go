@@ -78,7 +78,6 @@ func TestQueryAutomationTestResults_BasicSuccess(t *testing.T) {
 	store := NewAutomationTestResultsStore(session)
 	result, err := store.QueryAutomationTestResults(context.Background(), &domain.AutomationTestResultsQuery{
 		CorrelationID: corrID,
-		LatestOnly:    true,
 	})
 
 	require.NoError(t, err)
@@ -102,9 +101,9 @@ func TestQueryAutomationTestResults_FiltersApplied(t *testing.T) {
 
 	session := &clickhousetest.MockSession{
 		QueryWithArgsFunc: func(_ context.Context, query string, args ...any) (ch.Rows, error) {
-			assert.Contains(t, query, "EnvironmentName = {environment:String}")
-			assert.Contains(t, query, "StackName = {stack:String}")
-			assert.Contains(t, query, "Stage = {stage:String}")
+			assert.Contains(t, query, "EnvironmentName ILIKE {environment:String}")
+			assert.Contains(t, query, "StackName ILIKE {stack:String}")
+			assert.Contains(t, query, "Stage ILIKE {stage:String}")
 			// Confirm named args carry the filter values
 			values := map[string]any{}
 			for _, a := range args {
@@ -125,12 +124,11 @@ func TestQueryAutomationTestResults_FiltersApplied(t *testing.T) {
 		Environment:   "prod",
 		Stack:         "stk1",
 		Stage:         "FeatureCoreApi",
-		LatestOnly:    true,
 	})
 	require.NoError(t, err)
 }
 
-func TestQueryAutomationTestResults_ExactAttemptOverridesLatestOnly(t *testing.T) {
+func TestQueryAutomationTestResults_ExactAttemptNoLimitBy(t *testing.T) {
 	corrID := uuid.MustParse("55555555-5555-5555-5555-555555555555")
 
 	session := &clickhousetest.MockSession{
@@ -153,25 +151,6 @@ func TestQueryAutomationTestResults_ExactAttemptOverridesLatestOnly(t *testing.T
 	_, err := store.QueryAutomationTestResults(context.Background(), &domain.AutomationTestResultsQuery{
 		CorrelationID: corrID,
 		Attempt:       3,
-		LatestOnly:    true, // should be ignored when Attempt > 0
-	})
-	require.NoError(t, err)
-}
-
-func TestQueryAutomationTestResults_AllAttempts_NoLimitBy(t *testing.T) {
-	corrID := uuid.MustParse("66666666-6666-6666-6666-666666666666")
-
-	session := &clickhousetest.MockSession{
-		QueryWithArgsFunc: func(_ context.Context, query string, _ ...any) (ch.Rows, error) {
-			assert.NotContains(t, query, "LIMIT 1 BY")
-			return &clickhousetest.MockRows{NextData: []bool{}}, nil
-		},
-	}
-
-	store := NewAutomationTestResultsStore(session)
-	_, err := store.QueryAutomationTestResults(context.Background(), &domain.AutomationTestResultsQuery{
-		CorrelationID: corrID,
-		LatestOnly:    false,
 	})
 	require.NoError(t, err)
 }
@@ -195,7 +174,6 @@ func TestQueryAutomationTestResults_NullableUUIDs(t *testing.T) {
 	store := NewAutomationTestResultsStore(session)
 	result, err := store.QueryAutomationTestResults(context.Background(), &domain.AutomationTestResultsQuery{
 		CorrelationID: corrID,
-		LatestOnly:    true,
 	})
 	require.NoError(t, err)
 	require.Len(t, result.Runs, 1)
@@ -215,7 +193,6 @@ func TestQueryAutomationTestResults_QueryError(t *testing.T) {
 	store := NewAutomationTestResultsStore(session)
 	result, err := store.QueryAutomationTestResults(context.Background(), &domain.AutomationTestResultsQuery{
 		CorrelationID: corrID,
-		LatestOnly:    true,
 	})
 	require.Error(t, err)
 	assert.Nil(t, result)
@@ -236,7 +213,6 @@ func TestQueryAutomationTestResults_ScanError(t *testing.T) {
 	store := NewAutomationTestResultsStore(session)
 	result, err := store.QueryAutomationTestResults(context.Background(), &domain.AutomationTestResultsQuery{
 		CorrelationID: corrID,
-		LatestOnly:    true,
 	})
 	require.Error(t, err)
 	assert.Nil(t, result)
@@ -257,7 +233,6 @@ func TestQueryAutomationTestResults_RowsErr(t *testing.T) {
 	store := NewAutomationTestResultsStore(session)
 	result, err := store.QueryAutomationTestResults(context.Background(), &domain.AutomationTestResultsQuery{
 		CorrelationID: corrID,
-		LatestOnly:    true,
 	})
 	require.Error(t, err)
 	assert.Nil(t, result)
@@ -285,7 +260,6 @@ func TestQueryAutomationTestResults_CloseError(t *testing.T) {
 	store := NewAutomationTestResultsStore(session)
 	_, err := store.QueryAutomationTestResults(context.Background(), &domain.AutomationTestResultsQuery{
 		CorrelationID: corrID,
-		LatestOnly:    true,
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to close rows")
@@ -301,9 +275,7 @@ func TestQueryAutomationTestResults_NilQuery(t *testing.T) {
 
 func TestQueryAutomationTestResults_NilCorrelationID(t *testing.T) {
 	store := NewAutomationTestResultsStore(&clickhousetest.MockSession{})
-	result, err := store.QueryAutomationTestResults(context.Background(), &domain.AutomationTestResultsQuery{
-		LatestOnly: true,
-	})
+	result, err := store.QueryAutomationTestResults(context.Background(), &domain.AutomationTestResultsQuery{})
 	require.Error(t, err)
 	assert.Nil(t, result)
 	assert.Contains(t, err.Error(), "correlation ID is required")
@@ -322,7 +294,180 @@ func TestQueryAutomationTestResults_OrderByClause(t *testing.T) {
 	store := NewAutomationTestResultsStore(session)
 	_, err := store.QueryAutomationTestResults(context.Background(), &domain.AutomationTestResultsQuery{
 		CorrelationID: corrID,
-		LatestOnly:    true,
 	})
 	require.NoError(t, err)
+}
+
+// --- QueryAutomationTestResultsByRelease tests -----------------------------
+
+func TestQueryAutomationTestResultsByRelease_BasicSuccess(t *testing.T) {
+	tStart := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	tFinish := tStart.Add(2 * time.Minute)
+	testRunID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	corrID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	batchID := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+
+	session := &clickhousetest.MockSession{
+		QueryWithArgsFunc: func(_ context.Context, query string, args ...any) (ch.Rows, error) {
+			assert.Contains(t, query, "autotest_results.RunResults")
+			assert.Contains(t, query, "ReleaseId ILIKE {releaseId:String}")
+			assert.Contains(t, query, "LIMIT 1 BY (ReleaseId, EnvironmentName, StackName, Stage)")
+			assert.Contains(
+				t,
+				query,
+				"ORDER BY ReleaseId, EnvironmentName, StackName, Stage, Attempt DESC, StartTime DESC",
+			)
+			// Substring should be wrapped with % wildcards before binding
+			foundReleaseArg := false
+			for _, a := range args {
+				if np, ok := a.(driver.NamedValue); ok && np.Name == "releaseId" {
+					assert.Equal(t, "%abc1234%", np.Value)
+					foundReleaseArg = true
+				}
+			}
+			assert.True(t, foundReleaseArg, "expected releaseId named arg with %% wildcards")
+			return &clickhousetest.MockRows{
+				NextData: []bool{true},
+				ScanFunc: scannerFor([][]any{
+					runResultsSeed(tStart, tFinish, &testRunID, &corrID, &batchID),
+				}),
+			}, nil
+		},
+	}
+
+	store := NewAutomationTestResultsStore(session)
+	result, err := store.QueryAutomationTestResultsByRelease(
+		context.Background(),
+		&domain.AutomationTestResultsByReleaseQuery{
+			ReleaseIDSubstring: "abc1234",
+		},
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Count)
+	require.Len(t, result.Runs, 1)
+	assert.Equal(t, "26.04.abc1234", result.Runs[0].ReleaseID)
+	require.NotNil(t, result.Runs[0].CorrelationID)
+	assert.Equal(t, corrID.String(), *result.Runs[0].CorrelationID)
+}
+
+func TestQueryAutomationTestResultsByRelease_FiltersApplied(t *testing.T) {
+	session := &clickhousetest.MockSession{
+		QueryWithArgsFunc: func(_ context.Context, query string, args ...any) (ch.Rows, error) {
+			assert.Contains(t, query, "EnvironmentName ILIKE {environment:String}")
+			assert.Contains(t, query, "StackName ILIKE {stack:String}")
+			assert.Contains(t, query, "Stage ILIKE {stage:String}")
+			values := map[string]any{}
+			for _, a := range args {
+				if np, ok := a.(driver.NamedValue); ok {
+					values[np.Name] = np.Value
+				}
+			}
+			assert.Equal(t, "prod", values["environment"])
+			assert.Equal(t, "stk1", values["stack"])
+			assert.Equal(t, "FeatureCoreApi", values["stage"])
+			assert.Equal(t, "%26.04%", values["releaseId"])
+			return &clickhousetest.MockRows{NextData: []bool{}}, nil
+		},
+	}
+
+	store := NewAutomationTestResultsStore(session)
+	_, err := store.QueryAutomationTestResultsByRelease(
+		context.Background(),
+		&domain.AutomationTestResultsByReleaseQuery{
+			ReleaseIDSubstring: "26.04",
+			Environment:        "prod",
+			Stack:              "stk1",
+			Stage:              "FeatureCoreApi",
+		},
+	)
+	require.NoError(t, err)
+}
+
+func TestQueryAutomationTestResultsByRelease_ExactAttemptNoLimitBy(t *testing.T) {
+	session := &clickhousetest.MockSession{
+		QueryWithArgsFunc: func(_ context.Context, query string, args ...any) (ch.Rows, error) {
+			assert.Contains(t, query, "Attempt = {attempt:UInt32}")
+			assert.NotContains(t, query, "LIMIT 1 BY")
+			foundAttempt := false
+			for _, a := range args {
+				if np, ok := a.(driver.NamedValue); ok && np.Name == "attempt" {
+					assert.Equal(t, uint32(2), np.Value)
+					foundAttempt = true
+				}
+			}
+			assert.True(t, foundAttempt)
+			return &clickhousetest.MockRows{NextData: []bool{}}, nil
+		},
+	}
+
+	store := NewAutomationTestResultsStore(session)
+	_, err := store.QueryAutomationTestResultsByRelease(
+		context.Background(),
+		&domain.AutomationTestResultsByReleaseQuery{
+			ReleaseIDSubstring: "abc1234",
+			Attempt:            2,
+		},
+	)
+	require.NoError(t, err)
+}
+
+func TestQueryAutomationTestResultsByRelease_NilQuery(t *testing.T) {
+	store := NewAutomationTestResultsStore(&clickhousetest.MockSession{})
+	result, err := store.QueryAutomationTestResultsByRelease(context.Background(), nil)
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "query must not be nil")
+}
+
+func TestQueryAutomationTestResultsByRelease_EmptySubstring(t *testing.T) {
+	store := NewAutomationTestResultsStore(&clickhousetest.MockSession{})
+	result, err := store.QueryAutomationTestResultsByRelease(
+		context.Background(),
+		&domain.AutomationTestResultsByReleaseQuery{},
+	)
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "release ID substring is required")
+}
+
+func TestQueryAutomationTestResultsByRelease_QueryError(t *testing.T) {
+	session := &clickhousetest.MockSession{
+		QueryWithArgsFunc: func(_ context.Context, _ string, _ ...any) (ch.Rows, error) {
+			return nil, errors.New("connection refused")
+		},
+	}
+
+	store := NewAutomationTestResultsStore(session)
+	result, err := store.QueryAutomationTestResultsByRelease(
+		context.Background(),
+		&domain.AutomationTestResultsByReleaseQuery{
+			ReleaseIDSubstring: "abc1234",
+		},
+	)
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "failed to query automation test results by release")
+}
+
+func TestQueryAutomationTestResultsByRelease_ScanError(t *testing.T) {
+	session := &clickhousetest.MockSession{
+		QueryWithArgsFunc: func(_ context.Context, _ string, _ ...any) (ch.Rows, error) {
+			return &clickhousetest.MockRows{
+				NextData: []bool{true},
+				ScanErr:  errors.New("scan failure"),
+			}, nil
+		},
+	}
+
+	store := NewAutomationTestResultsStore(session)
+	result, err := store.QueryAutomationTestResultsByRelease(
+		context.Background(),
+		&domain.AutomationTestResultsByReleaseQuery{
+			ReleaseIDSubstring: "abc1234",
+		},
+	)
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "failed to scan automation test results by release row")
 }
