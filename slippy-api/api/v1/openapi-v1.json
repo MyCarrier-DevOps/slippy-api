@@ -525,6 +525,29 @@
         ],
         "type": "object"
       },
+      "SkipStepInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/SkipStepInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "component_name": {
+            "description": "Component name (required for aggregate steps, empty for pipeline steps)",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Skip reason",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "Slip": {
         "additionalProperties": false,
         "properties": {
@@ -1440,6 +1463,66 @@
           }
         ],
         "summary": "Mark a pipeline step as failed",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/slips/{correlationID}/steps/{stepName}/skip": {
+      "post": {
+        "operationId": "skip-step",
+        "parameters": [
+          {
+            "description": "Routing slip correlation ID",
+            "in": "path",
+            "name": "correlationID",
+            "required": true,
+            "schema": {
+              "description": "Routing slip correlation ID",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Pipeline step name",
+            "in": "path",
+            "name": "stepName",
+            "required": true,
+            "schema": {
+              "description": "Pipeline step name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SkipStepInputBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "writeApiKey": []
+          }
+        ],
+        "summary": "Mark a pipeline step as skipped",
         "tags": [
           "v1"
         ]

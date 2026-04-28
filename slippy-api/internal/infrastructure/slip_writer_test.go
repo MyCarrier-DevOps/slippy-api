@@ -253,6 +253,74 @@ func TestSlipWriterAdapter_FailStep_NotFound(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// --- SkipStep ---
+
+func TestSlipWriterAdapter_SkipStep_Success(t *testing.T) {
+	var called bool
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, status slippy.StepStatus, entry slippy.StateHistoryEntry) error {
+			called = true
+			assert.Equal(t, slippy.StepStatusSkipped, status)
+			assert.Equal(t, "alert-gate passed", entry.Message)
+			return nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	err := adapter.SkipStep(context.Background(), "abc-123", "builds_completed", "api", "alert-gate passed")
+	require.NoError(t, err)
+	assert.True(t, called)
+}
+
+func TestSlipWriterAdapter_SkipStep_NotFound(t *testing.T) {
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			return slippy.ErrSlipNotFound
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	err := adapter.SkipStep(context.Background(), "abc-123", "builds_completed", "api", "reason")
+	assert.Error(t, err)
+}
+
+func TestSlipWriterAdapter_SkipStep_PipelineStep_TriggersHydration(t *testing.T) {
+	hydrationSlip := &slippy.Slip{CorrelationID: "abc-123"}
+	var updateCalled bool
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			return nil
+		},
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			return hydrationSlip, nil
+		},
+		updateFn: func(_ context.Context, _ *slippy.Slip) error {
+			updateCalled = true
+			return nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	err := adapter.SkipStep(context.Background(), "abc-123", "push_parsed", "", "not needed")
+	require.NoError(t, err)
+	assert.True(t, updateCalled, "expected hydrateAndPersist to call Update for pipeline step")
+}
+
+func TestSlipWriterAdapter_SkipStep_HydrationError_NonFatal(t *testing.T) {
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			return nil
+		},
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			return nil, errors.New("clickhouse unavailable")
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	err := adapter.SkipStep(context.Background(), "abc-123", "push_parsed", "", "skip")
+	require.NoError(t, err)
+}
+
 // --- SetComponentImageTag ---
 
 func TestSlipWriterAdapter_SetComponentImageTag_Success(t *testing.T) {

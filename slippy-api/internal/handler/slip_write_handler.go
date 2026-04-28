@@ -94,6 +94,32 @@ type FailStepInput struct {
 	}
 }
 
+// SkipStepInput captures path params and body for step skip.
+type SkipStepInput struct {
+	CorrelationID string `path:"correlationID" doc:"Routing slip correlation ID"`
+	StepName      string `path:"stepName"      doc:"Pipeline step name"`
+	Body          *struct {
+		ComponentName string `json:"component_name,omitempty" doc:"Component name (required for aggregate steps, empty for pipeline steps)"`
+		Reason        string `json:"reason,omitempty" doc:"Skip reason"`
+	}
+}
+
+// componentName returns the component name from the optional body, or empty string if no body.
+func (s *SkipStepInput) componentName() string {
+	if s.Body == nil {
+		return ""
+	}
+	return s.Body.ComponentName
+}
+
+// reason returns the skip reason from the optional body, or empty string if no body.
+func (s *SkipStepInput) reason() string {
+	if s.Body == nil {
+		return ""
+	}
+	return s.Body.Reason
+}
+
 // SetImageTagInput captures path params and body for setting an image tag.
 type SetImageTagInput struct {
 	CorrelationID string `path:"correlationID" doc:"Routing slip correlation ID"`
@@ -146,6 +172,16 @@ func RegisterWriteRoutes(api huma.API, h *SlipWriteHandler) {
 		DefaultStatus: http.StatusNoContent,
 		Tags:          []string{"v1"},
 	}, h.failStep)
+
+	huma.Register(api, huma.Operation{
+		OperationID:   "skip-step",
+		Method:        http.MethodPost,
+		Path:          "/slips/{correlationID}/steps/{stepName}/skip",
+		Summary:       "Mark a pipeline step as skipped",
+		Security:      writeApiKeySecurity,
+		DefaultStatus: http.StatusNoContent,
+		Tags:          []string{"v1"},
+	}, h.skipStep)
 
 	huma.Register(api, huma.Operation{
 		OperationID:   "set-image-tag",
@@ -254,6 +290,30 @@ func (h *SlipWriteHandler) failStep(ctx context.Context, input *FailStepInput) (
 		input.StepName,
 		input.Body.ComponentName,
 		input.Body.Reason,
+	); err != nil {
+		recordHandlerError(span, err)
+		return nil, mapWriteError(err)
+	}
+	span.SetStatus(codes.Ok, "")
+	return &struct{}{}, nil
+}
+
+func (h *SlipWriteHandler) skipStep(ctx context.Context, input *SkipStepInput) (*struct{}, error) {
+	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.skipStep",
+		trace.WithAttributes(
+			attribute.String("slip.correlation_id", input.CorrelationID),
+			attribute.String("slip.step_name", input.StepName),
+			attribute.String("slip.component_name", input.componentName()),
+		),
+	)
+	defer span.End()
+
+	if err := h.writer.SkipStep(
+		ctx,
+		input.CorrelationID,
+		input.StepName,
+		input.componentName(),
+		input.reason(),
 	); err != nil {
 		recordHandlerError(span, err)
 		return nil, mapWriteError(err)
