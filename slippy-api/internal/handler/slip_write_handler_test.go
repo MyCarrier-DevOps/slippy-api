@@ -339,7 +339,11 @@ func TestSkipStep_Success(t *testing.T) {
 	handler := setupWriteTestAPI(w)
 
 	body := `{"reason":"alert-gate passed"}`
-	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/prod_rollback_status/skip", strings.NewReader(body))
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/slips/abc-123/steps/prod_rollback_status/skip",
+		strings.NewReader(body),
+	)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -380,7 +384,11 @@ func TestSkipStep_NoBody(t *testing.T) {
 	}
 	handler := setupWriteTestAPI(w)
 
-	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/prod_rollback_status/skip", strings.NewReader(`{}`))
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/slips/abc-123/steps/prod_rollback_status/skip",
+		strings.NewReader(`{}`),
+	)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)

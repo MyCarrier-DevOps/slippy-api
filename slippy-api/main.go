@@ -35,13 +35,15 @@ func main() {
 
 // buildHandler creates the fully-wired HTTP handler with auth, routes, and
 // OpenTelemetry instrumentation. This is extracted from run() for testability.
-// The imageTagReader and ciJobLogReader are optional — if nil, their endpoints are not registered.
+// The imageTagReader, ciJobLogReader, and automationTestResultsReader are
+// optional — if nil, their endpoints are not registered.
 func buildHandler(
 	cfg *config.Config,
 	reader domain.SlipReader,
 	writer domain.SlipWriter,
 	imageTagReader domain.ImageTagReader,
 	ciJobLogReader domain.CIJobLogReader,
+	automationTestResultsReader domain.AutomationTestResultsReader,
 ) http.Handler {
 	mux := http.NewServeMux()
 	apiConfig := huma.DefaultConfig("Slippy API", "1.0.0")
@@ -79,9 +81,17 @@ func buildHandler(
 		handler.RegisterCIJobLogRoutes(grp, clh)
 	}
 
-	// Register write routes on v1 only (no legacy unversioned paths).
+	// Register v1-only routes (no legacy unversioned paths) below.
+	v1Only := huma.NewGroup(api, "/v1")
+
+	// Automation test results: v1-only.
+	if automationTestResultsReader != nil {
+		atrh := handler.NewAutomationTestResultsHandler(automationTestResultsReader)
+		handler.RegisterAutomationTestResultsRoutes(v1Only, atrh)
+	}
+
+	// Write routes: v1-only.
 	if writer != nil {
-		v1Only := huma.NewGroup(api, "/v1")
 		wh := handler.NewSlipWriteHandler(writer)
 		handler.RegisterWriteRoutes(v1Only, wh)
 	}
@@ -207,6 +217,10 @@ func run() error {
 	// Uses the same ClickHouse session to query observability.ciJob.
 	ciJobLogReader := infrastructure.NewCIJobLogStore(store.Session())
 
+	// --- Automation test results reader ---
+	// Uses the same ClickHouse session to query autotest_results.RunResults.
+	automationTestResultsReader := infrastructure.NewAutomationTestResultsStore(store.Session())
+
 	// --- Optional write support ---
 	// When SLIPPY_WRITE_API_KEY is configured, expose write endpoints.
 	var writer domain.SlipWriter
@@ -216,7 +230,7 @@ func run() error {
 	}
 
 	// --- HTTP Server ---
-	otelHandler := buildHandler(cfg, reader, writer, imageTagReader, ciJobLogReader)
+	otelHandler := buildHandler(cfg, reader, writer, imageTagReader, ciJobLogReader, automationTestResultsReader)
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
 		Handler:           otelHandler,

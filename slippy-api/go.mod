@@ -8,6 +8,7 @@ require (
 	github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.75
 	github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.75
 	github.com/danielgtaylor/huma/v2 v2.37.3
+	github.com/google/uuid v1.6.0
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go/modules/redis v0.40.0
@@ -67,7 +68,6 @@ require (
 	github.com/google/go-github/v82 v82.0.0 // indirect
 	github.com/google/go-github/v84 v84.0.0 // indirect
 	github.com/google/go-querystring v1.2.0 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.28.0 // indirect
 	github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 // indirect
 	github.com/jferrl/go-githubauth v1.5.1 // indirect
