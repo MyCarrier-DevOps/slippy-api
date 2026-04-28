@@ -57,6 +57,7 @@ type AutomationTestResult struct {
 	Schema                  *string   `json:"$schema,omitempty"`
 	Attempt                 int32     `json:"attempt"`
 	BranchName              *string   `json:"branch_name,omitempty"`
+	CorrelationId           *string   `json:"correlation_id,omitempty"`
 	Description             *string   `json:"description,omitempty"`
 	Duration                float64   `json:"duration"`
 	EnvironmentName         string    `json:"environment_name"`
@@ -368,13 +369,13 @@ type StepBody struct {
 
 // GetAutomationTestResultsParams defines parameters for GetAutomationTestResults.
 type GetAutomationTestResultsParams struct {
-	// Environment Filter by EnvironmentName (exact)
+	// Environment Filter by EnvironmentName (case-insensitive)
 	Environment *string `form:"environment,omitempty" json:"environment,omitempty"`
 
-	// Stack Filter by StackName (exact)
+	// Stack Filter by StackName (case-insensitive)
 	Stack *string `form:"stack,omitempty" json:"stack,omitempty"`
 
-	// Stage Filter by Stage / test category, e.g. FeatureCoreApi, PreprodCoreApi, FeatureUI (exact)
+	// Stage Filter by Stage / test category, e.g. FeatureCoreApi, PreprodCoreApi, FeatureUI (case-insensitive)
 	Stage *string `form:"stage,omitempty" json:"stage,omitempty"`
 
 	// Attempt Specific Attempt to fetch. When omitted, returns the latest attempt per (Environment, Stack, Stage).
@@ -383,16 +384,16 @@ type GetAutomationTestResultsParams struct {
 
 // GetAutomationTestResultsTestsParams defines parameters for GetAutomationTestResultsTests.
 type GetAutomationTestResultsTestsParams struct {
-	// Environment Filter parent runs by EnvironmentName (case-insensitive)
+	// Environment Filter by EnvironmentName (case-insensitive)
 	Environment *string `form:"environment,omitempty" json:"environment,omitempty"`
 
-	// Stack Filter parent runs by StackName (case-insensitive)
+	// Stack Filter by StackName (case-insensitive)
 	Stack *string `form:"stack,omitempty" json:"stack,omitempty"`
 
-	// Stage Filter parent runs by Stage / test category (case-insensitive)
+	// Stage Filter by Stage / test category (case-insensitive)
 	Stage *string `form:"stage,omitempty" json:"stage,omitempty"`
 
-	// Attempt Specific Attempt to fetch. When omitted, resolves to the latest attempt per (Environment, Stack, Stage).
+	// Attempt Filter by exact Attempt
 	Attempt *int32 `form:"attempt,omitempty" json:"attempt,omitempty"`
 
 	// Status ResultStatus filter (case-insensitive ILIKE). Defaults to 'Failed'; pass '*' or 'all' to disable the filter and return every status.
@@ -403,75 +404,6 @@ type GetAutomationTestResultsTestsParams struct {
 
 	// Cursor Pagination cursor from a previous response
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
-}
-
-// GetAutomationTestResultByIdCorrelationParams defines parameters for GetAutomationTestResultByIdCorrelation.
-type GetAutomationTestResultByIdCorrelationParams struct {
-	// Environment Filter parent runs by EnvironmentName (case-insensitive)
-	Environment *string `form:"environment,omitempty" json:"environment,omitempty"`
-
-	// Stack Filter parent runs by StackName (case-insensitive)
-	Stack *string `form:"stack,omitempty" json:"stack,omitempty"`
-
-	// Stage Filter parent runs by Stage / test category (case-insensitive)
-	Stage *string `form:"stage,omitempty" json:"stage,omitempty"`
-
-	// Attempt Specific Attempt to fetch. When omitted, resolves to the latest attempt per (Environment, Stack, Stage).
-	Attempt *int32 `form:"attempt,omitempty" json:"attempt,omitempty"`
-}
-
-// GetAutomationTestResultsByReleaseParams defines parameters for GetAutomationTestResultsByRelease.
-type GetAutomationTestResultsByReleaseParams struct {
-	// Environment Filter by EnvironmentName (exact)
-	Environment *string `form:"environment,omitempty" json:"environment,omitempty"`
-
-	// Stack Filter by StackName (exact)
-	Stack *string `form:"stack,omitempty" json:"stack,omitempty"`
-
-	// Stage Filter by Stage / test category, e.g. FeatureCoreApi, PreprodCoreApi, FeatureUI (exact)
-	Stage *string `form:"stage,omitempty" json:"stage,omitempty"`
-
-	// Attempt Specific Attempt to fetch. When omitted, returns the latest attempt per (ReleaseId, Environment, Stack, Stage).
-	Attempt *int32 `form:"attempt,omitempty" json:"attempt,omitempty"`
-}
-
-// GetAutomationTestResultsByReleaseTestsParams defines parameters for GetAutomationTestResultsByReleaseTests.
-type GetAutomationTestResultsByReleaseTestsParams struct {
-	// Environment Filter parent runs by EnvironmentName (case-insensitive)
-	Environment *string `form:"environment,omitempty" json:"environment,omitempty"`
-
-	// Stack Filter parent runs by StackName (case-insensitive)
-	Stack *string `form:"stack,omitempty" json:"stack,omitempty"`
-
-	// Stage Filter parent runs by Stage / test category (case-insensitive)
-	Stage *string `form:"stage,omitempty" json:"stage,omitempty"`
-
-	// Attempt Specific Attempt to fetch. When omitted, resolves to the latest attempt per (ReleaseId, Environment, Stack, Stage).
-	Attempt *int32 `form:"attempt,omitempty" json:"attempt,omitempty"`
-
-	// Status ResultStatus filter (case-insensitive ILIKE). Defaults to 'Failed'; pass '*' or 'all' to disable the filter and return every status.
-	Status *string `form:"status,omitempty" json:"status,omitempty"`
-
-	// Limit Page size
-	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
-
-	// Cursor Pagination cursor from a previous response
-	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
-}
-
-// GetAutomationTestResultByIdReleaseParams defines parameters for GetAutomationTestResultByIdRelease.
-type GetAutomationTestResultByIdReleaseParams struct {
-	// Environment Filter parent runs by EnvironmentName (case-insensitive)
-	Environment *string `form:"environment,omitempty" json:"environment,omitempty"`
-
-	// Stack Filter parent runs by StackName (case-insensitive)
-	Stack *string `form:"stack,omitempty" json:"stack,omitempty"`
-
-	// Stage Filter parent runs by Stage / test category (case-insensitive)
-	Stage *string `form:"stage,omitempty" json:"stage,omitempty"`
-
-	// Attempt Specific Attempt to fetch. When omitted, resolves to the latest attempt per (ReleaseId, Environment, Stack, Stage).
-	Attempt *int32 `form:"attempt,omitempty" json:"attempt,omitempty"`
 }
 
 // GetLogsParams defines parameters for GetLogs.
@@ -632,16 +564,7 @@ type ClientInterface interface {
 	GetAutomationTestResultsTests(ctx context.Context, correlationID string, params *GetAutomationTestResultsTestsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetAutomationTestResultByIdCorrelation request
-	GetAutomationTestResultByIdCorrelation(ctx context.Context, correlationID string, testId string, params *GetAutomationTestResultByIdCorrelationParams, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// GetAutomationTestResultsByRelease request
-	GetAutomationTestResultsByRelease(ctx context.Context, releaseId string, params *GetAutomationTestResultsByReleaseParams, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// GetAutomationTestResultsByReleaseTests request
-	GetAutomationTestResultsByReleaseTests(ctx context.Context, releaseId string, params *GetAutomationTestResultsByReleaseTestsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// GetAutomationTestResultByIdRelease request
-	GetAutomationTestResultByIdRelease(ctx context.Context, releaseId string, testId string, params *GetAutomationTestResultByIdReleaseParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+	GetAutomationTestResultByIdCorrelation(ctx context.Context, correlationID string, testId string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// HealthCheck request
 	HealthCheck(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -723,44 +646,8 @@ func (c *Client) GetAutomationTestResultsTests(ctx context.Context, correlationI
 	return c.Client.Do(req)
 }
 
-func (c *Client) GetAutomationTestResultByIdCorrelation(ctx context.Context, correlationID string, testId string, params *GetAutomationTestResultByIdCorrelationParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetAutomationTestResultByIdCorrelationRequest(c.Server, correlationID, testId, params)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) GetAutomationTestResultsByRelease(ctx context.Context, releaseId string, params *GetAutomationTestResultsByReleaseParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetAutomationTestResultsByReleaseRequest(c.Server, releaseId, params)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) GetAutomationTestResultsByReleaseTests(ctx context.Context, releaseId string, params *GetAutomationTestResultsByReleaseTestsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetAutomationTestResultsByReleaseTestsRequest(c.Server, releaseId, params)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) GetAutomationTestResultByIdRelease(ctx context.Context, releaseId string, testId string, params *GetAutomationTestResultByIdReleaseParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetAutomationTestResultByIdReleaseRequest(c.Server, releaseId, testId, params)
+func (c *Client) GetAutomationTestResultByIdCorrelation(ctx context.Context, correlationID string, testId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetAutomationTestResultByIdCorrelationRequest(c.Server, correlationID, testId)
 	if err != nil {
 		return nil, err
 	}
@@ -1280,7 +1167,7 @@ func NewGetAutomationTestResultsTestsRequest(server string, correlationID string
 }
 
 // NewGetAutomationTestResultByIdCorrelationRequest generates requests for GetAutomationTestResultByIdCorrelation
-func NewGetAutomationTestResultByIdCorrelationRequest(server string, correlationID string, testId string, params *GetAutomationTestResultByIdCorrelationParams) (*http.Request, error) {
+func NewGetAutomationTestResultByIdCorrelationRequest(server string, correlationID string, testId string) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -1310,443 +1197,6 @@ func NewGetAutomationTestResultByIdCorrelationRequest(server string, correlation
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
-	}
-
-	if params != nil {
-		queryValues := queryURL.Query()
-
-		if params.Environment != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "environment", *params.Environment, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.Stack != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "stack", *params.Stack, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.Stage != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "stage", *params.Stage, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.Attempt != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "attempt", *params.Attempt, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int32"}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		queryURL.RawQuery = queryValues.Encode()
-	}
-
-	req, err := http.NewRequest("GET", queryURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return req, nil
-}
-
-// NewGetAutomationTestResultsByReleaseRequest generates requests for GetAutomationTestResultsByRelease
-func NewGetAutomationTestResultsByReleaseRequest(server string, releaseId string, params *GetAutomationTestResultsByReleaseParams) (*http.Request, error) {
-	var err error
-
-	var pathParam0 string
-
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "releaseId", releaseId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
-	if err != nil {
-		return nil, err
-	}
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/automation-test-results/by-release/%s", pathParam0)
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	if params != nil {
-		queryValues := queryURL.Query()
-
-		if params.Environment != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "environment", *params.Environment, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.Stack != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "stack", *params.Stack, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.Stage != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "stage", *params.Stage, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.Attempt != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "attempt", *params.Attempt, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int32"}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		queryURL.RawQuery = queryValues.Encode()
-	}
-
-	req, err := http.NewRequest("GET", queryURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return req, nil
-}
-
-// NewGetAutomationTestResultsByReleaseTestsRequest generates requests for GetAutomationTestResultsByReleaseTests
-func NewGetAutomationTestResultsByReleaseTestsRequest(server string, releaseId string, params *GetAutomationTestResultsByReleaseTestsParams) (*http.Request, error) {
-	var err error
-
-	var pathParam0 string
-
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "releaseId", releaseId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
-	if err != nil {
-		return nil, err
-	}
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/automation-test-results/by-release/%s/tests", pathParam0)
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	if params != nil {
-		queryValues := queryURL.Query()
-
-		if params.Environment != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "environment", *params.Environment, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.Stack != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "stack", *params.Stack, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.Stage != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "stage", *params.Stage, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.Attempt != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "attempt", *params.Attempt, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int32"}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.Status != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "status", *params.Status, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.Limit != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.Cursor != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "cursor", *params.Cursor, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		queryURL.RawQuery = queryValues.Encode()
-	}
-
-	req, err := http.NewRequest("GET", queryURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return req, nil
-}
-
-// NewGetAutomationTestResultByIdReleaseRequest generates requests for GetAutomationTestResultByIdRelease
-func NewGetAutomationTestResultByIdReleaseRequest(server string, releaseId string, testId string, params *GetAutomationTestResultByIdReleaseParams) (*http.Request, error) {
-	var err error
-
-	var pathParam0 string
-
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "releaseId", releaseId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
-	if err != nil {
-		return nil, err
-	}
-
-	var pathParam1 string
-
-	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "testId", testId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
-	if err != nil {
-		return nil, err
-	}
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/automation-test-results/by-release/%s/tests/%s", pathParam0, pathParam1)
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	if params != nil {
-		queryValues := queryURL.Query()
-
-		if params.Environment != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "environment", *params.Environment, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.Stack != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "stack", *params.Stack, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.Stage != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "stage", *params.Stage, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.Attempt != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "attempt", *params.Attempt, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int32"}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -2636,16 +2086,7 @@ type ClientWithResponsesInterface interface {
 	GetAutomationTestResultsTestsWithResponse(ctx context.Context, correlationID string, params *GetAutomationTestResultsTestsParams, reqEditors ...RequestEditorFn) (*GetAutomationTestResultsTestsResponse, error)
 
 	// GetAutomationTestResultByIdCorrelationWithResponse request
-	GetAutomationTestResultByIdCorrelationWithResponse(ctx context.Context, correlationID string, testId string, params *GetAutomationTestResultByIdCorrelationParams, reqEditors ...RequestEditorFn) (*GetAutomationTestResultByIdCorrelationResponse, error)
-
-	// GetAutomationTestResultsByReleaseWithResponse request
-	GetAutomationTestResultsByReleaseWithResponse(ctx context.Context, releaseId string, params *GetAutomationTestResultsByReleaseParams, reqEditors ...RequestEditorFn) (*GetAutomationTestResultsByReleaseResponse, error)
-
-	// GetAutomationTestResultsByReleaseTestsWithResponse request
-	GetAutomationTestResultsByReleaseTestsWithResponse(ctx context.Context, releaseId string, params *GetAutomationTestResultsByReleaseTestsParams, reqEditors ...RequestEditorFn) (*GetAutomationTestResultsByReleaseTestsResponse, error)
-
-	// GetAutomationTestResultByIdReleaseWithResponse request
-	GetAutomationTestResultByIdReleaseWithResponse(ctx context.Context, releaseId string, testId string, params *GetAutomationTestResultByIdReleaseParams, reqEditors ...RequestEditorFn) (*GetAutomationTestResultByIdReleaseResponse, error)
+	GetAutomationTestResultByIdCorrelationWithResponse(ctx context.Context, correlationID string, testId string, reqEditors ...RequestEditorFn) (*GetAutomationTestResultByIdCorrelationResponse, error)
 
 	// HealthCheckWithResponse request
 	HealthCheckWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*HealthCheckResponse, error)
@@ -2766,75 +2207,6 @@ func (r GetAutomationTestResultByIdCorrelationResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetAutomationTestResultByIdCorrelationResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type GetAutomationTestResultsByReleaseResponse struct {
-	Body                          []byte
-	HTTPResponse                  *http.Response
-	JSON200                       *GetAutomationTestResultsOutputBody
-	ApplicationproblemJSONDefault *ErrorModel
-}
-
-// Status returns HTTPResponse.Status
-func (r GetAutomationTestResultsByReleaseResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r GetAutomationTestResultsByReleaseResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type GetAutomationTestResultsByReleaseTestsResponse struct {
-	Body                          []byte
-	HTTPResponse                  *http.Response
-	JSON200                       *GetTestsOutputBody
-	ApplicationproblemJSONDefault *ErrorModel
-}
-
-// Status returns HTTPResponse.Status
-func (r GetAutomationTestResultsByReleaseTestsResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r GetAutomationTestResultsByReleaseTestsResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type GetAutomationTestResultByIdReleaseResponse struct {
-	Body                          []byte
-	HTTPResponse                  *http.Response
-	JSON200                       *AutomationTestResult
-	ApplicationproblemJSONDefault *ErrorModel
-}
-
-// Status returns HTTPResponse.Status
-func (r GetAutomationTestResultByIdReleaseResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r GetAutomationTestResultByIdReleaseResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -3154,39 +2526,12 @@ func (c *ClientWithResponses) GetAutomationTestResultsTestsWithResponse(ctx cont
 }
 
 // GetAutomationTestResultByIdCorrelationWithResponse request returning *GetAutomationTestResultByIdCorrelationResponse
-func (c *ClientWithResponses) GetAutomationTestResultByIdCorrelationWithResponse(ctx context.Context, correlationID string, testId string, params *GetAutomationTestResultByIdCorrelationParams, reqEditors ...RequestEditorFn) (*GetAutomationTestResultByIdCorrelationResponse, error) {
-	rsp, err := c.GetAutomationTestResultByIdCorrelation(ctx, correlationID, testId, params, reqEditors...)
+func (c *ClientWithResponses) GetAutomationTestResultByIdCorrelationWithResponse(ctx context.Context, correlationID string, testId string, reqEditors ...RequestEditorFn) (*GetAutomationTestResultByIdCorrelationResponse, error) {
+	rsp, err := c.GetAutomationTestResultByIdCorrelation(ctx, correlationID, testId, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseGetAutomationTestResultByIdCorrelationResponse(rsp)
-}
-
-// GetAutomationTestResultsByReleaseWithResponse request returning *GetAutomationTestResultsByReleaseResponse
-func (c *ClientWithResponses) GetAutomationTestResultsByReleaseWithResponse(ctx context.Context, releaseId string, params *GetAutomationTestResultsByReleaseParams, reqEditors ...RequestEditorFn) (*GetAutomationTestResultsByReleaseResponse, error) {
-	rsp, err := c.GetAutomationTestResultsByRelease(ctx, releaseId, params, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseGetAutomationTestResultsByReleaseResponse(rsp)
-}
-
-// GetAutomationTestResultsByReleaseTestsWithResponse request returning *GetAutomationTestResultsByReleaseTestsResponse
-func (c *ClientWithResponses) GetAutomationTestResultsByReleaseTestsWithResponse(ctx context.Context, releaseId string, params *GetAutomationTestResultsByReleaseTestsParams, reqEditors ...RequestEditorFn) (*GetAutomationTestResultsByReleaseTestsResponse, error) {
-	rsp, err := c.GetAutomationTestResultsByReleaseTests(ctx, releaseId, params, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseGetAutomationTestResultsByReleaseTestsResponse(rsp)
-}
-
-// GetAutomationTestResultByIdReleaseWithResponse request returning *GetAutomationTestResultByIdReleaseResponse
-func (c *ClientWithResponses) GetAutomationTestResultByIdReleaseWithResponse(ctx context.Context, releaseId string, testId string, params *GetAutomationTestResultByIdReleaseParams, reqEditors ...RequestEditorFn) (*GetAutomationTestResultByIdReleaseResponse, error) {
-	rsp, err := c.GetAutomationTestResultByIdRelease(ctx, releaseId, testId, params, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseGetAutomationTestResultByIdReleaseResponse(rsp)
 }
 
 // HealthCheckWithResponse request returning *HealthCheckResponse
@@ -3445,105 +2790,6 @@ func ParseGetAutomationTestResultByIdCorrelationResponse(rsp *http.Response) (*G
 	}
 
 	response := &GetAutomationTestResultByIdCorrelationResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest AutomationTestResult
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseGetAutomationTestResultsByReleaseResponse parses an HTTP response from a GetAutomationTestResultsByReleaseWithResponse call
-func ParseGetAutomationTestResultsByReleaseResponse(rsp *http.Response) (*GetAutomationTestResultsByReleaseResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &GetAutomationTestResultsByReleaseResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest GetAutomationTestResultsOutputBody
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseGetAutomationTestResultsByReleaseTestsResponse parses an HTTP response from a GetAutomationTestResultsByReleaseTestsWithResponse call
-func ParseGetAutomationTestResultsByReleaseTestsResponse(rsp *http.Response) (*GetAutomationTestResultsByReleaseTestsResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &GetAutomationTestResultsByReleaseTestsResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest GetTestsOutputBody
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseGetAutomationTestResultByIdReleaseResponse parses an HTTP response from a GetAutomationTestResultByIdReleaseWithResponse call
-func ParseGetAutomationTestResultByIdReleaseResponse(rsp *http.Response) (*GetAutomationTestResultByIdReleaseResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &GetAutomationTestResultByIdReleaseResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

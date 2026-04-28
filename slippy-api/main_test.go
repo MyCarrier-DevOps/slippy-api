@@ -99,25 +99,18 @@ func (s *stubAutomationTestResultsReader) QueryAutomationTestResults(
 	return &domain.AutomationTestResultsResult{}, nil
 }
 
-func (s *stubAutomationTestResultsReader) QueryAutomationTestResultsByRelease(
-	_ context.Context,
-	_ *domain.AutomationTestResultsByReleaseQuery,
-) (*domain.AutomationTestResultsResult, error) {
-	return &domain.AutomationTestResultsResult{}, nil
-}
-
 type stubAutomationTestsReader struct{}
 
-func (s *stubAutomationTestsReader) QueryTests(
+func (s *stubAutomationTestsReader) QueryTestsByCorrelation(
 	_ context.Context,
-	_ *domain.AutomationTestsQuery,
+	_ *domain.AutomationTestsByCorrelationQuery,
 ) (*domain.AutomationTestsResult, error) {
 	return &domain.AutomationTestsResult{}, nil
 }
 
-func (s *stubAutomationTestsReader) LoadTestByID(
+func (s *stubAutomationTestsReader) LoadTestByCorrelation(
 	_ context.Context,
-	_ *domain.LoadTestByIDQuery,
+	_ *domain.LoadTestByCorrelationQuery,
 ) (*domain.AutomationTestResult, error) {
 	return nil, domain.ErrTestNotFound
 }

@@ -20,13 +20,29 @@ import (
 
 const automationTestsTracerName = "slippy-api/automation-tests"
 
-// testResultsSelectColumns is the column list for TestResults queries.
-const testResultsSelectColumns = `Feature, TestName, ResultMessage, ResultStatus, Duration, Description,
+// testsLookbackDays bounds the StartTime predicate used in every
+// TestResultsCor query so ClickHouse can prune partitions
+// (PARTITION BY toDate(StartTime)). Anything older than this is invisible
+// to these endpoints, even if still within the 3-month TTL.
+const testsLookbackDays = 14
+
+// testResultsCorSelectColumns is the column list for TestResultsCor queries.
+// CorrelationId comes last to match the table's column ordering for clarity.
+const testResultsCorSelectColumns = `Feature, TestName, ResultMessage, ResultStatus, Duration, Description,
 	ScenarioInfoTitle, ScenarioInfoDescription, ScenarioInfoTags,
 	ScenarioExecutionStatus, StackTrace, ReleaseId, StackName, Stage,
-	EnvironmentName, Attempt, StartTime, BranchName, TestId`
+	EnvironmentName, Attempt, StartTime, BranchName, TestId, CorrelationId`
 
-// AutomationTestsStore queries autotest_results.TestResults from ClickHouse.
+// chDateTimeFormat is the ClickHouse-native DateTime literal format. We bind
+// time values as strings + cast via toDateTime() because the clickhouse-go
+// driver wraps DateTime-typed parameters with `toDateTime('...')` literals
+// that CH's parameter parser refuses (CH error 41).
+const chDateTimeFormat = "2006-01-02 15:04:05"
+
+// formatCHDateTime renders a time as the literal string toDateTime() expects.
+func formatCHDateTime(t time.Time) string { return t.UTC().Format(chDateTimeFormat) }
+
+// AutomationTestsStore queries autotest_results.TestResultsCor from ClickHouse.
 type AutomationTestsStore struct {
 	session ch.ClickhouseSessionInterface
 }
@@ -38,97 +54,104 @@ func NewAutomationTestsStore(session ch.ClickhouseSessionInterface) *AutomationT
 
 var _ domain.AutomationTestsReader = (*AutomationTestsStore)(nil)
 
-// appendRunTupleConditions appends an OR-of-tuples clause matching any of the
-// resolved run keys, plus the corresponding ch.Named args.
-func appendRunTupleConditions(
-	runs []domain.ResolvedRunKey,
+// startTimeLookback is the partition-pruning predicate used by every
+// TestResultsCor query.
+func startTimeLookback() string {
+	return fmt.Sprintf("StartTime >= now() - INTERVAL %d DAY", testsLookbackDays)
+}
+
+// appendTestRowFilters appends the optional environment / stack / stage /
+// attempt filters for a TestResultsCor query.
+func appendTestRowFilters(
 	inConditions []string,
 	inArgs []any,
+	environment, stack, stage string,
+	attempt uint8,
 ) (conditions []string, args []any) {
 	conditions, args = inConditions, inArgs
-	tupleClauses := make([]string, 0, len(runs))
-	for i, run := range runs {
-		rid := fmt.Sprintf("r%d", i)
-		att := fmt.Sprintf("a%d", i)
-		stg := fmt.Sprintf("s%d", i)
-		env := fmt.Sprintf("e%d", i)
-		stk := fmt.Sprintf("k%d", i)
-		tupleClauses = append(tupleClauses, fmt.Sprintf(
-			"(ReleaseId = {%s:String} AND Attempt = {%s:UInt8} "+
-				"AND Stage ILIKE {%s:String} AND EnvironmentName ILIKE {%s:String} AND StackName ILIKE {%s:String})",
-			rid, att, stg, env, stk,
-		))
-		args = append(args,
-			ch.Named(rid, run.ReleaseID),
-			ch.Named(att, run.Attempt),
-			ch.Named(stg, run.Stage),
-			ch.Named(env, run.EnvironmentName),
-			ch.Named(stk, run.StackName),
-		)
+	if environment != "" {
+		conditions = append(conditions, "EnvironmentName ILIKE {environment:String}")
+		args = append(args, ch.Named("environment", environment))
 	}
-	conditions = append(conditions, "("+strings.Join(tupleClauses, " OR ")+")")
+	if stack != "" {
+		conditions = append(conditions, "StackName ILIKE {stack:String}")
+		args = append(args, ch.Named("stack", stack))
+	}
+	if stage != "" {
+		conditions = append(conditions, "Stage ILIKE {stage:String}")
+		args = append(args, ch.Named("stage", stage))
+	}
+	if attempt > 0 {
+		conditions = append(conditions, "Attempt = {attempt:UInt8}")
+		args = append(args, ch.Named("attempt", attempt))
+	}
 	return conditions, args
 }
 
-// scanTestResultRow reads a single TestResults row from ch.Rows in the same
-// column order as testResultsSelectColumns.
+// scanTestResultRow reads a single TestResultsCor row from ch.Rows in the
+// same column order as testResultsCorSelectColumns.
 func scanTestResultRow(rows ch.Rows) (domain.AutomationTestResult, error) {
 	var (
 		row    domain.AutomationTestResult
 		testID uuid.UUID
+		corrID *uuid.UUID
 	)
 	if err := rows.Scan(
 		&row.Feature, &row.TestName, &row.ResultMessage, &row.ResultStatus, &row.Duration,
 		&row.Description, &row.ScenarioInfoTitle, &row.ScenarioInfoDescription,
 		&row.ScenarioInfoTags, &row.ScenarioExecutionStatus, &row.StackTrace,
 		&row.ReleaseID, &row.StackName, &row.Stage, &row.EnvironmentName,
-		&row.Attempt, &row.StartTime, &row.BranchName, &testID,
+		&row.Attempt, &row.StartTime, &row.BranchName, &testID, &corrID,
 	); err != nil {
 		return row, err
 	}
 	row.TestID = testID.String()
+	if corrID != nil {
+		s := corrID.String()
+		row.CorrelationID = &s
+	}
 	return row, nil
 }
 
-// QueryTests fetches individual test rows for a set of resolved runs. The
-// query is bounded by [MinStart, MaxFinish] to give ClickHouse partition
-// pruning on TestResults (PARTITION BY toDate(StartTime)). When Runs is empty,
-// the function returns an empty result without hitting ClickHouse.
-func (s *AutomationTestsStore) QueryTests(
+// QueryTestsByCorrelation returns TestResultsCor rows scoped to the given
+// correlation ID, with optional environment/stack/stage/attempt/status
+// filters and cursor-based pagination. Results are bounded by a 14-day
+// lookback so ClickHouse can prune partitions.
+func (s *AutomationTestsStore) QueryTestsByCorrelation(
 	ctx context.Context,
-	q *domain.AutomationTestsQuery,
+	q *domain.AutomationTestsByCorrelationQuery,
 ) (result *domain.AutomationTestsResult, err error) {
 	if q == nil {
 		return nil, errors.New("query must not be nil")
 	}
+	if q.CorrelationID == uuid.Nil {
+		return nil, errors.New("correlation ID is required")
+	}
 	if q.Limit < 1 {
 		return nil, errors.New("limit must be at least 1")
 	}
-	if len(q.Runs) == 0 {
-		return &domain.AutomationTestsResult{Tests: nil, Count: 0}, nil
-	}
 
-	ctx, span := otel.Tracer(automationTestsTracerName).Start(ctx, "automationtests.QueryTests",
+	ctx, span := otel.Tracer(automationTestsTracerName).Start(ctx, "automationtests.QueryByCorrelation",
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(
 			attribute.String("db.system", "clickhouse"),
-			attribute.String("db.operation", "QueryTests"),
-			attribute.Int("test.runs_count", len(q.Runs)),
+			attribute.String("db.operation", "QueryTestsByCorrelation"),
+			attribute.String("test.correlation_id", q.CorrelationID.String()),
 			attribute.String("test.status", q.Status),
 			attribute.Int("test.limit", q.Limit),
 		),
 	)
 	defer span.End()
 
+	// CorrelationId/TestId/DateTime are bound as String + cast in SQL because
+	// clickhouse-go wraps these typed parameters in literals that CH's
+	// parameter parser refuses (CH errors 457 and 41).
 	conditions := []string{
-		"StartTime >= {minStart:DateTime}",
-		"StartTime <= {maxFinish:DateTime}",
+		startTimeLookback(),
+		"CorrelationId = toUUID({correlationId:String})",
 	}
-	args := []any{
-		ch.Named("minStart", q.MinStart),
-		ch.Named("maxFinish", q.MaxFinish),
-	}
-	conditions, args = appendRunTupleConditions(q.Runs, conditions, args)
+	args := []any{ch.Named("correlationId", q.CorrelationID.String())}
+	conditions, args = appendTestRowFilters(conditions, args, q.Environment, q.Stack, q.Stage, q.Attempt)
 
 	if q.Status != "" {
 		conditions = append(conditions, "ResultStatus ILIKE {status:String}")
@@ -143,11 +166,12 @@ func (s *AutomationTestsStore) QueryTests(
 			return nil, fmt.Errorf("%w: %w", domain.ErrInvalidTestsCursor, parseErr)
 		}
 		conditions = append(conditions,
-			"(StartTime > {cursorTime:DateTime} OR (StartTime = {cursorTime:DateTime} AND TestId > {cursorId:UUID}))",
+			"(StartTime > toDateTime({cursorTime:String}) OR "+
+				"(StartTime = toDateTime({cursorTime:String}) AND TestId > toUUID({cursorId:String})))",
 		)
 		args = append(args,
-			ch.Named("cursorTime", cursorTime),
-			ch.Named("cursorId", cursorID),
+			ch.Named("cursorTime", formatCHDateTime(cursorTime)),
+			ch.Named("cursorId", cursorID.String()),
 		)
 	}
 
@@ -156,11 +180,11 @@ func (s *AutomationTestsStore) QueryTests(
 
 	query := fmt.Sprintf(
 		`SELECT %s
-		FROM autotest_results.TestResults
+		FROM autotest_results.TestResultsCor
 		WHERE %s
 		ORDER BY StartTime ASC, TestId ASC
 		LIMIT {fetchLimit:UInt32}`,
-		testResultsSelectColumns,
+		testResultsCorSelectColumns,
 		strings.Join(conditions, " AND "),
 	)
 
@@ -203,54 +227,50 @@ func (s *AutomationTestsStore) QueryTests(
 	return result, nil
 }
 
-// LoadTestByID fetches a single TestResults row by TestId. The lookup is
-// scoped to the resolved runs and the [MinStart, MaxFinish] window so the
-// query benefits from partition pruning and so a TestId from an unrelated
-// run scope cannot be returned. Returns domain.ErrTestNotFound when no row
-// matches.
-func (s *AutomationTestsStore) LoadTestByID(
+// LoadTestByCorrelation fetches a single TestResultsCor row by TestId,
+// scoped to a CorrelationId so a TestId from an unrelated slip can't be
+// returned. Returns domain.ErrTestNotFound when no row matches.
+func (s *AutomationTestsStore) LoadTestByCorrelation(
 	ctx context.Context,
-	q *domain.LoadTestByIDQuery,
+	q *domain.LoadTestByCorrelationQuery,
 ) (result *domain.AutomationTestResult, err error) {
 	if q == nil {
 		return nil, errors.New("query must not be nil")
 	}
+	if q.CorrelationID == uuid.Nil {
+		return nil, errors.New("correlation ID is required")
+	}
 	if q.TestID == uuid.Nil {
 		return nil, errors.New("test ID is required")
 	}
-	if len(q.Runs) == 0 {
-		return nil, domain.ErrTestNotFound
-	}
 
-	ctx, span := otel.Tracer(automationTestsTracerName).Start(ctx, "automationtests.LoadTestByID",
+	ctx, span := otel.Tracer(automationTestsTracerName).Start(ctx, "automationtests.LoadByCorrelation",
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(
 			attribute.String("db.system", "clickhouse"),
-			attribute.String("db.operation", "LoadTestByID"),
+			attribute.String("db.operation", "LoadTestByCorrelation"),
+			attribute.String("test.correlation_id", q.CorrelationID.String()),
 			attribute.String("test.test_id", q.TestID.String()),
-			attribute.Int("test.runs_count", len(q.Runs)),
 		),
 	)
 	defer span.End()
 
 	conditions := []string{
-		"StartTime >= {minStart:DateTime}",
-		"StartTime <= {maxFinish:DateTime}",
-		"TestId = {testId:UUID}",
+		startTimeLookback(),
+		"CorrelationId = toUUID({correlationId:String})",
+		"TestId = toUUID({testId:String})",
 	}
 	args := []any{
-		ch.Named("minStart", q.MinStart),
-		ch.Named("maxFinish", q.MaxFinish),
-		ch.Named("testId", q.TestID),
+		ch.Named("correlationId", q.CorrelationID.String()),
+		ch.Named("testId", q.TestID.String()),
 	}
-	conditions, args = appendRunTupleConditions(q.Runs, conditions, args)
 
 	query := fmt.Sprintf(
 		`SELECT %s
-		FROM autotest_results.TestResults
+		FROM autotest_results.TestResultsCor
 		WHERE %s
 		LIMIT 1`,
-		testResultsSelectColumns,
+		testResultsCorSelectColumns,
 		strings.Join(conditions, " AND "),
 	)
 

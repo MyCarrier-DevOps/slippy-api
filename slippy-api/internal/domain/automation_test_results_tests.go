@@ -11,11 +11,11 @@ import (
 // ErrInvalidTestsCursor indicates the cursor parameter could not be parsed.
 var ErrInvalidTestsCursor = errors.New("invalid tests cursor")
 
-// ErrTestNotFound indicates that no row exists in TestResults for the given
-// (TestId, run keys, time window).
+// ErrTestNotFound indicates that no row exists in TestResultsCor for the
+// given (TestId, scope) pair.
 var ErrTestNotFound = errors.New("test not found")
 
-// AutomationTestResult is one row from autotest_results.TestResults — the
+// AutomationTestResult is one row from autotest_results.TestResultsCor — the
 // outcome of a single test scenario within a test-suite run.
 type AutomationTestResult struct {
 	Feature                 string    `json:"feature"`
@@ -37,30 +37,21 @@ type AutomationTestResult struct {
 	StartTime               time.Time `json:"start_time"`
 	BranchName              string    `json:"branch_name,omitempty"`
 	TestID                  string    `json:"test_id"`
+	CorrelationID           *string   `json:"correlation_id,omitempty"`
 }
 
-// ResolvedRunKey is the 5-tuple that joins TestResults rows back to their
-// parent RunResults row (TestResults has no CorrelationId).
-type ResolvedRunKey struct {
-	ReleaseID       string
-	Attempt         uint8
-	Stage           string
-	EnvironmentName string
-	StackName       string
-}
-
-// AutomationTestsQuery defines parameters for fetching individual test rows
-// from autotest_results.TestResults. Runs is the set of resolved RunResults
-// rows (typically obtained by calling AutomationTestResultsReader first);
-// MinStart and MaxFinish bound the StartTime predicate that lets ClickHouse
-// prune partitions. An empty Status disables the result-status filter.
-type AutomationTestsQuery struct {
-	Runs      []ResolvedRunKey
-	MinStart  time.Time
-	MaxFinish time.Time
-	Status    string
-	Limit     int
-	Cursor    string // "RFC3339Nano|UUID" from a previous page
+// AutomationTestsByCorrelationQuery defines parameters for fetching tests
+// whose CorrelationId equals the given UUID, with optional filters and
+// cursor pagination.
+type AutomationTestsByCorrelationQuery struct {
+	CorrelationID uuid.UUID
+	Environment   string
+	Stack         string
+	Stage         string
+	Attempt       uint8  // 0 = no attempt filter
+	Status        string // empty = no status filter
+	Limit         int
+	Cursor        string // "RFC3339Nano|UUID" from a previous page
 }
 
 // AutomationTestsResult contains query results with pagination metadata.
@@ -70,20 +61,24 @@ type AutomationTestsResult struct {
 	Count      int                    `json:"count"`
 }
 
-// LoadTestByIDQuery defines parameters for fetching a single TestResults row
-// by its UUID. Runs/MinStart/MaxFinish constrain the lookup to a specific
-// run scope (so the same TestId from an unrelated correlationId/release
-// won't leak across) and give ClickHouse the partition predicate it needs.
-type LoadTestByIDQuery struct {
-	Runs      []ResolvedRunKey
-	MinStart  time.Time
-	MaxFinish time.Time
-	TestID    uuid.UUID
+// LoadTestByCorrelationQuery defines parameters for fetching a single
+// TestResultsCor row by its TestId, scoped to a CorrelationId so a TestId
+// from an unrelated slip can't be returned.
+type LoadTestByCorrelationQuery struct {
+	CorrelationID uuid.UUID
+	TestID        uuid.UUID
 }
 
-// AutomationTestsReader queries individual test results from the
-// autotest_results.TestResults table.
+// AutomationTestsReader queries individual test rows from
+// autotest_results.TestResultsCor.
 type AutomationTestsReader interface {
-	QueryTests(ctx context.Context, q *AutomationTestsQuery) (*AutomationTestsResult, error)
-	LoadTestByID(ctx context.Context, q *LoadTestByIDQuery) (*AutomationTestResult, error)
+	QueryTestsByCorrelation(
+		ctx context.Context,
+		q *AutomationTestsByCorrelationQuery,
+	) (*AutomationTestsResult, error)
+
+	LoadTestByCorrelation(
+		ctx context.Context,
+		q *LoadTestByCorrelationQuery,
+	) (*AutomationTestResult, error)
 }

@@ -42,19 +42,6 @@ type AutomationTestResultsQuery struct {
 	Attempt       uint32 // 0 == fetch latest
 }
 
-// AutomationTestResultsByReleaseQuery defines parameters for querying
-// RunResults rows whose ReleaseId contains the given substring (ILIKE %x%).
-// When Attempt is 0, results are collapsed to the latest attempt per
-// (ReleaseId, EnvironmentName, StackName, Stage) tuple so each matched
-// release retains its own latest attempt.
-type AutomationTestResultsByReleaseQuery struct {
-	ReleaseIDSubstring string
-	Environment        string
-	Stack              string
-	Stage              string
-	Attempt            uint32 // 0 == fetch latest
-}
-
 // AutomationTestResultsResult contains query results.
 type AutomationTestResultsResult struct {
 	Runs  []AutomationTestRunResult `json:"runs"`
@@ -66,10 +53,5 @@ type AutomationTestResultsReader interface {
 	QueryAutomationTestResults(
 		ctx context.Context,
 		q *AutomationTestResultsQuery,
-	) (*AutomationTestResultsResult, error)
-
-	QueryAutomationTestResultsByRelease(
-		ctx context.Context,
-		q *AutomationTestResultsByReleaseQuery,
 	) (*AutomationTestResultsResult, error)
 }

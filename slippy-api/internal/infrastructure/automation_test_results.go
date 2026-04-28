@@ -66,8 +66,11 @@ func (s *AutomationTestResultsStore) QueryAutomationTestResults(
 	)
 	defer span.End()
 
-	conditions := []string{"CorrelationId = {correlationId:UUID}"}
-	args := []any{ch.Named("correlationId", q.CorrelationID)}
+	// CorrelationId is bound as a String + cast via toUUID() because the
+	// clickhouse-go driver wraps UUID-typed parameters in quotes that CH's
+	// UUID parser doesn't strip (CH error 457).
+	conditions := []string{"CorrelationId = toUUID({correlationId:String})"}
+	args := []any{ch.Named("correlationId", q.CorrelationID.String())}
 	conditions, args = appendCommonFilters(conditions, args, q.Environment, q.Stack, q.Stage, q.Attempt)
 
 	limitClause := ""
@@ -86,59 +89,6 @@ func (s *AutomationTestResultsStore) QueryAutomationTestResults(
 	)
 
 	return s.runQuery(ctx, span, query, args, "automation test results")
-}
-
-// QueryAutomationTestResultsByRelease returns RunResults rows whose ReleaseId
-// contains the given substring (matched via `ILIKE %x%`), optionally filtered
-// by environment / stack / stage / attempt. When Attempt is 0, results are
-// collapsed to the highest Attempt per (ReleaseId, EnvironmentName, StackName,
-// Stage) tuple so each matched release retains its own latest attempt.
-func (s *AutomationTestResultsStore) QueryAutomationTestResultsByRelease(
-	ctx context.Context,
-	q *domain.AutomationTestResultsByReleaseQuery,
-) (*domain.AutomationTestResultsResult, error) {
-	if q == nil {
-		return nil, errors.New("query must not be nil")
-	}
-	if q.ReleaseIDSubstring == "" {
-		return nil, errors.New("release ID substring is required")
-	}
-
-	ctx, span := otel.Tracer(automationTestResultsTracerName).Start(
-		ctx, "automationtestresults.QueryByRelease",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(
-			attribute.String("db.system", "clickhouse"),
-			attribute.String("db.operation", "QueryAutomationTestResultsByRelease"),
-			attribute.String("test.release_id_substring", q.ReleaseIDSubstring),
-			attribute.String("test.environment", q.Environment),
-			attribute.String("test.stack", q.Stack),
-			attribute.String("test.stage", q.Stage),
-			attribute.Int("test.attempt", int(q.Attempt)),
-		),
-	)
-	defer span.End()
-
-	conditions := []string{"ReleaseId ILIKE {releaseId:String}"}
-	args := []any{ch.Named("releaseId", "%"+q.ReleaseIDSubstring+"%")}
-	conditions, args = appendCommonFilters(conditions, args, q.Environment, q.Stack, q.Stage, q.Attempt)
-
-	limitClause := ""
-	if q.Attempt == 0 {
-		limitClause = " LIMIT 1 BY (ReleaseId, EnvironmentName, StackName, Stage)"
-	}
-
-	query := fmt.Sprintf(
-		`SELECT %s
-		FROM autotest_results.RunResults
-		WHERE %s
-		ORDER BY ReleaseId, EnvironmentName, StackName, Stage, Attempt DESC, StartTime DESC%s`,
-		runResultsSelectColumns,
-		strings.Join(conditions, " AND "),
-		limitClause,
-	)
-
-	return s.runQuery(ctx, span, query, args, "automation test results by release")
 }
 
 // appendCommonFilters appends the optional environment/stack/stage/attempt
