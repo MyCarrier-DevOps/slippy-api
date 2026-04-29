@@ -18,9 +18,40 @@ import (
 	"github.com/MyCarrier-DevOps/slippy-api/internal/domain"
 )
 
-// testResultSeed builds one mock TestResultsCor row matching scanTestResultRow's
-// column order.
-func testResultSeed(
+// testResultListSeed builds one mock TestResultsCor row matching
+// testResultsCorListColumns / scanTestResultListRow (no StackTrace).
+func testResultListSeed(
+	startTime time.Time,
+	testID uuid.UUID,
+	corrID *uuid.UUID,
+	status string,
+) []any {
+	return []any{
+		"FeatureCoreApi", // Feature
+		"TestThing",      // TestName
+		"some message",   // ResultMessage
+		status,           // ResultStatus
+		float64(1.5),     // Duration
+		"desc",           // Description
+		"scenario title", // ScenarioInfoTitle
+		"scenario desc",  // ScenarioInfoDescription
+		[]string{"tag1"}, // ScenarioInfoTags
+		"Passed",         // ScenarioExecutionStatus
+		"26.04.abc1234",  // ReleaseId
+		"stk1",           // StackName
+		"FeatureCoreApi", // Stage
+		"prod",           // EnvironmentName
+		uint8(1),         // Attempt
+		startTime,        // StartTime
+		"main",           // BranchName
+		testID,           // TestId
+		corrID,           // CorrelationId (Nullable UUID)
+	}
+}
+
+// testResultFullSeed is testResultListSeed plus StackTrace, matching
+// testResultsCorFullColumns / scanTestResultFullRow.
+func testResultFullSeed(
 	startTime time.Time,
 	testID uuid.UUID,
 	corrID *uuid.UUID,
@@ -65,6 +96,7 @@ func TestQueryTestsByCorrelation_BasicSuccess(t *testing.T) {
 			assert.Contains(t, query, "ResultStatus ILIKE {status:String}")
 			assert.Contains(t, query, "ORDER BY StartTime ASC, TestId ASC")
 			assert.Contains(t, query, "LIMIT {fetchLimit:UInt32}")
+			assert.NotContains(t, query, "StackTrace", "list query should not select StackTrace")
 			// Confirm correlationId param + fetchLimit = limit + 1
 			values := map[string]any{}
 			for _, a := range args {
@@ -78,7 +110,7 @@ func TestQueryTestsByCorrelation_BasicSuccess(t *testing.T) {
 			return &clickhousetest.MockRows{
 				NextData: []bool{true},
 				ScanFunc: scannerFor([][]any{
-					testResultSeed(ts, testID, &corrID, "Failed"),
+					testResultListSeed(ts, testID, &corrID, "Failed"),
 				}),
 			}, nil
 		},
@@ -96,6 +128,7 @@ func TestQueryTestsByCorrelation_BasicSuccess(t *testing.T) {
 	require.Len(t, result.Tests, 1)
 	assert.Equal(t, "TestThing", result.Tests[0].TestName)
 	assert.Equal(t, testID.String(), result.Tests[0].TestID)
+	assert.Empty(t, result.Tests[0].StackTrace, "list endpoint must not return stack traces")
 	require.NotNil(t, result.Tests[0].CorrelationID)
 	assert.Equal(t, corrID.String(), *result.Tests[0].CorrelationID)
 }
@@ -170,9 +203,9 @@ func TestQueryTestsByCorrelation_NextPageDetected(t *testing.T) {
 			return &clickhousetest.MockRows{
 				NextData: []bool{true, true, true},
 				ScanFunc: scannerFor([][]any{
-					testResultSeed(ts1, id1, &corrID, "Failed"),
-					testResultSeed(ts2, id2, &corrID, "Failed"),
-					testResultSeed(ts3, id3, &corrID, "Failed"),
+					testResultListSeed(ts1, id1, &corrID, "Failed"),
+					testResultListSeed(ts2, id2, &corrID, "Failed"),
+					testResultListSeed(ts3, id3, &corrID, "Failed"),
 				}),
 			}, nil
 		},
@@ -288,7 +321,7 @@ func TestQueryTestsByCorrelation_CloseError(t *testing.T) {
 		QueryWithArgsFunc: func(_ context.Context, _ string, _ ...any) (ch.Rows, error) {
 			return &clickhousetest.MockRows{
 				NextData: []bool{true},
-				ScanFunc: scannerFor([][]any{testResultSeed(ts, tID, &corrID, "Failed")}),
+				ScanFunc: scannerFor([][]any{testResultListSeed(ts, tID, &corrID, "Failed")}),
 				CloseErr: errors.New("close failure"),
 			}, nil
 		},
@@ -355,7 +388,7 @@ func TestLoadTestByCorrelation_Success(t *testing.T) {
 			return &clickhousetest.MockRows{
 				NextData: []bool{true},
 				ScanFunc: scannerFor([][]any{
-					testResultSeed(ts, testID, &corrID, "Failed"),
+					testResultFullSeed(ts, testID, &corrID, "Failed"),
 				}),
 			}, nil
 		},

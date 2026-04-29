@@ -26,11 +26,19 @@ const automationTestsTracerName = "slippy-api/automation-tests"
 // to these endpoints, even if still within the 3-month TTL.
 const testsLookbackDays = 14
 
-// testResultsCorSelectColumns is the column list for TestResultsCor queries.
-// CorrelationId comes last to match the table's column ordering for clarity.
-const testResultsCorSelectColumns = `Feature, TestName, ResultMessage, ResultStatus, Duration, Description,
+// testResultsCorFullColumns selects every column we surface from
+// TestResultsCor, used by the single-test drill-down (LoadTestByCorrelation).
+const testResultsCorFullColumns = `Feature, TestName, ResultMessage, ResultStatus, Duration, Description,
 	ScenarioInfoTitle, ScenarioInfoDescription, ScenarioInfoTags,
 	ScenarioExecutionStatus, StackTrace, ReleaseId, StackName, Stage,
+	EnvironmentName, Attempt, StartTime, BranchName, TestId, CorrelationId`
+
+// testResultsCorListColumns is the same set minus StackTrace. The list
+// endpoint can return many rows and stack traces can be very large; callers
+// who want a trace fetch one row at a time via LoadTestByCorrelation.
+const testResultsCorListColumns = `Feature, TestName, ResultMessage, ResultStatus, Duration, Description,
+	ScenarioInfoTitle, ScenarioInfoDescription, ScenarioInfoTags,
+	ScenarioExecutionStatus, ReleaseId, StackName, Stage,
 	EnvironmentName, Attempt, StartTime, BranchName, TestId, CorrelationId`
 
 // chDateTimeFormat is the ClickHouse-native DateTime literal format. We bind
@@ -88,9 +96,9 @@ func appendTestRowFilters(
 	return conditions, args
 }
 
-// scanTestResultRow reads a single TestResultsCor row from ch.Rows in the
-// same column order as testResultsCorSelectColumns.
-func scanTestResultRow(rows ch.Rows) (domain.AutomationTestResult, error) {
+// scanTestResultFullRow reads one TestResultsCor row including StackTrace,
+// matching testResultsCorFullColumns.
+func scanTestResultFullRow(rows ch.Rows) (domain.AutomationTestResult, error) {
 	var (
 		row    domain.AutomationTestResult
 		testID uuid.UUID
@@ -100,6 +108,32 @@ func scanTestResultRow(rows ch.Rows) (domain.AutomationTestResult, error) {
 		&row.Feature, &row.TestName, &row.ResultMessage, &row.ResultStatus, &row.Duration,
 		&row.Description, &row.ScenarioInfoTitle, &row.ScenarioInfoDescription,
 		&row.ScenarioInfoTags, &row.ScenarioExecutionStatus, &row.StackTrace,
+		&row.ReleaseID, &row.StackName, &row.Stage, &row.EnvironmentName,
+		&row.Attempt, &row.StartTime, &row.BranchName, &testID, &corrID,
+	); err != nil {
+		return row, err
+	}
+	row.TestID = testID.String()
+	if corrID != nil {
+		s := corrID.String()
+		row.CorrelationID = &s
+	}
+	return row, nil
+}
+
+// scanTestResultListRow reads one TestResultsCor row without StackTrace,
+// matching testResultsCorListColumns. The list endpoint omits the trace to
+// keep responses compact; callers fetch the trace via LoadTestByCorrelation.
+func scanTestResultListRow(rows ch.Rows) (domain.AutomationTestResult, error) {
+	var (
+		row    domain.AutomationTestResult
+		testID uuid.UUID
+		corrID *uuid.UUID
+	)
+	if err := rows.Scan(
+		&row.Feature, &row.TestName, &row.ResultMessage, &row.ResultStatus, &row.Duration,
+		&row.Description, &row.ScenarioInfoTitle, &row.ScenarioInfoDescription,
+		&row.ScenarioInfoTags, &row.ScenarioExecutionStatus,
 		&row.ReleaseID, &row.StackName, &row.Stage, &row.EnvironmentName,
 		&row.Attempt, &row.StartTime, &row.BranchName, &testID, &corrID,
 	); err != nil {
@@ -184,7 +218,7 @@ func (s *AutomationTestsStore) QueryTestsByCorrelation(
 		WHERE %s
 		ORDER BY StartTime ASC, TestId ASC
 		LIMIT {fetchLimit:UInt32}`,
-		testResultsCorSelectColumns,
+		testResultsCorListColumns,
 		strings.Join(conditions, " AND "),
 	)
 
@@ -202,7 +236,7 @@ func (s *AutomationTestsStore) QueryTestsByCorrelation(
 
 	tests := make([]domain.AutomationTestResult, 0, q.Limit)
 	for rows.Next() {
-		row, scanErr := scanTestResultRow(rows)
+		row, scanErr := scanTestResultListRow(rows)
 		if scanErr != nil {
 			return nil, fmt.Errorf("failed to scan automation tests row: %w", scanErr)
 		}
@@ -270,7 +304,7 @@ func (s *AutomationTestsStore) LoadTestByCorrelation(
 		FROM autotest_results.TestResultsCor
 		WHERE %s
 		LIMIT 1`,
-		testResultsCorSelectColumns,
+		testResultsCorFullColumns,
 		strings.Join(conditions, " AND "),
 	)
 
@@ -294,7 +328,7 @@ func (s *AutomationTestsStore) LoadTestByCorrelation(
 		return nil, domain.ErrTestNotFound
 	}
 
-	row, scanErr := scanTestResultRow(rows)
+	row, scanErr := scanTestResultFullRow(rows)
 	if scanErr != nil {
 		return nil, fmt.Errorf("failed to scan automation test row: %w", scanErr)
 	}

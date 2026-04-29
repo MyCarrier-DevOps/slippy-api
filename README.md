@@ -193,6 +193,8 @@ Filters: `environment`, `stack`, `stage`, `attempt` — all case-insensitive `IL
 
 Per-test rows from `autotest_results.TestResultsCor`. Bounded to **the last 14 days** for partition pruning — older runs (still within the 3-month TTL) are not visible. Defaults to `ResultStatus='Failed'`; pass `?status=*` (or `all`) to return every status.
 
+The list response **omits `stack_trace`** to keep payloads small (traces can be very large). Fetch the trace for a specific row via the single-test endpoint below.
+
 ```bash
 curl -H "Authorization: Bearer $API_KEY" \
   'https://slippy-api.example.com/v1/automation-test-results/by-correlation/abc-123-def/tests?stage=FeatureCoreApi&attempt=2&limit=50'
@@ -207,7 +209,6 @@ curl -H "Authorization: Bearer $API_KEY" \
       "result_status": "Failed",
       "result_message": "expected 12.50 got 11.00",
       "duration": 1.23,
-      "stack_trace": "  at Checkout.java:142 …",
       "release_id": "26.04.abc1234",
       "stack_name": "stk1",
       "stage": "FeatureCoreApi",
