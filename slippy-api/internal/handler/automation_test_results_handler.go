@@ -213,6 +213,10 @@ func (h *AutomationTestResultsHandler) getTestsByCorrelationID(
 		return nil, huma.NewError(http.StatusBadRequest, "invalid correlationID")
 	}
 
+	if input.Attempt > 255 {
+		return nil, huma.NewError(http.StatusBadRequest, "attempt must be between 0 and 255")
+	}
+
 	result, err := h.testsReader.QueryTestsByCorrelation(ctx, &domain.AutomationTestsByCorrelationQuery{
 		CorrelationID: correlationID,
 		Environment:   input.Environment,

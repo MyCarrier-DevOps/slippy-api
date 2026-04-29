@@ -3,7 +3,6 @@ package handler
 import (
 	"context"
 	"errors"
-	"log"
 	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -209,13 +208,9 @@ func (h *SlipHandler) findAllByCommits(
 // --- Error Mapping -------------------------------------------------------
 
 // recordHandlerError records an error on the handler span.
-//
-// TEMPORARY: also logs the error to stdout for live debugging. Remove the
-// log.Printf line once the handler errors are no longer being investigated.
 func recordHandlerError(span trace.Span, err error) {
 	span.RecordError(err)
 	span.SetStatus(codes.Error, err.Error())
-	log.Printf("handler error: %v", err)
 }
 
 // mapError converts domain/store errors to huma status errors.
