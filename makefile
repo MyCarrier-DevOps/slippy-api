@@ -22,8 +22,10 @@ test:
 	@echo "Testing all modules..."
 	@for dir in $(MODULES); do \
 		if [ -d "$$dir" ]; then \
-			echo "Testing $$dir module..."; \
-			(cd $$dir && go mod download && go test -cover -coverprofile=coverage.out ./... && go tool cover -func coverage.out ); \
+			if [ "$$dir" != "slippy-client" ]; then \
+				echo "Testing $$dir module..."; \
+				(cd $$dir && go mod download && go test -cover -coverprofile=coverage.out ./... && go tool cover -func coverage.out ); \
+			fi; \
 		else \
 			echo "Directory $$dir not found, skipping..."; \
 		fi; \

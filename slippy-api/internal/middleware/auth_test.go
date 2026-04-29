@@ -312,19 +312,19 @@ type stubHumaContext struct {
 	headers   map[string]string
 }
 
-func (s *stubHumaContext) Operation() *huma.Operation  { return &huma.Operation{} }
-func (s *stubHumaContext) Context() context.Context    { return context.Background() }
-func (s *stubHumaContext) TLS() *tls.ConnectionState   { return nil }
-func (s *stubHumaContext) Version() huma.ProtoVersion  { return huma.ProtoVersion{} }
-func (s *stubHumaContext) Method() string              { return "" }
-func (s *stubHumaContext) Host() string                { return "" }
-func (s *stubHumaContext) RemoteAddr() string          { return "" }
-func (s *stubHumaContext) URL() url.URL                { return url.URL{} }
-func (s *stubHumaContext) Param(_ string) string       { return "" }
-func (s *stubHumaContext) Query(_ string) string       { return "" }
-func (s *stubHumaContext) Header(_ string) string      { return "" }
+func (s *stubHumaContext) Operation() *huma.Operation        { return &huma.Operation{} }
+func (s *stubHumaContext) Context() context.Context          { return context.Background() }
+func (s *stubHumaContext) TLS() *tls.ConnectionState         { return nil }
+func (s *stubHumaContext) Version() huma.ProtoVersion        { return huma.ProtoVersion{} }
+func (s *stubHumaContext) Method() string                    { return "" }
+func (s *stubHumaContext) Host() string                      { return "" }
+func (s *stubHumaContext) RemoteAddr() string                { return "" }
+func (s *stubHumaContext) URL() url.URL                      { return url.URL{} }
+func (s *stubHumaContext) Param(_ string) string             { return "" }
+func (s *stubHumaContext) Query(_ string) string             { return "" }
+func (s *stubHumaContext) Header(_ string) string            { return "" }
 func (s *stubHumaContext) EachHeader(_ func(string, string)) {}
-func (s *stubHumaContext) BodyReader() io.Reader       { return nil }
+func (s *stubHumaContext) BodyReader() io.Reader             { return nil }
 func (s *stubHumaContext) GetMultipartForm() (*multipart.Form, error) {
 	return nil, errors.New("not supported")
 }

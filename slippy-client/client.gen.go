@@ -51,6 +51,54 @@ type AncestryEntry struct {
 	Status        string    `json:"status"`
 }
 
+// AutomationTestResult defines model for AutomationTestResult.
+type AutomationTestResult struct {
+	// Schema A URL to the JSON Schema for this object.
+	Schema                  *string   `json:"$schema,omitempty"`
+	Attempt                 int32     `json:"attempt"`
+	BranchName              *string   `json:"branch_name,omitempty"`
+	CorrelationId           *string   `json:"correlation_id,omitempty"`
+	Description             *string   `json:"description,omitempty"`
+	Duration                float64   `json:"duration"`
+	EnvironmentName         string    `json:"environment_name"`
+	Feature                 string    `json:"feature"`
+	ReleaseId               string    `json:"release_id"`
+	ResultMessage           *string   `json:"result_message,omitempty"`
+	ResultStatus            string    `json:"result_status"`
+	ScenarioExecutionStatus *string   `json:"scenario_execution_status,omitempty"`
+	ScenarioInfoDescription *string   `json:"scenario_info_description,omitempty"`
+	ScenarioInfoTags        *[]string `json:"scenario_info_tags,omitempty"`
+	ScenarioInfoTitle       *string   `json:"scenario_info_title,omitempty"`
+	StackName               string    `json:"stack_name"`
+	StackTrace              *string   `json:"stack_trace,omitempty"`
+	Stage                   string    `json:"stage"`
+	StartTime               time.Time `json:"start_time"`
+	TestId                  string    `json:"test_id"`
+	TestName                string    `json:"test_name"`
+}
+
+// AutomationTestRunResult defines model for AutomationTestRunResult.
+type AutomationTestRunResult struct {
+	Attempt           int32     `json:"attempt"`
+	AttemptId         *string   `json:"attempt_id,omitempty"`
+	BatchId           *string   `json:"batch_id,omitempty"`
+	BranchName        *string   `json:"branch_name,omitempty"`
+	CorrelationId     *string   `json:"correlation_id,omitempty"`
+	EnvironmentName   string    `json:"environment_name"`
+	ErrorMessage      *string   `json:"error_message,omitempty"`
+	Failed            int32     `json:"failed"`
+	FinishTime        time.Time `json:"finish_time"`
+	JobNumber         *string   `json:"job_number,omitempty"`
+	Outcome           string    `json:"outcome"`
+	Passed            int32     `json:"passed"`
+	ReleaseId         string    `json:"release_id"`
+	StackName         string    `json:"stack_name"`
+	Stage             string    `json:"stage"`
+	StartTime         time.Time `json:"start_time"`
+	TestRunId         *string   `json:"test_run_id,omitempty"`
+	TotalTestJobCount int32     `json:"total_test_job_count"`
+}
+
 // CIJobLog defines model for CIJobLog.
 type CIJobLog struct {
 	BuildBranch     string    `json:"build_branch"`
@@ -197,6 +245,16 @@ type FindByCommitsOutputBody struct {
 	Slip          Slip    `json:"slip"`
 }
 
+// GetAutomationTestResultsOutputBody defines model for GetAutomationTestResultsOutputBody.
+type GetAutomationTestResultsOutputBody struct {
+	// Schema A URL to the JSON Schema for this object.
+	Schema *string `json:"$schema,omitempty"`
+
+	// Count Number of runs returned
+	Count int64                      `json:"count"`
+	Runs  *[]AutomationTestRunResult `json:"runs"`
+}
+
 // GetLogsOutputBody defines model for GetLogsOutputBody.
 type GetLogsOutputBody struct {
 	// Schema A URL to the JSON Schema for this object.
@@ -208,6 +266,19 @@ type GetLogsOutputBody struct {
 
 	// NextPage URL path for the next page of results
 	NextPage *string `json:"next_page,omitempty"`
+}
+
+// GetTestsOutputBody defines model for GetTestsOutputBody.
+type GetTestsOutputBody struct {
+	// Schema A URL to the JSON Schema for this object.
+	Schema *string `json:"$schema,omitempty"`
+
+	// Count Number of tests in this page
+	Count int64 `json:"count"`
+
+	// NextPage URL path for the next page of results
+	NextPage *string                 `json:"next_page,omitempty"`
+	Tests    *[]AutomationTestResult `json:"tests"`
 }
 
 // HealthOutputBody defines model for HealthOutputBody.
@@ -294,6 +365,45 @@ type StepBody struct {
 
 	// ComponentName Component name (required for aggregate steps, empty for pipeline steps)
 	ComponentName *string `json:"component_name,omitempty"`
+}
+
+// GetAutomationTestResultsParams defines parameters for GetAutomationTestResults.
+type GetAutomationTestResultsParams struct {
+	// Environment Filter by EnvironmentName (case-insensitive)
+	Environment *string `form:"environment,omitempty" json:"environment,omitempty"`
+
+	// Stack Filter by StackName (case-insensitive)
+	Stack *string `form:"stack,omitempty" json:"stack,omitempty"`
+
+	// Stage Filter by Stage / test category, e.g. FeatureCoreApi, PreprodCoreApi, FeatureUI (case-insensitive)
+	Stage *string `form:"stage,omitempty" json:"stage,omitempty"`
+
+	// Attempt Specific Attempt to fetch. When omitted, returns the latest attempt per (Environment, Stack, Stage).
+	Attempt *int32 `form:"attempt,omitempty" json:"attempt,omitempty"`
+}
+
+// GetAutomationTestResultsTestsParams defines parameters for GetAutomationTestResultsTests.
+type GetAutomationTestResultsTestsParams struct {
+	// Environment Filter by EnvironmentName (case-insensitive)
+	Environment *string `form:"environment,omitempty" json:"environment,omitempty"`
+
+	// Stack Filter by StackName (case-insensitive)
+	Stack *string `form:"stack,omitempty" json:"stack,omitempty"`
+
+	// Stage Filter by Stage / test category (case-insensitive)
+	Stage *string `form:"stage,omitempty" json:"stage,omitempty"`
+
+	// Attempt Filter by exact Attempt
+	Attempt *int32 `form:"attempt,omitempty" json:"attempt,omitempty"`
+
+	// Status ResultStatus filter (case-insensitive ILIKE). Defaults to 'Failed'; pass '*' or 'all' to disable the filter and return every status.
+	Status *string `form:"status,omitempty" json:"status,omitempty"`
+
+	// Limit Page size
+	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Cursor Pagination cursor from a previous response
+	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
 }
 
 // GetLogsParams defines parameters for GetLogs.
@@ -447,6 +557,15 @@ func WithRequestEditorFn(fn RequestEditorFn) ClientOption {
 
 // The interface specification for the client above.
 type ClientInterface interface {
+	// GetAutomationTestResults request
+	GetAutomationTestResults(ctx context.Context, correlationID string, params *GetAutomationTestResultsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetAutomationTestResultsTests request
+	GetAutomationTestResultsTests(ctx context.Context, correlationID string, params *GetAutomationTestResultsTestsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetAutomationTestResultByIdCorrelation request
+	GetAutomationTestResultByIdCorrelation(ctx context.Context, correlationID string, testId string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// HealthCheck request
 	HealthCheck(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -501,6 +620,42 @@ type ClientInterface interface {
 	StartStepWithBody(ctx context.Context, correlationID string, stepName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	StartStep(ctx context.Context, correlationID string, stepName string, body StartStepJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+}
+
+func (c *Client) GetAutomationTestResults(ctx context.Context, correlationID string, params *GetAutomationTestResultsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetAutomationTestResultsRequest(c.Server, correlationID, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetAutomationTestResultsTests(ctx context.Context, correlationID string, params *GetAutomationTestResultsTestsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetAutomationTestResultsTestsRequest(c.Server, correlationID, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetAutomationTestResultByIdCorrelation(ctx context.Context, correlationID string, testId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetAutomationTestResultByIdCorrelationRequest(c.Server, correlationID, testId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
 }
 
 func (c *Client) HealthCheck(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -753,6 +908,303 @@ func (c *Client) StartStep(ctx context.Context, correlationID string, stepName s
 		return nil, err
 	}
 	return c.Client.Do(req)
+}
+
+// NewGetAutomationTestResultsRequest generates requests for GetAutomationTestResults
+func NewGetAutomationTestResultsRequest(server string, correlationID string, params *GetAutomationTestResultsParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "correlationID", correlationID, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/automation-test-results/by-correlation/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Environment != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "environment", *params.Environment, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Stack != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "stack", *params.Stack, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Stage != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "stage", *params.Stage, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Attempt != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "attempt", *params.Attempt, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int32"}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewGetAutomationTestResultsTestsRequest generates requests for GetAutomationTestResultsTests
+func NewGetAutomationTestResultsTestsRequest(server string, correlationID string, params *GetAutomationTestResultsTestsParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "correlationID", correlationID, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/automation-test-results/by-correlation/%s/tests", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Environment != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "environment", *params.Environment, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Stack != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "stack", *params.Stack, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Stage != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "stage", *params.Stage, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Attempt != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "attempt", *params.Attempt, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int32"}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Status != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "status", *params.Status, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Cursor != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "cursor", *params.Cursor, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewGetAutomationTestResultByIdCorrelationRequest generates requests for GetAutomationTestResultByIdCorrelation
+func NewGetAutomationTestResultByIdCorrelationRequest(server string, correlationID string, testId string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "correlationID", correlationID, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "testId", testId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/automation-test-results/by-correlation/%s/tests/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
 }
 
 // NewHealthCheckRequest generates requests for HealthCheck
@@ -1627,6 +2079,15 @@ func WithBaseURL(baseURL string) ClientOption {
 
 // ClientWithResponsesInterface is the interface specification for the client with responses above.
 type ClientWithResponsesInterface interface {
+	// GetAutomationTestResultsWithResponse request
+	GetAutomationTestResultsWithResponse(ctx context.Context, correlationID string, params *GetAutomationTestResultsParams, reqEditors ...RequestEditorFn) (*GetAutomationTestResultsResponse, error)
+
+	// GetAutomationTestResultsTestsWithResponse request
+	GetAutomationTestResultsTestsWithResponse(ctx context.Context, correlationID string, params *GetAutomationTestResultsTestsParams, reqEditors ...RequestEditorFn) (*GetAutomationTestResultsTestsResponse, error)
+
+	// GetAutomationTestResultByIdCorrelationWithResponse request
+	GetAutomationTestResultByIdCorrelationWithResponse(ctx context.Context, correlationID string, testId string, reqEditors ...RequestEditorFn) (*GetAutomationTestResultByIdCorrelationResponse, error)
+
 	// HealthCheckWithResponse request
 	HealthCheckWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*HealthCheckResponse, error)
 
@@ -1681,6 +2142,75 @@ type ClientWithResponsesInterface interface {
 	StartStepWithBodyWithResponse(ctx context.Context, correlationID string, stepName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*StartStepResponse, error)
 
 	StartStepWithResponse(ctx context.Context, correlationID string, stepName string, body StartStepJSONRequestBody, reqEditors ...RequestEditorFn) (*StartStepResponse, error)
+}
+
+type GetAutomationTestResultsResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *GetAutomationTestResultsOutputBody
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetAutomationTestResultsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetAutomationTestResultsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetAutomationTestResultsTestsResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *GetTestsOutputBody
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetAutomationTestResultsTestsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetAutomationTestResultsTestsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetAutomationTestResultByIdCorrelationResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *AutomationTestResult
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetAutomationTestResultByIdCorrelationResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetAutomationTestResultByIdCorrelationResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
 }
 
 type HealthCheckResponse struct {
@@ -1977,6 +2507,33 @@ func (r StartStepResponse) StatusCode() int {
 	return 0
 }
 
+// GetAutomationTestResultsWithResponse request returning *GetAutomationTestResultsResponse
+func (c *ClientWithResponses) GetAutomationTestResultsWithResponse(ctx context.Context, correlationID string, params *GetAutomationTestResultsParams, reqEditors ...RequestEditorFn) (*GetAutomationTestResultsResponse, error) {
+	rsp, err := c.GetAutomationTestResults(ctx, correlationID, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetAutomationTestResultsResponse(rsp)
+}
+
+// GetAutomationTestResultsTestsWithResponse request returning *GetAutomationTestResultsTestsResponse
+func (c *ClientWithResponses) GetAutomationTestResultsTestsWithResponse(ctx context.Context, correlationID string, params *GetAutomationTestResultsTestsParams, reqEditors ...RequestEditorFn) (*GetAutomationTestResultsTestsResponse, error) {
+	rsp, err := c.GetAutomationTestResultsTests(ctx, correlationID, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetAutomationTestResultsTestsResponse(rsp)
+}
+
+// GetAutomationTestResultByIdCorrelationWithResponse request returning *GetAutomationTestResultByIdCorrelationResponse
+func (c *ClientWithResponses) GetAutomationTestResultByIdCorrelationWithResponse(ctx context.Context, correlationID string, testId string, reqEditors ...RequestEditorFn) (*GetAutomationTestResultByIdCorrelationResponse, error) {
+	rsp, err := c.GetAutomationTestResultByIdCorrelation(ctx, correlationID, testId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetAutomationTestResultByIdCorrelationResponse(rsp)
+}
+
 // HealthCheckWithResponse request returning *HealthCheckResponse
 func (c *ClientWithResponses) HealthCheckWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*HealthCheckResponse, error) {
 	rsp, err := c.HealthCheck(ctx, reqEditors...)
@@ -2156,6 +2713,105 @@ func (c *ClientWithResponses) StartStepWithResponse(ctx context.Context, correla
 		return nil, err
 	}
 	return ParseStartStepResponse(rsp)
+}
+
+// ParseGetAutomationTestResultsResponse parses an HTTP response from a GetAutomationTestResultsWithResponse call
+func ParseGetAutomationTestResultsResponse(rsp *http.Response) (*GetAutomationTestResultsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetAutomationTestResultsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest GetAutomationTestResultsOutputBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetAutomationTestResultsTestsResponse parses an HTTP response from a GetAutomationTestResultsTestsWithResponse call
+func ParseGetAutomationTestResultsTestsResponse(rsp *http.Response) (*GetAutomationTestResultsTestsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetAutomationTestResultsTestsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest GetTestsOutputBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetAutomationTestResultByIdCorrelationResponse parses an HTTP response from a GetAutomationTestResultByIdCorrelationWithResponse call
+func ParseGetAutomationTestResultByIdCorrelationResponse(rsp *http.Response) (*GetAutomationTestResultByIdCorrelationResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetAutomationTestResultByIdCorrelationResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AutomationTestResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
 }
 
 // ParseHealthCheckResponse parses an HTTP response from a HealthCheckWithResponse call

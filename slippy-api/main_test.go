@@ -90,13 +90,38 @@ func (s *stubCIJobLogReader) QueryLogs(_ context.Context, _ *domain.CIJobLogQuer
 	return &domain.CIJobLogResult{}, nil
 }
 
+type stubAutomationTestResultsReader struct{}
+
+func (s *stubAutomationTestResultsReader) QueryAutomationTestResults(
+	_ context.Context,
+	_ *domain.AutomationTestResultsQuery,
+) (*domain.AutomationTestResultsResult, error) {
+	return &domain.AutomationTestResultsResult{}, nil
+}
+
+type stubAutomationTestsReader struct{}
+
+func (s *stubAutomationTestsReader) QueryTestsByCorrelation(
+	_ context.Context,
+	_ *domain.AutomationTestsByCorrelationQuery,
+) (*domain.AutomationTestsResult, error) {
+	return &domain.AutomationTestsResult{}, nil
+}
+
+func (s *stubAutomationTestsReader) LoadTestByCorrelation(
+	_ context.Context,
+	_ *domain.LoadTestByCorrelationQuery,
+) (*domain.AutomationTestResult, error) {
+	return nil, domain.ErrTestNotFound
+}
+
 // --- buildHandler tests ---
 
 func TestBuildHandler_HealthEndpoint(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil)
 	require.NotNil(t, h)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -114,7 +139,7 @@ func TestBuildHandler_AuthRequired(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil)
 
 	// Request without auth header should be rejected
 	req := httptest.NewRequest(http.MethodGet, "/slips/test-corr-001", nil)
@@ -127,7 +152,7 @@ func TestBuildHandler_AuthSuccess(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil)
 
 	// Request with valid auth header should succeed
 	req := httptest.NewRequest(http.MethodGet, "/slips/test-corr-001", nil)
@@ -145,7 +170,7 @@ func TestBuildHandler_OpenAPISpec(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
 	w := httptest.NewRecorder()
@@ -167,7 +192,7 @@ func TestBuildHandler_V1HealthEndpoint(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
 	w := httptest.NewRecorder()
@@ -184,7 +209,7 @@ func TestBuildHandler_V1AuthRequired(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/slips/test-corr-001", nil)
 	w := httptest.NewRecorder()
@@ -196,7 +221,7 @@ func TestBuildHandler_V1AuthSuccess(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/slips/test-corr-001", nil)
 	req.Header.Set("Authorization", "Bearer test-key")
@@ -213,7 +238,7 @@ func TestBuildHandler_OpenAPISpecContainsV1Routes(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
 	w := httptest.NewRecorder()
@@ -242,7 +267,15 @@ func TestBuildHandler_WithAllOptionalHandlers(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", WriteAPIKey: "write-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, &stubSlipWriter{}, &stubImageTagReader{}, &stubCIJobLogReader{})
+	h := buildHandler(
+		cfg,
+		reader,
+		&stubSlipWriter{},
+		&stubImageTagReader{},
+		&stubCIJobLogReader{},
+		&stubAutomationTestResultsReader{},
+		&stubAutomationTestsReader{},
+	)
 	require.NotNil(t, h)
 
 	// The OpenAPI spec should now contain paths registered via each optional handler.
@@ -263,7 +296,8 @@ func TestBuildHandler_WithAllOptionalHandlers(t *testing.T) {
 		if strings.Contains(path, "image-tag") || strings.Contains(path, "imagetag") {
 			hasImageTagRoute = true
 		}
-		if strings.Contains(path, "ci-job-log") || strings.Contains(path, "cijoblog") || strings.Contains(path, "logs") {
+		if strings.Contains(path, "ci-job-log") || strings.Contains(path, "cijoblog") ||
+			strings.Contains(path, "logs") {
 			hasCIJobLogRoute = true
 		}
 		if strings.HasPrefix(path, "/v1/") && (strings.Contains(path, "slip") || strings.Contains(path, "step")) {
@@ -292,7 +326,15 @@ func TestGenerateOpenAPISpec(t *testing.T) {
 
 	cfg := &config.Config{APIKey: "dummy", Port: 8080}
 	reader := newStubSlipReader()
-	h := buildHandler(cfg, reader, &stubSlipWriter{}, &stubImageTagReader{}, &stubCIJobLogReader{})
+	h := buildHandler(
+		cfg,
+		reader,
+		&stubSlipWriter{},
+		&stubImageTagReader{},
+		&stubCIJobLogReader{},
+		&stubAutomationTestResultsReader{},
+		&stubAutomationTestsReader{},
+	)
 
 	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
 	w := httptest.NewRecorder()

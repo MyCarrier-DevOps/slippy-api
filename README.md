@@ -27,8 +27,8 @@ The application follows Clean Architecture with clear dependency boundaries:
 
 | Layer | Package | Responsibility |
 |---|---|---|
-| **Domain** | `internal/domain` | `SlipReader` / `SlipWriter` / `ImageTagReader` / `CIJobLogReader` interfaces, type aliases for upstream `Slip`/`SlipWithCommit` |
-| **Infrastructure** | `internal/infrastructure` | `SlipStoreAdapter` (read-only adapter), `SlipWriterAdapter` (write ops backed by `*slippy.Client`, with OTel instrumentation), `SlipResolverAdapter` (ancestry resolution via `slippy.Client.ResolveSlip()`), `CachedSlipReader` (Dragonfly/Redis decorator), `BuildInfoReader` (image tag resolution), `CIJobLogStore` (CI job log queries) |
+| **Domain** | `internal/domain` | `SlipReader` / `SlipWriter` / `ImageTagReader` / `CIJobLogReader` / `AutomationTestResultsReader` / `AutomationTestsReader` interfaces, type aliases for upstream `Slip`/`SlipWithCommit` |
+| **Infrastructure** | `internal/infrastructure` | `SlipStoreAdapter` (read-only adapter), `SlipWriterAdapter` (write ops backed by `*slippy.Client`, with OTel instrumentation), `SlipResolverAdapter` (ancestry resolution via `slippy.Client.ResolveSlip()`), `CachedSlipReader` (Dragonfly/Redis decorator), `BuildInfoReader` (image tag resolution), `CIJobLogStore` (CI job log queries), `AutomationTestResultsStore` (run-summary queries against `autotest_results.RunResults`), `AutomationTestsStore` (per-test queries against `autotest_results.TestResultsCor`) |
 | **Handler** | `internal/handler` | HTTP route registration, request/response types, error mapping |
 | **Middleware** | `internal/middleware` | Bearer token authentication with constant-time comparison |
 | **Config** | `internal/config` | Environment variable loading and validation |
@@ -49,6 +49,9 @@ All endpoints except `/health`, `/openapi.json`, and `/docs` require a `Bearer` 
 | `POST` | `/slips/find-all-by-commits` | Find all matching slips for a list of commits |
 | `GET` | `/slips/{correlationID}/image-tags` | Resolve per-component image tags for a routing slip |
 | `GET` | `/logs/{correlationID}` | Query CI job logs with cursor pagination and per-column filtering |
+| `GET` | `/v1/automation-test-results/by-correlation/{correlationID}` | Run-summary rows from `autotest_results.RunResults`. Filter by `environment`, `stack`, `stage`, `attempt`. When `attempt` is omitted, returns the latest attempt per (env, stack, stage) tuple. |
+| `GET` | `/v1/automation-test-results/by-correlation/{correlationID}/tests` | Per-test rows from `autotest_results.TestResultsCor` for a slip, paginated. Same parent filters plus `status` (default `Failed`; pass `*` or `all` to disable), `limit`, `cursor`. Bounded to a 14-day lookback for partition pruning. |
+| `GET` | `/v1/automation-test-results/by-correlation/{correlationID}/tests/{testId}` | Single test row (with stack trace). 404 when not in scope. |
 | `GET` | `/openapi.json` | Auto-generated OpenAPI 3.1 specification |
 | `GET` | `/docs` | Interactive API documentation (Stoplight Elements) |
 
@@ -153,6 +156,84 @@ curl -H "Authorization: Bearer $API_KEY" \
 ```
 
 Supported query filters: `level`, `service`, `component`, `cluster`, `cloud`, `environment`, `namespace`, `message`, `ci_job_instance`, `ci_job_type`, `build_repository`, `build_image`, `build_branch`. Page size is controlled via `limit` (1–1000, default 100). Sort order via `sort` (`asc` or `desc`, default `desc`). Pagination uses an opaque `cursor` returned in `next_page`.
+
+**GET /v1/automation-test-results/by-correlation/{correlationID}**
+
+Run-summary rows from `autotest_results.RunResults` for a slip. With no `attempt`, results collapse to the latest attempt per `(EnvironmentName, StackName, Stage)` tuple via ClickHouse `LIMIT 1 BY`.
+
+```bash
+curl -H "Authorization: Bearer $API_KEY" \
+  'https://slippy-api.example.com/v1/automation-test-results/by-correlation/abc-123-def?environment=prod&stage=FeatureCoreApi'
+```
+
+```json
+{
+  "runs": [
+    {
+      "outcome": "Failed",
+      "passed": 42, "failed": 3,
+      "start_time": "2026-04-28T20:30:00Z",
+      "finish_time": "2026-04-28T20:38:18Z",
+      "release_id": "26.04.abc1234",
+      "attempt": 2,
+      "stage": "FeatureCoreApi",
+      "environment_name": "prod",
+      "stack_name": "stk1",
+      "correlation_id": "abc-123-def",
+      "total_test_job_count": 1
+    }
+  ],
+  "count": 1
+}
+```
+
+Filters: `environment`, `stack`, `stage`, `attempt` — all case-insensitive `ILIKE` (except `attempt`, exact `UInt32`).
+
+**GET /v1/automation-test-results/by-correlation/{correlationID}/tests**
+
+Per-test rows from `autotest_results.TestResultsCor`. Bounded to **the last 14 days** for partition pruning — older runs (still within the 3-month TTL) are not visible. Defaults to `ResultStatus='Failed'`; pass `?status=*` (or `all`) to return every status.
+
+The list response **omits `stack_trace`** to keep payloads small (traces can be very large). Fetch the trace for a specific row via the single-test endpoint below.
+
+```bash
+curl -H "Authorization: Bearer $API_KEY" \
+  'https://slippy-api.example.com/v1/automation-test-results/by-correlation/abc-123-def/tests?stage=FeatureCoreApi&attempt=2&limit=50'
+```
+
+```json
+{
+  "tests": [
+    {
+      "feature": "Checkout",
+      "test_name": "TestCheckoutTotalsIncludeTax",
+      "result_status": "Failed",
+      "result_message": "expected 12.50 got 11.00",
+      "duration": 1.23,
+      "release_id": "26.04.abc1234",
+      "stack_name": "stk1",
+      "stage": "FeatureCoreApi",
+      "environment_name": "prod",
+      "attempt": 2,
+      "start_time": "2026-04-28T20:33:11Z",
+      "test_id": "eb0df2f5-e3bf-4300-a2f8-7bd7cb9cb0ff",
+      "correlation_id": "abc-123-def"
+    }
+  ],
+  "next_page": "/v1/automation-test-results/by-correlation/abc-123-def/tests?cursor=2026-04-28T20%3A33%3A11Z%7Ceb0df2f5-…&limit=50&stage=FeatureCoreApi&attempt=2",
+  "count": 1
+}
+```
+
+Filters: `environment`, `stack`, `stage`, `attempt`, `status`, `limit` (1–1000, default 100), `cursor`. Cursor format is `RFC3339Nano|UUID` over `(StartTime, TestId)`.
+
+**GET /v1/automation-test-results/by-correlation/{correlationID}/tests/{testId}**
+
+Single-test stack-trace drill-down. Same 14-day lookback. Returns the full `AutomationTestResult` row, or 404 if the `(correlationID, testId)` pair doesn't match a row.
+
+```bash
+curl -H "Authorization: Bearer $API_KEY" \
+  https://slippy-api.example.com/v1/automation-test-results/by-correlation/abc-123-def/tests/eb0df2f5-e3bf-4300-a2f8-7bd7cb9cb0ff
+```
 
 **POST /v1/slips**
 
