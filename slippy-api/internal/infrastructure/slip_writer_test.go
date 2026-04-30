@@ -202,6 +202,10 @@ func TestSlipWriterAdapter_CompleteStep_Success(t *testing.T) {
 			assert.Equal(t, slippy.StepStatusCompleted, status)
 			return nil
 		},
+		// RunPostExecution calls checkPipelineCompletion which requires Load.
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			return &slippy.Slip{CorrelationID: "abc-123"}, nil
+		},
 	}
 	adapter := newTestWriterAdapter(store)
 
@@ -232,6 +236,10 @@ func TestSlipWriterAdapter_FailStep_Success(t *testing.T) {
 			assert.Equal(t, slippy.StepStatusFailed, status)
 			assert.Equal(t, "build timeout", entry.Message)
 			return nil
+		},
+		// RunPostExecution calls checkPipelineCompletion which requires Load.
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			return &slippy.Slip{CorrelationID: "abc-123"}, nil
 		},
 	}
 	adapter := newTestWriterAdapter(store)
@@ -460,33 +468,47 @@ func TestSlipWriterAdapter_StartStep_ComponentStep_SkipsHydration(t *testing.T) 
 }
 
 func TestSlipWriterAdapter_CompleteStep_AggregateStep_SkipsHydration(t *testing.T) {
+	var updateCalled bool
 	store := &mockSlipStore{
 		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
 			return nil
 		},
+		// RunPostExecution always calls checkPipelineCompletion (via Load).
+		// Only hydrateAndPersist's Update should be skipped for aggregate steps.
 		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
-			t.Fatal("Load should not be called: aggregate steps hydrate internally")
-			return nil, nil
+			return &slippy.Slip{CorrelationID: "abc-123"}, nil
 		},
 		updateFn: func(_ context.Context, _ *slippy.Slip) error {
-			t.Fatal("Update should not be called: aggregate steps hydrate internally")
+			updateCalled = true
 			return nil
 		},
 	}
 	adapter := newTestWriterAdapter(store)
 
-	// builds_completed is an aggregate step; even with empty componentName, hydration
-	// is skipped because the store path already calls Load + Update internally.
+	// builds_completed is an aggregate step; hydrateAndPersist is skipped because the
+	// store path already calls Load + Update internally. RunPostExecution still calls
+	// checkPipelineCompletion (Load), but Update via hydrateAndPersist must not be called.
 	err := adapter.CompleteStep(context.Background(), "abc-123", "builds_completed", "")
 	require.NoError(t, err)
+	assert.False(t, updateCalled, "hydrateAndPersist must not call Update for aggregate steps")
 }
 
 func TestSlipWriterAdapter_HydrationError_NonFatal(t *testing.T) {
+	// After the RunPostExecution refactor, checkPipelineCompletion calls Load first.
+	// The first Load (for checkPipelineCompletion) must succeed; subsequent Load calls
+	// (for hydrateAndPersist) may fail without propagating as an error.
+	var loadCallCount int
 	store := &mockSlipStore{
 		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
 			return nil
 		},
 		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			loadCallCount++
+			if loadCallCount == 1 {
+				// First call: checkPipelineCompletion — must succeed.
+				return &slippy.Slip{CorrelationID: "abc-123"}, nil
+			}
+			// Second call: hydrateAndPersist — simulate failure; must be non-fatal.
 			return nil, errors.New("clickhouse unavailable")
 		},
 	}
@@ -513,11 +535,21 @@ func TestSlipWriterAdapter_StartStep_HydrationError_NonFatal(t *testing.T) {
 }
 
 func TestSlipWriterAdapter_FailStep_HydrationError_NonFatal(t *testing.T) {
+	// After the RunPostExecution refactor, checkPipelineCompletion calls Load first.
+	// The first Load (for checkPipelineCompletion) must succeed; subsequent Load calls
+	// (for hydrateAndPersist) may fail without propagating as an error.
+	var loadCallCount int
 	store := &mockSlipStore{
 		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
 			return nil
 		},
 		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			loadCallCount++
+			if loadCallCount == 1 {
+				// First call: checkPipelineCompletion — must succeed.
+				return &slippy.Slip{CorrelationID: "abc-123"}, nil
+			}
+			// Second call: hydrateAndPersist — simulate failure; must be non-fatal.
 			return nil, errors.New("clickhouse unavailable")
 		},
 	}
@@ -536,6 +568,7 @@ func TestSlipWriterAdapter_HydrateAndPersist_UpdateError(t *testing.T) {
 			return nil
 		},
 		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			// Called by both checkPipelineCompletion and hydrateAndPersist; both succeed.
 			return &slippy.Slip{CorrelationID: "abc-123"}, nil
 		},
 		updateFn: func(_ context.Context, _ *slippy.Slip) error {
@@ -571,4 +604,65 @@ func TestSlipWriterAdapter_IsPipelineStep_NilPipelineConfig(t *testing.T) {
 	// hydrateAndPersist is invoked. Both Load and Update must be called.
 	err := adapter.CompleteStep(context.Background(), "abc-123", "anything", "")
 	require.NoError(t, err)
+}
+
+// TestSlipWriterAdapter_FailStep_ComponentStep_UpdatesSlipStatus verifies that
+// FailStep for a component-level event (componentName != "") uses RunPostExecution,
+// which unconditionally calls checkPipelineCompletion. When a step fails,
+// checkPipelineCompletion detects the failure and calls UpdateSlipStatus, which
+// in turn calls store.Update with the slip status set to failed.
+func TestSlipWriterAdapter_FailStep_ComponentStep_UpdatesSlipStatus(t *testing.T) {
+	var capturedStatus slippy.SlipStatus
+
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			return nil
+		},
+		// checkPipelineCompletion and UpdateSlipStatus both call store.Load.
+		// Return a slip with a failed pipeline step so the failure path is taken.
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			return &slippy.Slip{
+				CorrelationID: "abc-123",
+				Steps: map[string]slippy.Step{
+					"builds_completed": {Status: slippy.StepStatusFailed},
+				},
+			}, nil
+		},
+		// UpdateSlipStatus (client method) calls store.Update after setting slip.Status.
+		updateFn: func(_ context.Context, slip *slippy.Slip) error {
+			capturedStatus = slip.Status
+			return nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	// Component-level event: componentName = "api"
+	err := adapter.FailStep(context.Background(), "abc-123", "builds_completed", "api", "build failed")
+	require.NoError(t, err)
+	assert.Equal(t, slippy.SlipStatusFailed, capturedStatus,
+		"RunPostExecution must set slip.status=failed for component-level failures via checkPipelineCompletion")
+}
+
+// TestSlipWriterAdapter_CompleteStep_ComponentStep_CallsCheckPipelineCompletion verifies
+// that CompleteStep for a component-level event uses RunPostExecution, which always
+// calls checkPipelineCompletion (Load + possibly UpdateSlipStatus), fixing the bug
+// where slip.status was never reconciled for component events.
+func TestSlipWriterAdapter_CompleteStep_ComponentStep_CallsCheckPipelineCompletion(t *testing.T) {
+	var loadCalled bool
+
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			return nil
+		},
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			loadCalled = true
+			return &slippy.Slip{CorrelationID: "abc-123"}, nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	// Component-level event: componentName = "api"
+	err := adapter.CompleteStep(context.Background(), "abc-123", "builds_completed", "api")
+	require.NoError(t, err)
+	assert.True(t, loadCalled, "checkPipelineCompletion must be called for component events via RunPostExecution")
 }
