@@ -89,7 +89,12 @@ func (a *SlipWriterAdapter) CompleteStep(ctx context.Context, correlationID, ste
 	)
 	defer span.End()
 
-	if err := a.client.CompleteStep(ctx, correlationID, stepName, componentName); err != nil {
+	if _, err := a.client.RunPostExecution(ctx, slippy.PostExecutionOptions{
+		CorrelationID:     correlationID,
+		StepName:          stepName,
+		ComponentName:     componentName,
+		WorkflowSucceeded: true,
+	}); err != nil {
 		recordWriterError(span, err)
 		return err
 	}
@@ -112,7 +117,13 @@ func (a *SlipWriterAdapter) FailStep(ctx context.Context, correlationID, stepNam
 	)
 	defer span.End()
 
-	if err := a.client.FailStep(ctx, correlationID, stepName, componentName, reason); err != nil {
+	if _, err := a.client.RunPostExecution(ctx, slippy.PostExecutionOptions{
+		CorrelationID:     correlationID,
+		StepName:          stepName,
+		ComponentName:     componentName,
+		WorkflowSucceeded: false,
+		FailureMessage:    reason,
+	}); err != nil {
 		recordWriterError(span, err)
 		return err
 	}

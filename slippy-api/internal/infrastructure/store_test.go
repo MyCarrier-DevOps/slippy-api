@@ -30,11 +30,15 @@ type mockSlipStore struct {
 	updateComponentFn       func(ctx context.Context, id, comp, stepType string, status slippy.StepStatus) error
 	appendHistoryFn         func(ctx context.Context, id string, entry slippy.StateHistoryEntry) error
 	setComponentImageTagFn  func(ctx context.Context, id, step, comp, tag string) error
+	updateSlipStatusFn      func(ctx context.Context, id string, status slippy.SlipStatus) error
 	pingFn                  func(ctx context.Context) error
 }
 
 func (m *mockSlipStore) Load(ctx context.Context, id string) (*slippy.Slip, error) {
-	return m.loadFn(ctx, id)
+	if m.loadFn != nil {
+		return m.loadFn(ctx, id)
+	}
+	return nil, slippy.ErrSlipNotFound
 }
 
 func (m *mockSlipStore) LoadByCommit(ctx context.Context, repo, sha string) (*slippy.Slip, error) {
@@ -126,6 +130,13 @@ func (m *mockSlipStore) ResolveAncestry(_ context.Context, _, _, _ string, _ int
 func (m *mockSlipStore) SetComponentImageTag(ctx context.Context, id, step, comp, tag string) error {
 	if m.setComponentImageTagFn != nil {
 		return m.setComponentImageTagFn(ctx, id, step, comp, tag)
+	}
+	return nil
+}
+
+func (m *mockSlipStore) UpdateSlipStatus(ctx context.Context, id string, status slippy.SlipStatus) error {
+	if m.updateSlipStatusFn != nil {
+		return m.updateSlipStatusFn(ctx, id, status)
 	}
 	return nil
 }
