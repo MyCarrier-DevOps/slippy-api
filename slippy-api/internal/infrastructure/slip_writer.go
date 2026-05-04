@@ -89,14 +89,24 @@ func (a *SlipWriterAdapter) CompleteStep(ctx context.Context, correlationID, ste
 	)
 	defer span.End()
 
-	if _, err := a.client.RunPostExecution(ctx, slippy.PostExecutionOptions{
-		CorrelationID:     correlationID,
-		StepName:          stepName,
-		ComponentName:     componentName,
-		WorkflowSucceeded: true,
-	}); err != nil {
-		recordWriterError(span, err)
-		return err
+	// Pipeline-level terminal events route directly: steps.go:101 guard fires
+	// checkPipelineCompletion automatically, saving a redundant Load.
+	// Component events MUST go through RunPostExecution to drive aggregate recomputation.
+	if componentName != "" {
+		if _, err := a.client.RunPostExecution(ctx, slippy.PostExecutionOptions{
+			CorrelationID:     correlationID,
+			StepName:          stepName,
+			ComponentName:     componentName,
+			WorkflowSucceeded: true,
+		}); err != nil {
+			recordWriterError(span, err)
+			return err
+		}
+	} else {
+		if err := a.client.CompleteStep(ctx, correlationID, stepName, componentName); err != nil {
+			recordWriterError(span, err)
+			return err
+		}
 	}
 	if a.isPipelineStep(stepName, componentName) {
 		if err := a.hydrateAndPersist(ctx, correlationID); err != nil {
@@ -117,15 +127,25 @@ func (a *SlipWriterAdapter) FailStep(ctx context.Context, correlationID, stepNam
 	)
 	defer span.End()
 
-	if _, err := a.client.RunPostExecution(ctx, slippy.PostExecutionOptions{
-		CorrelationID:     correlationID,
-		StepName:          stepName,
-		ComponentName:     componentName,
-		WorkflowSucceeded: false,
-		FailureMessage:    reason,
-	}); err != nil {
-		recordWriterError(span, err)
-		return err
+	// Pipeline-level terminal events route directly: steps.go:101 guard fires
+	// checkPipelineCompletion automatically, saving a redundant Load.
+	// Component events MUST go through RunPostExecution to drive aggregate recomputation.
+	if componentName != "" {
+		if _, err := a.client.RunPostExecution(ctx, slippy.PostExecutionOptions{
+			CorrelationID:     correlationID,
+			StepName:          stepName,
+			ComponentName:     componentName,
+			WorkflowSucceeded: false,
+			FailureMessage:    reason,
+		}); err != nil {
+			recordWriterError(span, err)
+			return err
+		}
+	} else {
+		if err := a.client.FailStep(ctx, correlationID, stepName, componentName, reason); err != nil {
+			recordWriterError(span, err)
+			return err
+		}
 	}
 	if a.isPipelineStep(stepName, componentName) {
 		if err := a.hydrateAndPersist(ctx, correlationID); err != nil {
