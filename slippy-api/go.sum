@@ -19,8 +19,8 @@ github.com/MyCarrier-DevOps/goLibMyCarrier/github v1.3.76 h1:zm6JyU4kn8KUBhJaCGT
 github.com/MyCarrier-DevOps/goLibMyCarrier/github v1.3.76/go.mod h1:LvQXO20huoREbzLtG7UWw7ySQs0DXv/39IuPJ/ujLnE=
 github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.76 h1:kZo5ZsIkR4IPVHszqTLao9lAWbvDmINBXpK0hPfUNaA=
 github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.76/go.mod h1:8ZFrEONoNfgaoY8TnAbq7ZeYDjJcW6XFk5XzwYhzdhs=
-github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.76 h1:M1g7H1qF8l0MbyaIPKtGCFvFH+dxTfSyrhDSQ4asStk=
-github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.76/go.mod h1:sySJl+SNkgi8d163l13JO9JSzT6Wbc1obkc2n5GTvjM=
+github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.77 h1:JReEs4tDf9fpYoyrU4P5Uk1Bo9p5BlkC1b547SLRmI8=
+github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.77/go.mod h1:sySJl+SNkgi8d163l13JO9JSzT6Wbc1obkc2n5GTvjM=
 github.com/ProtonMail/go-crypto v1.4.1 h1:9RfcZHqEQUvP8RzecWEUafnZVtEvrBVL9BiF67IQOfM=
 github.com/ProtonMail/go-crypto v1.4.1/go.mod h1:e1OaTyu5SYVrO9gKOEhTc+5UcXtTUa+P3uLudwcgPqo=
 github.com/andybalholm/brotli v1.2.1 h1:R+f5xP285VArJDRgowrfb9DqL18yVK0gKAW/F+eTWro=
