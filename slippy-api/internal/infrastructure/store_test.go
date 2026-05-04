@@ -28,6 +28,7 @@ type mockSlipStore struct {
 	updateStepFn            func(ctx context.Context, id, step, comp string, status slippy.StepStatus) error
 	updateStepWithHistoryFn func(ctx context.Context, id, step, comp string, status slippy.StepStatus, entry slippy.StateHistoryEntry) error
 	updateComponentFn       func(ctx context.Context, id, comp, stepType string, status slippy.StepStatus) error
+	updateSlipStatusFn      func(ctx context.Context, id string, status slippy.SlipStatus) error
 	appendHistoryFn         func(ctx context.Context, id string, entry slippy.StateHistoryEntry) error
 	setComponentImageTagFn  func(ctx context.Context, id, step, comp, tag string) error
 	updateSlipStatusFn      func(ctx context.Context, id string, status slippy.SlipStatus) error
@@ -108,6 +109,13 @@ func (m *mockSlipStore) UpdateComponentStatus(
 ) error {
 	if m.updateComponentFn != nil {
 		return m.updateComponentFn(ctx, id, comp, stepType, status)
+	}
+	return nil
+}
+
+func (m *mockSlipStore) UpdateSlipStatus(ctx context.Context, id string, status slippy.SlipStatus) error {
+	if m.updateSlipStatusFn != nil {
+		return m.updateSlipStatusFn(ctx, id, status)
 	}
 	return nil
 }
