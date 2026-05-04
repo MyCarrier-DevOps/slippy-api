@@ -460,23 +460,33 @@ func TestSlipWriterAdapter_StartStep_ComponentStep_SkipsHydration(t *testing.T) 
 }
 
 func TestSlipWriterAdapter_CompleteStep_AggregateStep_SkipsHydration(t *testing.T) {
+	// In v1.3.77+, checkPipelineCompletion always calls Load to evaluate pipeline
+	// terminal state before deciding whether to write. The adapter's hydrateAndPersist
+	// (which would call Load then Update) must still be skipped for aggregate steps.
+	// We verify the real invariant: Update is never called by the adapter layer.
 	store := &mockSlipStore{
 		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
 			return nil
 		},
+		// Load is called by checkPipelineCompletion inside the library (non-aggregate
+		// terminal step path). Return an in-progress slip to exercise the non-terminal
+		// short-circuit path.
 		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
-			t.Fatal("Load should not be called: aggregate steps hydrate internally")
-			return nil, nil
+			return &slippy.Slip{
+				CorrelationID: "abc-123",
+				Status:        slippy.SlipStatusInProgress,
+			}, nil
 		},
 		updateFn: func(_ context.Context, _ *slippy.Slip) error {
-			t.Fatal("Update should not be called: aggregate steps hydrate internally")
+			t.Fatal("Update should not be called: adapter must not double-hydrate aggregate steps")
 			return nil
 		},
 	}
 	adapter := newTestWriterAdapter(store)
 
-	// builds_completed is an aggregate step; even with empty componentName, hydration
-	// is skipped because the store path already calls Load + Update internally.
+	// builds_completed is an aggregate step; the adapter's hydrateAndPersist path
+	// (Load + Update) must be skipped. Load may be called by the library's
+	// checkPipelineCompletion, but Update must not be called by the adapter.
 	err := adapter.CompleteStep(context.Background(), "abc-123", "builds_completed", "")
 	require.NoError(t, err)
 }
