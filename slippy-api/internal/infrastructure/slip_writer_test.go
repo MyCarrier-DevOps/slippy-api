@@ -202,6 +202,10 @@ func TestSlipWriterAdapter_CompleteStep_Success(t *testing.T) {
 			assert.Equal(t, slippy.StepStatusCompleted, status)
 			return nil
 		},
+		// RunPostExecution calls checkPipelineCompletion which calls Load.
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			return &slippy.Slip{CorrelationID: "abc-123", Status: slippy.SlipStatusInProgress}, nil
+		},
 	}
 	adapter := newTestWriterAdapter(store)
 
@@ -232,6 +236,10 @@ func TestSlipWriterAdapter_FailStep_Success(t *testing.T) {
 			assert.Equal(t, slippy.StepStatusFailed, status)
 			assert.Equal(t, "build timeout", entry.Message)
 			return nil
+		},
+		// RunPostExecution calls checkPipelineCompletion which calls Load.
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			return &slippy.Slip{CorrelationID: "abc-123", Status: slippy.SlipStatusInProgress}, nil
 		},
 	}
 	adapter := newTestWriterAdapter(store)
@@ -492,11 +500,21 @@ func TestSlipWriterAdapter_CompleteStep_AggregateStep_SkipsHydration(t *testing.
 }
 
 func TestSlipWriterAdapter_HydrationError_NonFatal(t *testing.T) {
+	// For a pipeline step (empty componentName), RunPostExecution internally calls
+	// checkPipelineCompletion twice (once from UpdateStepWithStatus, once from
+	// RunPostExecution itself), and hydrateAndPersist calls Load a third time.
+	// All three calls happen in sequence; only the third (hydrateAndPersist) may
+	// fail non-fatally.
+	var loadCalls int
 	store := &mockSlipStore{
 		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
 			return nil
 		},
 		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			loadCalls++
+			if loadCalls <= 2 {
+				return &slippy.Slip{CorrelationID: "abc-123", Status: slippy.SlipStatusInProgress}, nil
+			}
 			return nil, errors.New("clickhouse unavailable")
 		},
 	}
@@ -523,11 +541,21 @@ func TestSlipWriterAdapter_StartStep_HydrationError_NonFatal(t *testing.T) {
 }
 
 func TestSlipWriterAdapter_FailStep_HydrationError_NonFatal(t *testing.T) {
+	// For a pipeline step (empty componentName), RunPostExecution internally calls
+	// checkPipelineCompletion twice (once from UpdateStepWithStatus, once from
+	// RunPostExecution itself), and hydrateAndPersist calls Load a third time.
+	// All three calls happen in sequence; only the third (hydrateAndPersist) may
+	// fail non-fatally.
+	var loadCalls int
 	store := &mockSlipStore{
 		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
 			return nil
 		},
 		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			loadCalls++
+			if loadCalls <= 2 {
+				return &slippy.Slip{CorrelationID: "abc-123", Status: slippy.SlipStatusInProgress}, nil
+			}
 			return nil, errors.New("clickhouse unavailable")
 		},
 	}
