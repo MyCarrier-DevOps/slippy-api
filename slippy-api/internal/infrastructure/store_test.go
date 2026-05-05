@@ -35,7 +35,10 @@ type mockSlipStore struct {
 }
 
 func (m *mockSlipStore) Load(ctx context.Context, id string) (*slippy.Slip, error) {
-	return m.loadFn(ctx, id)
+	if m.loadFn != nil {
+		return m.loadFn(ctx, id)
+	}
+	return nil, slippy.ErrSlipNotFound
 }
 
 func (m *mockSlipStore) LoadByCommit(ctx context.Context, repo, sha string) (*slippy.Slip, error) {
