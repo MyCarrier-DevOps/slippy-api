@@ -45,6 +45,7 @@ func buildHandler(
 	ciJobLogReader domain.CIJobLogReader,
 	automationTestResultsReader domain.AutomationTestResultsReader,
 	automationTestsReader domain.AutomationTestsReader,
+	pipelineCfg *slippy.PipelineConfig,
 ) http.Handler {
 	mux := http.NewServeMux()
 	apiConfig := huma.DefaultConfig("Slippy API", "1.0.0")
@@ -84,6 +85,14 @@ func buildHandler(
 
 	// Register v1-only routes (no legacy unversioned paths) below.
 	v1Only := huma.NewGroup(api, "/v1")
+
+	// Pipeline config: v1-only.
+	pch := handler.NewPipelineConfigHandler(pipelineCfg)
+	handler.RegisterPipelineConfigRoutes(v1Only, pch)
+
+	// Step prerequisites: v1-only.
+	sprh := handler.NewStepPrerequisitesHandler(reader, pipelineCfg)
+	handler.RegisterStepPrerequisitesRoutes(v1Only, sprh)
 
 	// Automation test results: v1-only. The optional automationTestsReader
 	// powers the per-test drill-down endpoints; when nil, only the parent
@@ -239,7 +248,7 @@ func run() error {
 	// --- HTTP Server ---
 	otelHandler := buildHandler(
 		cfg, reader, writer, imageTagReader, ciJobLogReader,
-		automationTestResultsReader, automationTestsReader,
+		automationTestResultsReader, automationTestsReader, pipelineCfg,
 	)
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
