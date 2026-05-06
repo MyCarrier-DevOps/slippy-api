@@ -526,6 +526,23 @@
         ],
         "type": "object"
       },
+      "FailedPrereq": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "description": "Failure reason from step state",
+            "type": "string"
+          },
+          "step_name": {
+            "description": "Failed prerequisite step name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "step_name"
+        ],
+        "type": "object"
+      },
       "FindAllByCommitsItem": {
         "additionalProperties": false,
         "properties": {
@@ -764,6 +781,79 @@
         ],
         "type": "object"
       },
+      "PipelineConfigResponseBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/PipelineConfigResponseBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "name": {
+            "description": "Pipeline name",
+            "type": "string"
+          },
+          "steps": {
+            "description": "Ordered list of pipeline steps",
+            "items": {
+              "$ref": "#/components/schemas/PipelineConfigStep"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "version": {
+            "description": "Pipeline config schema version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "name",
+          "steps"
+        ],
+        "type": "object"
+      },
+      "PipelineConfigStep": {
+        "additionalProperties": false,
+        "properties": {
+          "aggregate_of": {
+            "description": "Component-level step name this step aggregates",
+            "type": "string"
+          },
+          "is_aggregate": {
+            "description": "True if this step aggregates component-level data",
+            "type": "boolean"
+          },
+          "is_gate": {
+            "description": "True if this step is a pipeline gate",
+            "type": "boolean"
+          },
+          "name": {
+            "description": "Step name",
+            "type": "string"
+          },
+          "prerequisites": {
+            "description": "Step names that must complete before this step",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
       "SetImageTagInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -976,6 +1066,55 @@
             "type": "string"
           }
         },
+        "type": "object"
+      },
+      "StepPrerequisitesResponseBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/StepPrerequisitesResponseBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "failed": {
+            "description": "Prerequisite step names that failed, with reasons",
+            "items": {
+              "$ref": "#/components/schemas/FailedPrereq"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "pending": {
+            "description": "Prerequisite step names not yet in a terminal state",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "prereq_statuses": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Status of each prerequisite step",
+            "type": "object"
+          },
+          "satisfied": {
+            "description": "True when all prerequisites have reached a terminal success state",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "satisfied"
+        ],
         "type": "object"
       }
     },
@@ -2003,6 +2142,42 @@
         ]
       }
     },
+    "/v1/pipeline-config": {
+      "get": {
+        "operationId": "get-pipeline-config",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PipelineConfigResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "summary": "Get the server-side pipeline configuration",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
     "/v1/slips": {
       "post": {
         "operationId": "create-slip",
@@ -2368,6 +2543,64 @@
           }
         ],
         "summary": "Resolve per-component image tags for a routing slip",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/v1/slips/{correlationID}/step-prerequisites/{stepName}": {
+      "get": {
+        "operationId": "get-step-prerequisites",
+        "parameters": [
+          {
+            "description": "Routing slip correlation ID",
+            "in": "path",
+            "name": "correlationID",
+            "required": true,
+            "schema": {
+              "description": "Routing slip correlation ID",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Pipeline step name",
+            "in": "path",
+            "name": "stepName",
+            "required": true,
+            "schema": {
+              "description": "Pipeline step name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StepPrerequisitesResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "summary": "Check whether all prerequisites for a pipeline step are satisfied",
         "tags": [
           "v1"
         ]

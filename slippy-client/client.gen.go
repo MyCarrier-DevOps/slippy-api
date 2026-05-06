@@ -219,6 +219,15 @@ type FailStepInputBody struct {
 	Reason string `json:"reason"`
 }
 
+// FailedPrereq defines model for FailedPrereq.
+type FailedPrereq struct {
+	// Reason Failure reason from step state
+	Reason *string `json:"reason,omitempty"`
+
+	// StepName Failed prerequisite step name
+	StepName string `json:"step_name"`
+}
+
 // FindAllByCommitsItem defines model for FindAllByCommitsItem.
 type FindAllByCommitsItem struct {
 	MatchedCommit string `json:"matched_commit"`
@@ -299,6 +308,39 @@ type ImageTagResult struct {
 	Tags       map[string]string `json:"tags"`
 }
 
+// PipelineConfigResponseBody defines model for PipelineConfigResponseBody.
+type PipelineConfigResponseBody struct {
+	// Schema A URL to the JSON Schema for this object.
+	Schema *string `json:"$schema,omitempty"`
+
+	// Name Pipeline name
+	Name string `json:"name"`
+
+	// Steps Ordered list of pipeline steps
+	Steps *[]PipelineConfigStep `json:"steps"`
+
+	// Version Pipeline config schema version
+	Version string `json:"version"`
+}
+
+// PipelineConfigStep defines model for PipelineConfigStep.
+type PipelineConfigStep struct {
+	// AggregateOf Component-level step name this step aggregates
+	AggregateOf *string `json:"aggregate_of,omitempty"`
+
+	// IsAggregate True if this step aggregates component-level data
+	IsAggregate *bool `json:"is_aggregate,omitempty"`
+
+	// IsGate True if this step is a pipeline gate
+	IsGate *bool `json:"is_gate,omitempty"`
+
+	// Name Step name
+	Name string `json:"name"`
+
+	// Prerequisites Step names that must complete before this step
+	Prerequisites *[]string `json:"prerequisites,omitempty"`
+}
+
 // SetImageTagInputBody defines model for SetImageTagInputBody.
 type SetImageTagInputBody struct {
 	// Schema A URL to the JSON Schema for this object.
@@ -365,6 +407,24 @@ type StepBody struct {
 
 	// ComponentName Component name (required for aggregate steps, empty for pipeline steps)
 	ComponentName *string `json:"component_name,omitempty"`
+}
+
+// StepPrerequisitesResponseBody defines model for StepPrerequisitesResponseBody.
+type StepPrerequisitesResponseBody struct {
+	// Schema A URL to the JSON Schema for this object.
+	Schema *string `json:"$schema,omitempty"`
+
+	// Failed Prerequisite step names that failed, with reasons
+	Failed *[]FailedPrereq `json:"failed,omitempty"`
+
+	// Pending Prerequisite step names not yet in a terminal state
+	Pending *[]string `json:"pending,omitempty"`
+
+	// PrereqStatuses Status of each prerequisite step
+	PrereqStatuses *map[string]string `json:"prereq_statuses,omitempty"`
+
+	// Satisfied True when all prerequisites have reached a terminal success state
+	Satisfied bool `json:"satisfied"`
 }
 
 // GetAutomationTestResultsParams defines parameters for GetAutomationTestResults.
@@ -572,6 +632,9 @@ type ClientInterface interface {
 	// GetLogs request
 	GetLogs(ctx context.Context, correlationID string, params *GetLogsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetPipelineConfig request
+	GetPipelineConfig(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// CreateSlipWithBody request with any body
 	CreateSlipWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -600,6 +663,9 @@ type ClientInterface interface {
 
 	// GetImageTags request
 	GetImageTags(ctx context.Context, correlationID string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetStepPrerequisites request
+	GetStepPrerequisites(ctx context.Context, correlationID string, stepName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// CompleteStepWithBody request with any body
 	CompleteStepWithBody(ctx context.Context, correlationID string, stepName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -672,6 +738,18 @@ func (c *Client) HealthCheck(ctx context.Context, reqEditors ...RequestEditorFn)
 
 func (c *Client) GetLogs(ctx context.Context, correlationID string, params *GetLogsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetLogsRequest(c.Server, correlationID, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetPipelineConfig(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetPipelineConfigRequest(c.Server)
 	if err != nil {
 		return nil, err
 	}
@@ -804,6 +882,18 @@ func (c *Client) SetImageTag(ctx context.Context, correlationID string, componen
 
 func (c *Client) GetImageTags(ctx context.Context, correlationID string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetImageTagsRequest(c.Server, correlationID)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetStepPrerequisites(ctx context.Context, correlationID string, stepName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetStepPrerequisitesRequest(c.Server, correlationID, stepName)
 	if err != nil {
 		return nil, err
 	}
@@ -1530,6 +1620,33 @@ func NewGetLogsRequest(server string, correlationID string, params *GetLogsParam
 	return req, nil
 }
 
+// NewGetPipelineConfigRequest generates requests for GetPipelineConfig
+func NewGetPipelineConfigRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/pipeline-config")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewCreateSlipRequest calls the generic CreateSlip builder with application/json body
 func NewCreateSlipRequest(server string, body CreateSlipJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -1803,6 +1920,47 @@ func NewGetImageTagsRequest(server string, correlationID string) (*http.Request,
 	}
 
 	operationPath := fmt.Sprintf("/slips/%s/image-tags", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewGetStepPrerequisitesRequest generates requests for GetStepPrerequisites
+func NewGetStepPrerequisitesRequest(server string, correlationID string, stepName string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "correlationID", correlationID, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "stepName", stepName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/slips/%s/step-prerequisites/%s", pathParam0, pathParam1)
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -2094,6 +2252,9 @@ type ClientWithResponsesInterface interface {
 	// GetLogsWithResponse request
 	GetLogsWithResponse(ctx context.Context, correlationID string, params *GetLogsParams, reqEditors ...RequestEditorFn) (*GetLogsResponse, error)
 
+	// GetPipelineConfigWithResponse request
+	GetPipelineConfigWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetPipelineConfigResponse, error)
+
 	// CreateSlipWithBodyWithResponse request with any body
 	CreateSlipWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateSlipResponse, error)
 
@@ -2122,6 +2283,9 @@ type ClientWithResponsesInterface interface {
 
 	// GetImageTagsWithResponse request
 	GetImageTagsWithResponse(ctx context.Context, correlationID string, reqEditors ...RequestEditorFn) (*GetImageTagsResponse, error)
+
+	// GetStepPrerequisitesWithResponse request
+	GetStepPrerequisitesWithResponse(ctx context.Context, correlationID string, stepName string, reqEditors ...RequestEditorFn) (*GetStepPrerequisitesResponse, error)
 
 	// CompleteStepWithBodyWithResponse request with any body
 	CompleteStepWithBodyWithResponse(ctx context.Context, correlationID string, stepName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CompleteStepResponse, error)
@@ -2253,6 +2417,29 @@ func (r GetLogsResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetLogsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetPipelineConfigResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *PipelineConfigResponseBody
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetPipelineConfigResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetPipelineConfigResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -2419,6 +2606,29 @@ func (r GetImageTagsResponse) StatusCode() int {
 	return 0
 }
 
+type GetStepPrerequisitesResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *StepPrerequisitesResponseBody
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetStepPrerequisitesResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetStepPrerequisitesResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type CompleteStepResponse struct {
 	Body                          []byte
 	HTTPResponse                  *http.Response
@@ -2552,6 +2762,15 @@ func (c *ClientWithResponses) GetLogsWithResponse(ctx context.Context, correlati
 	return ParseGetLogsResponse(rsp)
 }
 
+// GetPipelineConfigWithResponse request returning *GetPipelineConfigResponse
+func (c *ClientWithResponses) GetPipelineConfigWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetPipelineConfigResponse, error) {
+	rsp, err := c.GetPipelineConfig(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetPipelineConfigResponse(rsp)
+}
+
 // CreateSlipWithBodyWithResponse request with arbitrary body returning *CreateSlipResponse
 func (c *ClientWithResponses) CreateSlipWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateSlipResponse, error) {
 	rsp, err := c.CreateSlipWithBody(ctx, contentType, body, reqEditors...)
@@ -2645,6 +2864,15 @@ func (c *ClientWithResponses) GetImageTagsWithResponse(ctx context.Context, corr
 		return nil, err
 	}
 	return ParseGetImageTagsResponse(rsp)
+}
+
+// GetStepPrerequisitesWithResponse request returning *GetStepPrerequisitesResponse
+func (c *ClientWithResponses) GetStepPrerequisitesWithResponse(ctx context.Context, correlationID string, stepName string, reqEditors ...RequestEditorFn) (*GetStepPrerequisitesResponse, error) {
+	rsp, err := c.GetStepPrerequisites(ctx, correlationID, stepName, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetStepPrerequisitesResponse(rsp)
 }
 
 // CompleteStepWithBodyWithResponse request with arbitrary body returning *CompleteStepResponse
@@ -2880,6 +3108,39 @@ func ParseGetLogsResponse(rsp *http.Response) (*GetLogsResponse, error) {
 	return response, nil
 }
 
+// ParseGetPipelineConfigResponse parses an HTTP response from a GetPipelineConfigWithResponse call
+func ParseGetPipelineConfigResponse(rsp *http.Response) (*GetPipelineConfigResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetPipelineConfigResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest PipelineConfigResponseBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseCreateSlipResponse parses an HTTP response from a CreateSlipWithResponse call
 func ParseCreateSlipResponse(rsp *http.Response) (*CreateSlipResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -3087,6 +3348,39 @@ func ParseGetImageTagsResponse(rsp *http.Response) (*GetImageTagsResponse, error
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest ImageTagResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetStepPrerequisitesResponse parses an HTTP response from a GetStepPrerequisitesWithResponse call
+func ParseGetStepPrerequisitesResponse(rsp *http.Response) (*GetStepPrerequisitesResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetStepPrerequisitesResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest StepPrerequisitesResponseBody
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

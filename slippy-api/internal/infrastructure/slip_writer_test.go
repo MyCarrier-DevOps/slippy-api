@@ -631,7 +631,12 @@ func TestSlipWriterAdapter_CompleteStep_PipelineStep_DoesNotDoubleCheckCompletio
 	require.NoError(t, err)
 	// checkPipelineCompletion (1 Load) + hydrateAndPersist (1 Load) = 2 total.
 	// The old RunPostExecution path caused 3 Loads (double checkPipelineCompletion + hydrate).
-	assert.Equal(t, 2, loadCalls, "expected exactly 2 Load calls: one from checkPipelineCompletion, one from hydrateAndPersist")
+	assert.Equal(
+		t,
+		2,
+		loadCalls,
+		"expected exactly 2 Load calls: one from checkPipelineCompletion, one from hydrateAndPersist",
+	)
 }
 
 // TestSlipWriterAdapter_FailStep_PipelineStep_DoesNotDoubleCheckCompletion asserts
@@ -658,7 +663,12 @@ func TestSlipWriterAdapter_FailStep_PipelineStep_DoesNotDoubleCheckCompletion(t 
 	require.NoError(t, err)
 	// checkPipelineCompletion (1 Load) + hydrateAndPersist (1 Load) = 2 total.
 	// The old RunPostExecution path caused 3 Loads (double checkPipelineCompletion + hydrate).
-	assert.Equal(t, 2, loadCalls, "expected exactly 2 Load calls: one from checkPipelineCompletion, one from hydrateAndPersist")
+	assert.Equal(
+		t,
+		2,
+		loadCalls,
+		"expected exactly 2 Load calls: one from checkPipelineCompletion, one from hydrateAndPersist",
+	)
 }
 
 // --- C2: updateSlipStatusFn migration tests ---
