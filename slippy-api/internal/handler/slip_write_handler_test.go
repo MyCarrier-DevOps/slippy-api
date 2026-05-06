@@ -28,6 +28,8 @@ type mockWriter struct {
 	failStepFn             func(ctx context.Context, correlationID, stepName, componentName, reason string) error
 	skipStepFn             func(ctx context.Context, correlationID, stepName, componentName, reason string) error
 	setComponentImageTagFn func(ctx context.Context, correlationID, componentName, imageTag string) error
+	promoteSlipFn          func(ctx context.Context, correlationID, promotedTo string) error
+	abandonSlipFn          func(ctx context.Context, correlationID, supersededBy string) error
 }
 
 func (m *mockWriter) CreateSlipForPush(ctx context.Context, opts domain.PushOptions) (*domain.CreateSlipResult, error) {
@@ -48,6 +50,18 @@ func (m *mockWriter) SkipStep(ctx context.Context, cID, step, comp, reason strin
 func (m *mockWriter) SetComponentImageTag(ctx context.Context, cID, comp, tag string) error {
 	return m.setComponentImageTagFn(ctx, cID, comp, tag)
 }
+func (m *mockWriter) PromoteSlip(ctx context.Context, cID, promotedTo string) error {
+	if m.promoteSlipFn != nil {
+		return m.promoteSlipFn(ctx, cID, promotedTo)
+	}
+	return nil
+}
+func (m *mockWriter) AbandonSlip(ctx context.Context, cID, supersededBy string) error {
+	if m.abandonSlipFn != nil {
+		return m.abandonSlipFn(ctx, cID, supersededBy)
+	}
+	return nil
+}
 
 // setupWriteTestAPI creates a huma API with write routes and no auth for testing.
 func setupWriteTestAPI(w domain.SlipWriter) http.Handler {
@@ -55,7 +69,7 @@ func setupWriteTestAPI(w domain.SlipWriter) http.Handler {
 	cfg := huma.DefaultConfig("Test", "1.0.0")
 	api := humago.New(mux, cfg)
 
-	h := NewSlipWriteHandler(w)
+	h := NewSlipWriteHandler(w, nil)
 	RegisterWriteRoutes(api, h)
 	return mux
 }
@@ -498,6 +512,120 @@ func TestSetImageTag_InternalError(t *testing.T) {
 
 	body := `{"image_tag":"26.09.abc1234"}`
 	req := httptest.NewRequest(http.MethodPut, "/slips/abc-123/components/api/image-tag", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// --- PromoteSlip tests ---
+
+func TestPromoteSlip_Success(t *testing.T) {
+	var gotCID, gotPromotedTo string
+	w := &mockWriter{
+		promoteSlipFn: func(_ context.Context, cID, promotedTo string) error {
+			gotCID, gotPromotedTo = cID, promotedTo
+			return nil
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	body := `{"promoted_to":"corr-main-merge"}`
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/promote", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, "abc-123", gotCID)
+	assert.Equal(t, "corr-main-merge", gotPromotedTo)
+}
+
+func TestPromoteSlip_NotFound(t *testing.T) {
+	w := &mockWriter{
+		promoteSlipFn: func(_ context.Context, _, _ string) error {
+			return slippy.ErrSlipNotFound
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	body := `{"promoted_to":"corr-main"}`
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/promote", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestPromoteSlip_InternalError(t *testing.T) {
+	w := &mockWriter{
+		promoteSlipFn: func(_ context.Context, _, _ string) error {
+			return errors.New("database error")
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	body := `{"promoted_to":"corr-main"}`
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/promote", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// --- AbandonSlip tests ---
+
+func TestAbandonSlip_Success(t *testing.T) {
+	var gotCID, gotSupersededBy string
+	w := &mockWriter{
+		abandonSlipFn: func(_ context.Context, cID, supersededBy string) error {
+			gotCID, gotSupersededBy = cID, supersededBy
+			return nil
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	body := `{"superseded_by":"corr-new-push"}`
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/abandon", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, "abc-123", gotCID)
+	assert.Equal(t, "corr-new-push", gotSupersededBy)
+}
+
+func TestAbandonSlip_NotFound(t *testing.T) {
+	w := &mockWriter{
+		abandonSlipFn: func(_ context.Context, _, _ string) error {
+			return slippy.ErrSlipNotFound
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	body := `{"superseded_by":"corr-new"}`
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/abandon", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestAbandonSlip_InternalError(t *testing.T) {
+	w := &mockWriter{
+		abandonSlipFn: func(_ context.Context, _, _ string) error {
+			return errors.New("database error")
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	body := `{"superseded_by":"corr-new"}`
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/abandon", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)

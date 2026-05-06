@@ -19,12 +19,22 @@ import (
 
 // SlipWriteHandler holds dependencies for write route handlers.
 type SlipWriteHandler struct {
-	writer domain.SlipWriter
+	writer      domain.SlipWriter
+	invalidator domain.Invalidator // nil-safe; skipped when nil
 }
 
 // NewSlipWriteHandler creates a handler backed by the given writer.
-func NewSlipWriteHandler(writer domain.SlipWriter) *SlipWriteHandler {
-	return &SlipWriteHandler{writer: writer}
+// invalidator is optional — pass nil when caching is not enabled.
+func NewSlipWriteHandler(writer domain.SlipWriter, invalidator domain.Invalidator) *SlipWriteHandler {
+	return &SlipWriteHandler{writer: writer, invalidator: invalidator}
+}
+
+// invalidate evicts the cached slip entry after a successful write.
+// It is a no-op when no invalidator is configured.
+func (h *SlipWriteHandler) invalidate(ctx context.Context, correlationID string) {
+	if h.invalidator != nil {
+		h.invalidator.InvalidateByCorrelationID(ctx, correlationID)
+	}
 }
 
 // writeApiKeySecurity marks an operation as requiring write API key authentication.
@@ -120,6 +130,22 @@ func (s *SkipStepInput) reason() string {
 	return s.Body.Reason
 }
 
+// PromoteSlipInput captures path params and body for promoting a slip.
+type PromoteSlipInput struct {
+	CorrelationID string `path:"correlationID" doc:"Routing slip correlation ID"`
+	Body          struct {
+		PromotedTo string `json:"promoted_to" doc:"Correlation ID of the new slip on the target branch"`
+	}
+}
+
+// AbandonSlipInput captures path params and body for abandoning a slip.
+type AbandonSlipInput struct {
+	CorrelationID string `path:"correlationID" doc:"Routing slip correlation ID"`
+	Body          struct {
+		SupersededBy string `json:"superseded_by" doc:"Correlation ID of the newer slip that supersedes this one"`
+	}
+}
+
 // SetImageTagInput captures path params and body for setting an image tag.
 type SetImageTagInput struct {
 	CorrelationID string `path:"correlationID" doc:"Routing slip correlation ID"`
@@ -192,6 +218,26 @@ func RegisterWriteRoutes(api huma.API, h *SlipWriteHandler) {
 		DefaultStatus: http.StatusNoContent,
 		Tags:          []string{"v1"},
 	}, h.setImageTag)
+
+	huma.Register(api, huma.Operation{
+		OperationID:   "promote-slip",
+		Method:        http.MethodPost,
+		Path:          "/slips/{correlationID}/promote",
+		Summary:       "Mark a routing slip as promoted to another branch",
+		Security:      writeApiKeySecurity,
+		DefaultStatus: http.StatusNoContent,
+		Tags:          []string{"v1"},
+	}, h.promoteSlip)
+
+	huma.Register(api, huma.Operation{
+		OperationID:   "abandon-slip",
+		Method:        http.MethodPost,
+		Path:          "/slips/{correlationID}/abandon",
+		Summary:       "Mark a routing slip as abandoned, superseded by a newer push",
+		Security:      writeApiKeySecurity,
+		DefaultStatus: http.StatusNoContent,
+		Tags:          []string{"v1"},
+	}, h.abandonSlip)
 }
 
 // --- Handlers ------------------------------------------------------------
@@ -251,6 +297,7 @@ func (h *SlipWriteHandler) startStep(ctx context.Context, input *StepInput) (*st
 		recordHandlerError(span, err)
 		return nil, mapWriteError(err)
 	}
+	h.invalidate(ctx, input.CorrelationID)
 	span.SetStatus(codes.Ok, "")
 	return &struct{}{}, nil
 }
@@ -270,6 +317,7 @@ func (h *SlipWriteHandler) completeStep(ctx context.Context, input *StepInput) (
 		recordHandlerError(span, err)
 		return nil, mapWriteError(err)
 	}
+	h.invalidate(ctx, input.CorrelationID)
 	span.SetStatus(codes.Ok, "")
 	return &struct{}{}, nil
 }
@@ -294,6 +342,7 @@ func (h *SlipWriteHandler) failStep(ctx context.Context, input *FailStepInput) (
 		recordHandlerError(span, err)
 		return nil, mapWriteError(err)
 	}
+	h.invalidate(ctx, input.CorrelationID)
 	span.SetStatus(codes.Ok, "")
 	return &struct{}{}, nil
 }
@@ -318,6 +367,7 @@ func (h *SlipWriteHandler) skipStep(ctx context.Context, input *SkipStepInput) (
 		recordHandlerError(span, err)
 		return nil, mapWriteError(err)
 	}
+	h.invalidate(ctx, input.CorrelationID)
 	span.SetStatus(codes.Ok, "")
 	return &struct{}{}, nil
 }
@@ -341,6 +391,43 @@ func (h *SlipWriteHandler) setImageTag(ctx context.Context, input *SetImageTagIn
 		recordHandlerError(span, err)
 		return nil, mapWriteError(err)
 	}
+	h.invalidate(ctx, input.CorrelationID)
+	span.SetStatus(codes.Ok, "")
+	return &struct{}{}, nil
+}
+
+func (h *SlipWriteHandler) promoteSlip(ctx context.Context, input *PromoteSlipInput) (*struct{}, error) {
+	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.promoteSlip",
+		trace.WithAttributes(
+			attribute.String("slip.correlation_id", input.CorrelationID),
+			attribute.String("slip.promoted_to", input.Body.PromotedTo),
+		),
+	)
+	defer span.End()
+
+	if err := h.writer.PromoteSlip(ctx, input.CorrelationID, input.Body.PromotedTo); err != nil {
+		recordHandlerError(span, err)
+		return nil, mapWriteError(err)
+	}
+	h.invalidate(ctx, input.CorrelationID)
+	span.SetStatus(codes.Ok, "")
+	return &struct{}{}, nil
+}
+
+func (h *SlipWriteHandler) abandonSlip(ctx context.Context, input *AbandonSlipInput) (*struct{}, error) {
+	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.abandonSlip",
+		trace.WithAttributes(
+			attribute.String("slip.correlation_id", input.CorrelationID),
+			attribute.String("slip.superseded_by", input.Body.SupersededBy),
+		),
+	)
+	defer span.End()
+
+	if err := h.writer.AbandonSlip(ctx, input.CorrelationID, input.Body.SupersededBy); err != nil {
+		recordHandlerError(span, err)
+		return nil, mapWriteError(err)
+	}
+	h.invalidate(ctx, input.CorrelationID)
 	span.SetStatus(codes.Ok, "")
 	return &struct{}{}, nil
 }

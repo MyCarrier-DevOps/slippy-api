@@ -35,8 +35,9 @@ func main() {
 
 // buildHandler creates the fully-wired HTTP handler with auth, routes, and
 // OpenTelemetry instrumentation. This is extracted from run() for testability.
-// The imageTagReader, ciJobLogReader, automationTestResultsReader, and
-// automationTestsReader are optional — if nil, their endpoints are not registered.
+// The imageTagReader, ciJobLogReader, automationTestResultsReader,
+// automationTestsReader, and adminHandler are optional — if nil, their endpoints
+// are not registered.
 func buildHandler(
 	cfg *config.Config,
 	reader domain.SlipReader,
@@ -46,6 +47,7 @@ func buildHandler(
 	automationTestResultsReader domain.AutomationTestResultsReader,
 	automationTestsReader domain.AutomationTestsReader,
 	pipelineCfg *slippy.PipelineConfig,
+	adminHandler *handler.AdminHandler,
 ) http.Handler {
 	mux := http.NewServeMux()
 	apiConfig := huma.DefaultConfig("Slippy API", "1.0.0")
@@ -103,9 +105,19 @@ func buildHandler(
 	}
 
 	// Write routes: v1-only.
+	// Extract cache invalidator from reader when available (CachedSlipReader implements it).
 	if writer != nil {
-		wh := handler.NewSlipWriteHandler(writer)
+		var inv domain.Invalidator
+		if i, ok := reader.(domain.Invalidator); ok {
+			inv = i
+		}
+		wh := handler.NewSlipWriteHandler(writer, inv)
 		handler.RegisterWriteRoutes(v1Only, wh)
+	}
+
+	// Admin routes: v1-only (no auth required — diagnostic only).
+	if adminHandler != nil {
+		handler.RegisterAdminRoutes(v1Only, adminHandler)
 	}
 
 	// Wrap with OpenTelemetry instrumentation.
@@ -237,18 +249,18 @@ func run() error {
 	// Uses the same ClickHouse session to query autotest_results.TestResults.
 	automationTestsReader := infrastructure.NewAutomationTestsStore(store.Session())
 
-	// --- Optional write support ---
-	// When SLIPPY_WRITE_API_KEY is configured, expose write endpoints.
-	var writer domain.SlipWriter
-	if cfg.WriteAPIKey != "" {
-		writer = infrastructure.NewSlipWriterAdapter(slippyClient)
-		log.Printf("write endpoints enabled")
-	}
+	// --- Write support ---
+	// SLIPPY_WRITE_API_KEY is required; config.Load() already validated it.
+	writer := infrastructure.NewSlipWriterAdapter(slippyClient)
+	log.Printf("write endpoints enabled")
+
+	// --- Admin handler ---
+	adminH := handler.NewAdminHandler(store.Session(), cfg.SlipDatabase, pipelineCfg)
 
 	// --- HTTP Server ---
 	otelHandler := buildHandler(
 		cfg, reader, writer, imageTagReader, ciJobLogReader,
-		automationTestResultsReader, automationTestsReader, pipelineCfg,
+		automationTestResultsReader, automationTestsReader, pipelineCfg, adminH,
 	)
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),

@@ -1,6 +1,28 @@
 {
   "components": {
     "schemas": {
+      "AbandonSlipInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/AbandonSlipInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "superseded_by": {
+            "description": "Correlation ID of the newer slip that supersedes this one",
+            "type": "string"
+          }
+        },
+        "required": [
+          "superseded_by"
+        ],
+        "type": "object"
+      },
       "AncestryEntry": {
         "additionalProperties": false,
         "properties": {
@@ -831,6 +853,28 @@
         },
         "required": [
           "name"
+        ],
+        "type": "object"
+      },
+      "PromoteSlipInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/PromoteSlipInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "promoted_to": {
+            "description": "Correlation ID of the new slip on the target branch",
+            "type": "string"
+          }
+        },
+        "required": [
+          "promoted_to"
         ],
         "type": "object"
       },
@@ -1915,6 +1959,57 @@
         ]
       }
     },
+    "/slips/{correlationID}/abandon": {
+      "post": {
+        "operationId": "abandon-slip",
+        "parameters": [
+          {
+            "description": "Routing slip correlation ID",
+            "in": "path",
+            "name": "correlationID",
+            "required": true,
+            "schema": {
+              "description": "Routing slip correlation ID",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AbandonSlipInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "writeApiKey": []
+          }
+        ],
+        "summary": "Mark a routing slip as abandoned, superseded by a newer push",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
     "/slips/{correlationID}/components/{componentName}/image-tag": {
       "put": {
         "operationId": "set-image-tag",
@@ -2020,6 +2115,57 @@
           }
         ],
         "summary": "Resolve per-component image tags for a routing slip",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/slips/{correlationID}/promote": {
+      "post": {
+        "operationId": "promote-slip",
+        "parameters": [
+          {
+            "description": "Routing slip correlation ID",
+            "in": "path",
+            "name": "correlationID",
+            "required": true,
+            "schema": {
+              "description": "Routing slip correlation ID",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PromoteSlipInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "writeApiKey": []
+          }
+        ],
+        "summary": "Mark a routing slip as promoted to another branch",
         "tags": [
           "v1"
         ]

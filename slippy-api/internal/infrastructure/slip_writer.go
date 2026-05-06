@@ -199,6 +199,40 @@ func (a *SlipWriterAdapter) SetComponentImageTag(
 	return nil
 }
 
+func (a *SlipWriterAdapter) PromoteSlip(ctx context.Context, correlationID, promotedTo string) error {
+	ctx, span := otel.Tracer(writerTracerName).Start(ctx, "writer.PromoteSlip",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("slip.correlation_id", correlationID),
+			attribute.String("slip.promoted_to", promotedTo),
+		),
+	)
+	defer span.End()
+
+	if err := a.client.PromoteSlip(ctx, correlationID, promotedTo); err != nil {
+		recordWriterError(span, err)
+		return err
+	}
+	return nil
+}
+
+func (a *SlipWriterAdapter) AbandonSlip(ctx context.Context, correlationID, supersededBy string) error {
+	ctx, span := otel.Tracer(writerTracerName).Start(ctx, "writer.AbandonSlip",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("slip.correlation_id", correlationID),
+			attribute.String("slip.superseded_by", supersededBy),
+		),
+	)
+	defer span.End()
+
+	if err := a.client.AbandonSlip(ctx, correlationID, supersededBy); err != nil {
+		recordWriterError(span, err)
+		return err
+	}
+	return nil
+}
+
 // isPipelineStep reports whether a step transition should trigger a post-write
 // hydration. Returns true only when componentName is empty (not a component-level
 // event) and the step is not an aggregate step (aggregate steps invoke
