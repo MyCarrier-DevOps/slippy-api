@@ -608,9 +608,9 @@ func TestSlipWriterAdapter_IsPipelineStep_NilPipelineConfig(t *testing.T) {
 }
 
 // TestSlipWriterAdapter_CompleteStep_PipelineStep_DoesNotDoubleCheckCompletion asserts
-// that for a pipeline step (componentName == ""), the direct CompleteStep path fires
-// checkPipelineCompletion exactly once (inside UpdateStepWithStatus), then
-// hydrateAndPersist fires Load a second time. Total: exactly 2 Load calls.
+// that for a pipeline step (componentName == ""), the terminal guard fires one Load,
+// then the direct CompleteStep path fires checkPipelineCompletion (one Load), then
+// hydrateAndPersist fires one more Load. Total: exactly 3 Load calls.
 func TestSlipWriterAdapter_CompleteStep_PipelineStep_DoesNotDoubleCheckCompletion(t *testing.T) {
 	var loadCalls int
 	store := &mockSlipStore{
@@ -629,20 +629,20 @@ func TestSlipWriterAdapter_CompleteStep_PipelineStep_DoesNotDoubleCheckCompletio
 
 	err := adapter.CompleteStep(context.Background(), "abc-123", "push_parsed", "")
 	require.NoError(t, err)
-	// checkPipelineCompletion (1 Load) + hydrateAndPersist (1 Load) = 2 total.
-	// The old RunPostExecution path caused 3 Loads (double checkPipelineCompletion + hydrate).
+	// terminal guard (1 Load) + checkPipelineCompletion (1 Load) + hydrateAndPersist (1 Load) = 3 total.
+	// The guard adds one Load compared to the pre-guard implementation.
 	assert.Equal(
 		t,
-		2,
+		3,
 		loadCalls,
-		"expected exactly 2 Load calls: one from checkPipelineCompletion, one from hydrateAndPersist",
+		"expected exactly 3 Load calls: one from terminal guard, one from checkPipelineCompletion, one from hydrateAndPersist",
 	)
 }
 
 // TestSlipWriterAdapter_FailStep_PipelineStep_DoesNotDoubleCheckCompletion asserts
-// that for a pipeline step (componentName == ""), the direct FailStep path fires
-// checkPipelineCompletion exactly once (inside UpdateStepWithStatus), then
-// hydrateAndPersist fires Load a second time. Total: exactly 2 Load calls.
+// that for a pipeline step (componentName == ""), the terminal guard fires one Load,
+// then the direct FailStep path fires checkPipelineCompletion (one Load), then
+// hydrateAndPersist fires one more Load. Total: exactly 3 Load calls.
 func TestSlipWriterAdapter_FailStep_PipelineStep_DoesNotDoubleCheckCompletion(t *testing.T) {
 	var loadCalls int
 	store := &mockSlipStore{
@@ -661,13 +661,13 @@ func TestSlipWriterAdapter_FailStep_PipelineStep_DoesNotDoubleCheckCompletion(t 
 
 	err := adapter.FailStep(context.Background(), "abc-123", "push_parsed", "", "test failure")
 	require.NoError(t, err)
-	// checkPipelineCompletion (1 Load) + hydrateAndPersist (1 Load) = 2 total.
-	// The old RunPostExecution path caused 3 Loads (double checkPipelineCompletion + hydrate).
+	// terminal guard (1 Load) + checkPipelineCompletion (1 Load) + hydrateAndPersist (1 Load) = 3 total.
+	// The guard adds one Load compared to the pre-guard implementation.
 	assert.Equal(
 		t,
-		2,
+		3,
 		loadCalls,
-		"expected exactly 2 Load calls: one from checkPipelineCompletion, one from hydrateAndPersist",
+		"expected exactly 3 Load calls: one from terminal guard, one from checkPipelineCompletion, one from hydrateAndPersist",
 	)
 }
 
@@ -796,4 +796,178 @@ func TestSlipWriterAdapter_ComponentStep_DoesNotCallStoreUpdate(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, *updateCalled, "store.Update must not be called for component FailStep")
 	})
+}
+
+// --- Terminal-overwrite guard tests ---
+
+// TestSlipWriterAdapter_CompleteStep_AlreadyCompleted_NoOp_Idempotent verifies that
+// calling CompleteStep when the step is already Completed returns nil without
+// invoking the underlying client write path.
+func TestSlipWriterAdapter_CompleteStep_AlreadyCompleted_NoOp_Idempotent(t *testing.T) {
+	const id = "abc-123"
+	var writeCalled bool
+
+	store := &mockSlipStore{
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			return &slippy.Slip{
+				CorrelationID: id,
+				Status:        slippy.SlipStatusInProgress,
+				Steps:         map[string]slippy.Step{"push_parsed": {Status: slippy.StepStatusCompleted}},
+			}, nil
+		},
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			writeCalled = true
+			return nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	err := adapter.CompleteStep(context.Background(), id, "push_parsed", "")
+	require.NoError(t, err, "idempotent duplicate must return nil")
+	assert.False(t, writeCalled, "underlying write must not be called for idempotent no-op")
+}
+
+// TestSlipWriterAdapter_CompleteStep_AlreadyFailed_Returns409Sentinel verifies that
+// calling CompleteStep when the step is already Failed returns ErrStepAlreadyTerminal.
+func TestSlipWriterAdapter_CompleteStep_AlreadyFailed_Returns409Sentinel(t *testing.T) {
+	const id = "abc-123"
+
+	store := &mockSlipStore{
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			return &slippy.Slip{
+				CorrelationID: id,
+				Status:        slippy.SlipStatusFailed,
+				Steps:         map[string]slippy.Step{"push_parsed": {Status: slippy.StepStatusFailed}},
+			}, nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	err := adapter.CompleteStep(context.Background(), id, "push_parsed", "")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, domain.ErrStepAlreadyTerminal)
+
+	var termErr *domain.StepAlreadyTerminalError
+	require.ErrorAs(t, err, &termErr)
+	assert.Equal(t, "push_parsed", termErr.StepName)
+	assert.Equal(t, slippy.StepStatusFailed, termErr.CurrentStatus)
+	assert.Equal(t, slippy.StepStatusCompleted, termErr.RequestedStatus)
+}
+
+// TestSlipWriterAdapter_FailStep_AlreadyCompleted_Returns409Sentinel verifies that
+// calling FailStep when the step is already Completed returns ErrStepAlreadyTerminal.
+func TestSlipWriterAdapter_FailStep_AlreadyCompleted_Returns409Sentinel(t *testing.T) {
+	const id = "abc-123"
+
+	store := &mockSlipStore{
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			return &slippy.Slip{
+				CorrelationID: id,
+				Status:        slippy.SlipStatusCompleted,
+				Steps:         map[string]slippy.Step{"push_parsed": {Status: slippy.StepStatusCompleted}},
+			}, nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	err := adapter.FailStep(context.Background(), id, "push_parsed", "", "late failure")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, domain.ErrStepAlreadyTerminal)
+
+	var termErr *domain.StepAlreadyTerminalError
+	require.ErrorAs(t, err, &termErr)
+	assert.Equal(t, "push_parsed", termErr.StepName)
+	assert.Equal(t, slippy.StepStatusCompleted, termErr.CurrentStatus)
+	assert.Equal(t, slippy.StepStatusFailed, termErr.RequestedStatus)
+}
+
+// TestSlipWriterAdapter_CompleteStep_WithForceOverride_Bypasses verifies that a
+// context carrying WithForceOverwrite skips the terminal guard, allowing a
+// Completed→Failed overwrite.
+func TestSlipWriterAdapter_CompleteStep_WithForceOverride_Bypasses(t *testing.T) {
+	const id = "abc-123"
+	var writeCalled bool
+
+	store := &mockSlipStore{
+		// Guard would normally block this; with force-overwrite the guard Load is skipped.
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			// Called by checkPipelineCompletion inside the library (non-guard path).
+			return &slippy.Slip{CorrelationID: id, Status: slippy.SlipStatusInProgress}, nil
+		},
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			writeCalled = true
+			return nil
+		},
+		updateFn: func(_ context.Context, _ *slippy.Slip) error {
+			return nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	ctx := WithForceOverwrite(context.Background())
+	err := adapter.CompleteStep(ctx, id, "push_parsed", "")
+	require.NoError(t, err, "force-overwrite must bypass the terminal guard")
+	assert.True(t, writeCalled, "write must be called when force-overwrite is set")
+}
+
+// TestSlipWriterAdapter_CompleteStep_CurrentRunning_Proceeds verifies that
+// CompleteStep proceeds normally (no sentinel error) when the current status is
+// non-terminal (Running).
+func TestSlipWriterAdapter_CompleteStep_CurrentRunning_Proceeds(t *testing.T) {
+	const id = "abc-123"
+	var writeCalled bool
+
+	store := &mockSlipStore{
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			return &slippy.Slip{
+				CorrelationID: id,
+				Status:        slippy.SlipStatusInProgress,
+				Steps:         map[string]slippy.Step{"push_parsed": {Status: slippy.StepStatusRunning}},
+			}, nil
+		},
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			writeCalled = true
+			return nil
+		},
+		updateFn: func(_ context.Context, _ *slippy.Slip) error {
+			return nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	err := adapter.CompleteStep(context.Background(), id, "push_parsed", "")
+	require.NoError(t, err)
+	assert.True(t, writeCalled, "write must proceed when current status is non-terminal")
+}
+
+// TestSlipWriterAdapter_CompleteStep_ComponentStep_AlreadyFailed_Returns409Sentinel
+// verifies that the guard works for component-level steps using Aggregates.
+func TestSlipWriterAdapter_CompleteStep_ComponentStep_AlreadyFailed_Returns409Sentinel(t *testing.T) {
+	const id = "abc-123"
+
+	store := &mockSlipStore{
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			return &slippy.Slip{
+				CorrelationID: id,
+				Status:        slippy.SlipStatusFailed,
+				Aggregates: map[string][]slippy.ComponentStepData{
+					"builds_completed": {
+						{Component: "api", Status: slippy.StepStatusFailed},
+					},
+				},
+			}, nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	err := adapter.CompleteStep(context.Background(), id, "builds_completed", "api")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, domain.ErrStepAlreadyTerminal)
+
+	var termErr *domain.StepAlreadyTerminalError
+	require.ErrorAs(t, err, &termErr)
+	assert.Equal(t, "builds_completed", termErr.StepName)
+	assert.Equal(t, "api", termErr.ComponentName)
+	assert.Equal(t, slippy.StepStatusFailed, termErr.CurrentStatus)
+	assert.Equal(t, slippy.StepStatusCompleted, termErr.RequestedStatus)
 }
