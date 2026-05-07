@@ -42,6 +42,12 @@ type SlipReader interface {
 	FindAllByCommits(ctx context.Context, repository string, commits []string) ([]SlipWithCommit, error)
 }
 
+// Invalidator is a post-write hook that removes cached entries for a slip.
+// Implementations must treat failures as non-fatal and log rather than propagate.
+type Invalidator interface {
+	InvalidateByCorrelationID(ctx context.Context, correlationID string)
+}
+
 // SlipWriter defines the write interface for mutating routing slips.
 // Methods map to business-level operations used by pushhookparser (slip creation)
 // and Slippy CI CLI (pre-job/post-job step lifecycle).
@@ -64,4 +70,10 @@ type SlipWriter interface {
 
 	// SetComponentImageTag records the built container image tag for a component.
 	SetComponentImageTag(ctx context.Context, correlationID, componentName, imageTag string) error
+
+	// PromoteSlip marks a slip as promoted to another branch via a PR merge.
+	PromoteSlip(ctx context.Context, correlationID, promotedTo string) error
+
+	// AbandonSlip marks a slip as abandoned, superseded by a newer push.
+	AbandonSlip(ctx context.Context, correlationID, supersededBy string) error
 }

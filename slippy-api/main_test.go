@@ -83,6 +83,8 @@ func (s *stubSlipWriter) SkipStep(_ context.Context, _, _, _, _ string) error  {
 func (s *stubSlipWriter) SetComponentImageTag(_ context.Context, _, _, _ string) error {
 	return nil
 }
+func (s *stubSlipWriter) PromoteSlip(_ context.Context, _, _ string) error { return nil }
+func (s *stubSlipWriter) AbandonSlip(_ context.Context, _, _ string) error { return nil }
 
 type stubCIJobLogReader struct{}
 
@@ -121,7 +123,7 @@ func TestBuildHandler_HealthEndpoint(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
 	require.NotNil(t, h)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -139,7 +141,7 @@ func TestBuildHandler_AuthRequired(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
 
 	// Request without auth header should be rejected
 	req := httptest.NewRequest(http.MethodGet, "/slips/test-corr-001", nil)
@@ -152,7 +154,7 @@ func TestBuildHandler_AuthSuccess(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
 
 	// Request with valid auth header should succeed
 	req := httptest.NewRequest(http.MethodGet, "/slips/test-corr-001", nil)
@@ -170,7 +172,7 @@ func TestBuildHandler_OpenAPISpec(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
 	w := httptest.NewRecorder()
@@ -192,7 +194,7 @@ func TestBuildHandler_V1HealthEndpoint(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
 	w := httptest.NewRecorder()
@@ -209,7 +211,7 @@ func TestBuildHandler_V1AuthRequired(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/slips/test-corr-001", nil)
 	w := httptest.NewRecorder()
@@ -221,7 +223,7 @@ func TestBuildHandler_V1AuthSuccess(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/slips/test-corr-001", nil)
 	req.Header.Set("Authorization", "Bearer test-key")
@@ -238,7 +240,7 @@ func TestBuildHandler_OpenAPISpecContainsV1Routes(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil)
+	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
 	w := httptest.NewRecorder()
@@ -275,6 +277,7 @@ func TestBuildHandler_WithAllOptionalHandlers(t *testing.T) {
 		&stubCIJobLogReader{},
 		&stubAutomationTestResultsReader{},
 		&stubAutomationTestsReader{},
+		nil,
 		nil,
 	)
 	require.NotNil(t, h)
@@ -335,6 +338,7 @@ func TestGenerateOpenAPISpec(t *testing.T) {
 		&stubCIJobLogReader{},
 		&stubAutomationTestResultsReader{},
 		&stubAutomationTestsReader{},
+		nil,
 		nil,
 	)
 
@@ -556,7 +560,7 @@ func TestConnectCache_PassesCorrectOptions(t *testing.T) {
 func clearRunEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
-		"SLIPPY_API_KEY", "PORT",
+		"SLIPPY_API_KEY", "SLIPPY_WRITE_API_KEY", "PORT",
 		"DRAGONFLY_HOST", "DRAGONFLY_PORT", "DRAGONFLY_PASSWORD",
 		"CACHE_TTL",
 		"SLIPPY_GITHUB_APP_ID", "SLIPPY_GITHUB_APP_PRIVATE_KEY",
@@ -581,6 +585,7 @@ func TestRun_MissingAPIKey(t *testing.T) {
 func TestRun_MissingPipelineConfig(t *testing.T) {
 	clearRunEnv(t)
 	t.Setenv("SLIPPY_API_KEY", "test-key")
+	t.Setenv("SLIPPY_WRITE_API_KEY", "write-key")
 	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
 	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
 
@@ -594,6 +599,7 @@ func TestRun_MissingPipelineConfig(t *testing.T) {
 func TestRun_MissingClickhouseConfig(t *testing.T) {
 	clearRunEnv(t)
 	t.Setenv("SLIPPY_API_KEY", "test-key")
+	t.Setenv("SLIPPY_WRITE_API_KEY", "write-key")
 	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
 	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
 	// Provide a valid inline pipeline config so we get past the pipeline step
