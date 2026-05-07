@@ -273,6 +273,7 @@ func (h *SlipWriteHandler) createSlip(ctx context.Context, input *CreateSlipInpu
 	}
 
 	span.SetStatus(codes.Ok, "")
+	h.invalidate(ctx, input.Body.CorrelationID)
 	out := &CreateSlipOutput{}
 	out.Body.Slip = result.Slip
 	out.Body.AncestryResolved = result.AncestryResolved
