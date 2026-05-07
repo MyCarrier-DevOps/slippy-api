@@ -17,6 +17,30 @@ import (
 // wrapperVersion is embedded in the default User-Agent header.
 const wrapperVersion = "1.0.0"
 
+// correlationIDKey is the unexported context key type for correlation IDs.
+// Using a private struct avoids collisions with keys from other packages.
+type correlationIDKey struct{}
+
+// ContextWithCorrelationID returns a copy of ctx carrying the given correlation ID.
+// Request editors (the logger, future tracing middleware) read this value when present.
+// If id is empty, ctx is returned unchanged.
+func ContextWithCorrelationID(ctx context.Context, id string) context.Context {
+	if id == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, correlationIDKey{}, id)
+}
+
+// CorrelationIDFromContext returns the correlation ID stored in ctx by
+// ContextWithCorrelationID, or "" if none was set.
+func CorrelationIDFromContext(ctx context.Context) string {
+	v, ok := ctx.Value(correlationIDKey{}).(string)
+	if !ok {
+		return ""
+	}
+	return v
+}
+
 // wrapperConfig holds all configuration for a WrappedClient.
 type wrapperConfig struct {
 	token       string
@@ -172,12 +196,19 @@ func buildTracingEditor(tracer trace.Tracer) RequestEditorFn {
 }
 
 // buildLoggingEditor returns a RequestEditorFn that emits a structured log entry.
+// It resolves the correlation ID by checking the context first (set via
+// ContextWithCorrelationID), then falling back to extractCorrelationID on the
+// URL path for backwards compatibility.
 func buildLoggingEditor(logger *slog.Logger) RequestEditorFn {
-	return func(_ context.Context, req *http.Request) error {
+	return func(ctx context.Context, req *http.Request) error {
+		correlationID := CorrelationIDFromContext(ctx)
+		if correlationID == "" {
+			correlationID = extractCorrelationID(req.URL.Path)
+		}
 		logger.Info("slippy-client request",
 			"method", req.Method,
 			"path", req.URL.Path,
-			"correlation_id", extractCorrelationID(req.URL.Path),
+			"correlation_id", correlationID,
 			"timestamp_utc", time.Now().UTC().Format(time.RFC3339),
 		)
 		return nil

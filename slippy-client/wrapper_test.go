@@ -24,24 +24,7 @@ func init() {
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}))
 }
 
-// newTestServer creates a httptest.Server that captures incoming requests.
-// The server responds with the provided status code and JSON body.
-func newTestServer(t *testing.T, status int, body any) (*httptest.Server, *http.Request) {
-	t.Helper()
-	var capturedReq *http.Request
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedReq = r
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(status)
-		if body != nil {
-			json.NewEncoder(w).Encode(body)
-		}
-	}))
-	t.Cleanup(srv.Close)
-	return srv, capturedReq
-}
-
-// captureRequest returns the last captured request from a handler function.
+// newCapturingServer creates a httptest.Server that captures incoming requests.
 func newCapturingServer(t *testing.T, status int, body any) (*httptest.Server, *[]*http.Request) {
 	t.Helper()
 	var reqs []*http.Request
@@ -221,6 +204,99 @@ func TestNewWrappedClient_Defaults(t *testing.T) {
 	// User-Agent should default to "slippy-client/slippy-client/..."
 	ua := (*reqs)[0].Header.Get("User-Agent")
 	assert.Contains(t, ua, "slippy-client")
+}
+
+// --- correlation ID context helpers ---
+
+// TestContextWithCorrelationID_EmptyID verifies that an empty string is a no-op.
+func TestContextWithCorrelationID_EmptyID(t *testing.T) {
+	ctx := context.Background()
+	result := slippyclient.ContextWithCorrelationID(ctx, "")
+	assert.Equal(t, ctx, result, "expected same context when id is empty")
+}
+
+// TestCorrelationIDFromContext_ReturnsStoredValue verifies the round-trip.
+func TestCorrelationIDFromContext_ReturnsStoredValue(t *testing.T) {
+	ctx := slippyclient.ContextWithCorrelationID(context.Background(), "abc-123")
+	assert.Equal(t, "abc-123", slippyclient.CorrelationIDFromContext(ctx))
+}
+
+// TestCorrelationIDFromContext_AbsentReturnsEmpty verifies the zero value.
+func TestCorrelationIDFromContext_AbsentReturnsEmpty(t *testing.T) {
+	assert.Equal(t, "", slippyclient.CorrelationIDFromContext(context.Background()))
+}
+
+// TestWrappedClient_Logger_UsesContextCorrelationID verifies that when a
+// correlation ID is carried in the context, the logger emits that value.
+func TestWrappedClient_Logger_UsesContextCorrelationID(t *testing.T) {
+	srv, _ := newCapturingServer(t, http.StatusOK, map[string]string{"status": "ok"})
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+
+	client, err := slippyclient.NewWrappedClient(srv.URL,
+		slippyclient.WithLogger(logger),
+		slippyclient.WithTracerProvider(noop.NewTracerProvider()),
+	)
+	require.NoError(t, err)
+
+	ctx := slippyclient.ContextWithCorrelationID(context.Background(), "ctx-corr-id-xyz")
+	_, err = client.HealthCheckWithResponse(ctx)
+	require.NoError(t, err)
+
+	logOutput := buf.String()
+	assert.Contains(t, logOutput, "ctx-corr-id-xyz", "expected context correlation ID in log output")
+}
+
+// TestWrappedClient_Logger_FallsBackToURLPath verifies that when no context
+// correlation ID is present, the logger falls back to extractCorrelationID.
+func TestWrappedClient_Logger_FallsBackToURLPath(t *testing.T) {
+	const slipID = "slip-fallback-42"
+	srv, _ := newCapturingServer(t, http.StatusOK, map[string]string{"id": slipID})
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+
+	client, err := slippyclient.NewWrappedClient(srv.URL,
+		slippyclient.WithLogger(logger),
+		slippyclient.WithTracerProvider(noop.NewTracerProvider()),
+	)
+	require.NoError(t, err)
+
+	// GetSlipWithResponse targets /slips/{correlationId} — URL path carries the ID.
+	_, err = client.GetSlipWithResponse(context.Background(), slipID)
+	require.NoError(t, err)
+
+	logOutput := buf.String()
+	assert.Contains(t, logOutput, slipID, "expected slip ID extracted from URL path in log output")
+}
+
+// TestWrappedClient_Logger_CtxOverridesURLForByCommitPath verifies the bug fix:
+// by-commit paths return "" from extractCorrelationID, so the context value must
+// be used instead.
+func TestWrappedClient_Logger_CtxOverridesURLForByCommitPath(t *testing.T) {
+	srv, _ := newCapturingServer(t, http.StatusOK, []any{})
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+
+	client, err := slippyclient.NewWrappedClient(srv.URL,
+		slippyclient.WithLogger(logger),
+		slippyclient.WithTracerProvider(noop.NewTracerProvider()),
+	)
+	require.NoError(t, err)
+
+	// GetSlipByCommitWithResponse targets /slips/by-commit/{owner}/{repo}/{commitSha}.
+	// The path segment after "slips" is "by-commit", so extractCorrelationID returns "".
+	// With the ctx value set, the logger must use that instead.
+	// We ignore the response unmarshal error — the request editor (and log) fires before
+	// the response is decoded, so the log assertion is still valid.
+	ctx := slippyclient.ContextWithCorrelationID(context.Background(), "pipeline-run-999")
+	_, _ = client.GetSlipByCommitWithResponse(ctx, "my-org", "my-repo", "abc123sha")
+
+	logOutput := buf.String()
+	assert.Contains(t, logOutput, "pipeline-run-999",
+		"expected context correlation ID in log for by-commit path (URL fallback would be empty)")
 }
 
 // --- helpers ---
