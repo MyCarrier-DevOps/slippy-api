@@ -653,6 +653,20 @@ func TestMapWriteError(t *testing.T) {
 		},
 		{"slip error", slippy.NewSlipError("create", "id", errors.New("fail")), http.StatusUnprocessableEntity},
 		{"generic error", errors.New("something broke"), http.StatusInternalServerError},
+		{
+			"step already terminal (typed error)",
+			&domain.StepAlreadyTerminalError{
+				StepName:        "push_parsed",
+				CurrentStatus:   "failed",
+				RequestedStatus: "completed",
+			},
+			http.StatusConflict,
+		},
+		{
+			"step already terminal (sentinel only)",
+			domain.ErrStepAlreadyTerminal,
+			http.StatusConflict,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -662,4 +676,78 @@ func TestMapWriteError(t *testing.T) {
 			assert.Equal(t, tt.wantStatus, he.GetStatus())
 		})
 	}
+}
+
+// TestCompleteStep_Returns409_WhenAlreadyTerminal verifies that the handler
+// returns 409 Conflict when the writer returns ErrStepAlreadyTerminal.
+func TestCompleteStep_Returns409_WhenAlreadyTerminal(t *testing.T) {
+	w := &mockWriter{
+		completeStepFn: func(_ context.Context, _, _, _ string) error {
+			return &domain.StepAlreadyTerminalError{
+				StepName:        "push_parsed",
+				CurrentStatus:   "failed",
+				RequestedStatus: "completed",
+			}
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/push_parsed/complete", nil)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusConflict, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	// Huma error body has "status" and "title" fields.
+	assert.EqualValues(t, http.StatusConflict, resp["status"])
+}
+
+// TestCompleteStep_ForceOverwrite_CallsWriterWithForceCtx verifies that when
+// X-Force-Overwrite: true is sent, the writer is still called (the handler does
+// not itself short-circuit). The guard bypass is exercised at the infrastructure
+// layer; here we confirm the handler path reaches the writer.
+func TestCompleteStep_ForceOverwrite_CallsWriter(t *testing.T) {
+	var called bool
+	w := &mockWriter{
+		completeStepFn: func(_ context.Context, _, _, _ string) error {
+			called = true
+			return nil
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/push_parsed/complete", nil)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Force-Overwrite", "true")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.True(t, called, "writer must be called when X-Force-Overwrite is set")
+}
+
+// TestFailStep_Returns409_WhenAlreadyTerminal verifies that the handler
+// returns 409 Conflict when FailStep detects a terminal conflict.
+func TestFailStep_Returns409_WhenAlreadyTerminal(t *testing.T) {
+	w := &mockWriter{
+		failStepFn: func(_ context.Context, _, _, _, _ string) error {
+			return &domain.StepAlreadyTerminalError{
+				StepName:        "push_parsed",
+				CurrentStatus:   "completed",
+				RequestedStatus: "failed",
+			}
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	body := `{"reason":"late failure"}`
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/push_parsed/fail", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusConflict, rec.Code)
 }

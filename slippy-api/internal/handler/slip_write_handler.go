@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
 
 	"github.com/MyCarrier-DevOps/slippy-api/internal/domain"
+	"github.com/MyCarrier-DevOps/slippy-api/internal/infrastructure"
 )
 
 // SlipWriteHandler holds dependencies for write route handlers.
@@ -81,9 +83,10 @@ type StepBody struct {
 // Body is a pointer so that the request body is optional in the OpenAPI spec —
 // pipeline-level steps don't need a body at all.
 type StepInput struct {
-	CorrelationID string `path:"correlationID" doc:"Routing slip correlation ID"`
-	StepName      string `path:"stepName"      doc:"Pipeline step name"`
-	Body          *StepBody
+	CorrelationID  string `path:"correlationID" doc:"Routing slip correlation ID"`
+	StepName       string `path:"stepName"      doc:"Pipeline step name"`
+	ForceOverwrite string `header:"X-Force-Overwrite" required:"false" doc:"Bypass terminal-overwrite guard"` //nolint:golines // struct tag cannot be split
+	Body           *StepBody
 }
 
 // componentName returns the component name from the optional body, or empty string if no body.
@@ -96,9 +99,10 @@ func (s *StepInput) componentName() string {
 
 // FailStepInput captures path params and body for step failure.
 type FailStepInput struct {
-	CorrelationID string `path:"correlationID" doc:"Routing slip correlation ID"`
-	StepName      string `path:"stepName"      doc:"Pipeline step name"`
-	Body          struct {
+	CorrelationID  string `path:"correlationID" doc:"Routing slip correlation ID"`
+	StepName       string `path:"stepName"      doc:"Pipeline step name"`
+	ForceOverwrite string `header:"X-Force-Overwrite" required:"false" doc:"Bypass terminal-overwrite guard"` //nolint:golines // struct tag cannot be split
+	Body           struct {
 		ComponentName string `json:"component_name,omitempty" doc:"Component name (required for aggregate steps, empty for pipeline steps)"`
 		Reason        string `json:"reason" doc:"Failure reason"`
 	}
@@ -314,6 +318,9 @@ func (h *SlipWriteHandler) completeStep(ctx context.Context, input *StepInput) (
 	)
 	defer span.End()
 
+	if strings.EqualFold(input.ForceOverwrite, "true") {
+		ctx = infrastructure.WithForceOverwrite(ctx)
+	}
 	if err := h.writer.CompleteStep(ctx, input.CorrelationID, input.StepName, componentName); err != nil {
 		recordHandlerError(span, err)
 		return nil, mapWriteError(err)
@@ -333,6 +340,9 @@ func (h *SlipWriteHandler) failStep(ctx context.Context, input *FailStepInput) (
 	)
 	defer span.End()
 
+	if strings.EqualFold(input.ForceOverwrite, "true") {
+		ctx = infrastructure.WithForceOverwrite(ctx)
+	}
 	if err := h.writer.FailStep(
 		ctx,
 		input.CorrelationID,
@@ -438,6 +448,15 @@ func (h *SlipWriteHandler) abandonSlip(ctx context.Context, input *AbandonSlipIn
 // mapWriteError converts domain/store errors to huma status errors for write ops.
 func mapWriteError(err error) error {
 	switch {
+	case errors.Is(err, domain.ErrStepAlreadyTerminal):
+		var termErr *domain.StepAlreadyTerminalError
+		if errors.As(err, &termErr) {
+			return huma.NewError(http.StatusConflict, termErr.Error(),
+				fmt.Errorf("step_name=%s current_status=%s requested_status=%s",
+					termErr.StepName, termErr.CurrentStatus, termErr.RequestedStatus),
+			)
+		}
+		return huma.NewError(http.StatusConflict, err.Error())
 	case errors.Is(err, slippy.ErrSlipNotFound):
 		return huma.NewError(http.StatusNotFound, "slip not found")
 	case errors.Is(err, slippy.ErrInvalidCorrelationID):

@@ -2252,6 +2252,15 @@
               "description": "Pipeline step name",
               "type": "string"
             }
+          },
+          {
+            "description": "Bypass terminal-overwrite guard",
+            "in": "header",
+            "name": "X-Force-Overwrite",
+            "schema": {
+              "description": "Bypass terminal-overwrite guard",
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -2310,6 +2319,15 @@
             "required": true,
             "schema": {
               "description": "Pipeline step name",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Bypass terminal-overwrite guard",
+            "in": "header",
+            "name": "X-Force-Overwrite",
+            "schema": {
+              "description": "Bypass terminal-overwrite guard",
               "type": "string"
             }
           }
@@ -2431,6 +2449,15 @@
             "required": true,
             "schema": {
               "description": "Pipeline step name",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Bypass terminal-overwrite guard",
+            "in": "header",
+            "name": "X-Force-Overwrite",
+            "schema": {
+              "description": "Bypass terminal-overwrite guard",
               "type": "string"
             }
           }

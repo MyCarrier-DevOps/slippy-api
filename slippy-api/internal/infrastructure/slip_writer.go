@@ -14,6 +14,22 @@ import (
 	"github.com/MyCarrier-DevOps/slippy-api/internal/domain"
 )
 
+// forceOverwriteKey is the unexported context key for bypassing the terminal guard.
+type forceOverwriteKey struct{}
+
+// WithForceOverwrite returns a context that instructs SlipWriterAdapter to skip
+// the terminal-overwrite guard on CompleteStep / FailStep. Use sparingly — the
+// primary consumer is an explicit operator escape hatch via HTTP header.
+func WithForceOverwrite(ctx context.Context) context.Context {
+	return context.WithValue(ctx, forceOverwriteKey{}, true)
+}
+
+// isForceOverwrite reports whether the context carries the force-overwrite flag.
+func isForceOverwrite(ctx context.Context) bool {
+	v, ok := ctx.Value(forceOverwriteKey{}).(bool)
+	return ok && v
+}
+
 // writerTracerName is the instrumentation scope for write operations.
 const writerTracerName = "slippy-api/writer"
 
@@ -89,6 +105,18 @@ func (a *SlipWriterAdapter) CompleteStep(ctx context.Context, correlationID, ste
 	)
 	defer span.End()
 
+	// Terminal-overwrite guard: prevent silently clobbering an already-terminal step.
+	if !isForceOverwrite(ctx) {
+		idempotent, err := a.checkTerminalGuard(ctx, correlationID, stepName, componentName, slippy.StepStatusCompleted)
+		if err != nil {
+			recordWriterError(span, err)
+			return err
+		}
+		if idempotent {
+			return nil // same status already recorded — safe no-op
+		}
+	}
+
 	// Pipeline-level terminal events route directly: steps.go:101 guard fires
 	// checkPipelineCompletion automatically, saving a redundant Load.
 	// Component events MUST go through RunPostExecution to drive aggregate recomputation.
@@ -126,6 +154,18 @@ func (a *SlipWriterAdapter) FailStep(ctx context.Context, correlationID, stepNam
 		),
 	)
 	defer span.End()
+
+	// Terminal-overwrite guard: prevent silently clobbering an already-terminal step.
+	if !isForceOverwrite(ctx) {
+		idempotent, err := a.checkTerminalGuard(ctx, correlationID, stepName, componentName, slippy.StepStatusFailed)
+		if err != nil {
+			recordWriterError(span, err)
+			return err
+		}
+		if idempotent {
+			return nil // same status already recorded — safe no-op
+		}
+	}
 
 	// Pipeline-level terminal events route directly: steps.go:101 guard fires
 	// checkPipelineCompletion automatically, saving a redundant Load.
@@ -281,6 +321,70 @@ func (a *SlipWriterAdapter) hydrateAndPersist(ctx context.Context, correlationID
 	}
 
 	return nil
+}
+
+// checkTerminalGuard loads the current slip and checks whether (stepName,
+// componentName) is already in a terminal state.
+//
+// Returns:
+//   - (true, nil)  — current status equals requestedStatus; caller should no-op (idempotent).
+//   - (false, err) — current status is terminal but differs; returns *domain.StepAlreadyTerminalError.
+//   - (false, nil) — not yet terminal; caller should proceed with the write.
+//
+// If the slip cannot be loaded (e.g. not found, store error), the error is
+// returned directly so the outer operation fails with a meaningful error.
+// Absence of the step in the slip (pending/unknown) is treated as non-terminal.
+func (a *SlipWriterAdapter) checkTerminalGuard(
+	ctx context.Context,
+	correlationID, stepName, componentName string,
+	requestedStatus slippy.StepStatus,
+) (idempotent bool, err error) {
+	slip, err := a.client.Load(ctx, correlationID)
+	if err != nil {
+		return false, fmt.Errorf("checkTerminalGuard: load failed: %w", err)
+	}
+
+	currentStatus := a.resolveCurrentStatus(slip, stepName, componentName)
+	if !currentStatus.IsTerminal() {
+		return false, nil
+	}
+	if currentStatus == requestedStatus {
+		return true, nil // idempotent: same terminal status already written
+	}
+	return false, &domain.StepAlreadyTerminalError{
+		StepName:        stepName,
+		ComponentName:   componentName,
+		CurrentStatus:   currentStatus,
+		RequestedStatus: requestedStatus,
+	}
+}
+
+// resolveCurrentStatus returns the current StepStatus for the (stepName,
+// componentName) pair from a loaded slip.
+//
+// For pipeline-level steps (componentName == ""), it looks up slip.Steps[stepName].
+// For component-level steps (componentName != ""), it scans slip.Aggregates[stepName]
+// for a matching component entry.
+//
+// Returns the empty StepStatus ("") when the step has no recorded state, which
+// IsTerminal() returns false for, so the guard will not fire.
+func (a *SlipWriterAdapter) resolveCurrentStatus(
+	slip *slippy.Slip,
+	stepName, componentName string,
+) slippy.StepStatus {
+	if componentName == "" {
+		if step, ok := slip.Steps[stepName]; ok {
+			return step.Status
+		}
+		return ""
+	}
+	// Component-level step: search aggregates.
+	for _, compData := range slip.Aggregates[stepName] {
+		if compData.Component == componentName {
+			return compData.Status
+		}
+	}
+	return ""
 }
 
 // recordWriterError records an error on a span, distinguishing client errors
