@@ -2,6 +2,8 @@ module github.com/MyCarrier-DevOps/slippy-api/slippy-client
 
 go 1.26
 
+toolchain go1.26.3
+
 require (
 	github.com/oapi-codegen/runtime v1.4.0
 	github.com/stretchr/testify v1.11.1
