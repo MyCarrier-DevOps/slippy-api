@@ -34,8 +34,9 @@ func NewCachedSlipReader(reader domain.SlipReader, client redis.Cmdable, ttl tim
 	}
 }
 
-// Compile-time interface compliance check.
+// Compile-time interface compliance checks.
 var _ domain.SlipReader = (*CachedSlipReader)(nil)
+var _ domain.Invalidator = (*CachedSlipReader)(nil)
 
 // ---------------------------------------------------------------------------
 // SlipReader delegation — cache logic will be layered on in a later iteration.
@@ -132,3 +133,8 @@ func (c *CachedSlipReader) FindAllByCommits(
 	}
 	return results, nil
 }
+
+// InvalidateByCorrelationID removes cached slip entries for the given correlation ID.
+// All reads are currently passthroughs (no entries are stored in Redis yet), so this
+// is a no-op placeholder wired for when actual cache population is added.
+func (c *CachedSlipReader) InvalidateByCorrelationID(_ context.Context, _ string) {}
