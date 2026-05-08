@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -126,12 +127,21 @@ func (h *SlipHandler) getSlip(ctx context.Context, input *GetSlipInput) (*GetSli
 	)
 	defer span.End()
 
+	slog.InfoContext(ctx, "slip: get by correlation_id",
+		"correlation_id", input.CorrelationID)
+
 	slip, err := h.reader.Load(ctx, input.CorrelationID)
 	if err != nil {
 		recordHandlerError(span, err)
+		slog.ErrorContext(ctx, "slip: load failed",
+			"correlation_id", input.CorrelationID, "error", err)
 		return nil, mapError(err)
 	}
 	span.SetStatus(codes.Ok, "")
+	slog.InfoContext(ctx, "slip: loaded",
+		"correlation_id", input.CorrelationID,
+		"repository", slip.Repository,
+		"status", string(slip.Status))
 	return &GetSlipOutput{Body: slip}, nil
 }
 
@@ -145,12 +155,27 @@ func (h *SlipHandler) getSlipByCommit(ctx context.Context, input *GetSlipByCommi
 	)
 	defer span.End()
 
+	slog.InfoContext(ctx, "slip: get by commit",
+		"requested_repository", repository, "commit_sha", input.CommitSHA)
+
 	slip, err := h.reader.LoadByCommit(ctx, repository, input.CommitSHA)
 	if err != nil {
 		recordHandlerError(span, err)
+		slog.ErrorContext(ctx, "slip: load by commit failed",
+			"requested_repository", repository, "commit_sha", input.CommitSHA, "error", err)
 		return nil, mapError(err)
 	}
+	span.SetAttributes(
+		attribute.String("slip.correlation_id", slip.CorrelationID),
+		attribute.String("slip.slip_repository", slip.Repository),
+	)
 	span.SetStatus(codes.Ok, "")
+	slog.InfoContext(ctx, "slip: loaded by commit",
+		"requested_repository", repository,
+		"slip_repository", slip.Repository,
+		"commit_sha", input.CommitSHA,
+		"correlation_id", slip.CorrelationID,
+		"status", string(slip.Status))
 	return &GetSlipOutput{Body: slip}, nil
 }
 
@@ -163,13 +188,30 @@ func (h *SlipHandler) findByCommits(ctx context.Context, input *FindByCommitsInp
 	)
 	defer span.End()
 
+	slog.InfoContext(ctx, "slip: find by commits",
+		"requested_repository", input.Body.Repository,
+		"commits_count", len(input.Body.Commits))
+
 	slip, commit, err := h.reader.FindByCommits(ctx, input.Body.Repository, input.Body.Commits)
 	if err != nil {
 		recordHandlerError(span, err)
+		slog.ErrorContext(ctx, "slip: find by commits failed",
+			"requested_repository", input.Body.Repository,
+			"commits_count", len(input.Body.Commits), "error", err)
 		return nil, mapError(err)
 	}
-	span.SetAttributes(attribute.String("slip.matched_commit", commit))
+	span.SetAttributes(
+		attribute.String("slip.matched_commit", commit),
+		attribute.String("slip.correlation_id", slip.CorrelationID),
+		attribute.String("slip.slip_repository", slip.Repository),
+	)
 	span.SetStatus(codes.Ok, "")
+	slog.InfoContext(ctx, "slip: matched by commit",
+		"requested_repository", input.Body.Repository,
+		"slip_repository", slip.Repository,
+		"matched_commit", commit,
+		"correlation_id", slip.CorrelationID,
+		"status", string(slip.Status))
 	out := &FindByCommitsOutput{}
 	out.Body.Slip = slip
 	out.Body.MatchedCommit = commit
@@ -188,13 +230,24 @@ func (h *SlipHandler) findAllByCommits(
 	)
 	defer span.End()
 
+	slog.InfoContext(ctx, "slip: find all by commits",
+		"requested_repository", input.Body.Repository,
+		"commits_count", len(input.Body.Commits))
+
 	results, err := h.reader.FindAllByCommits(ctx, input.Body.Repository, input.Body.Commits)
 	if err != nil {
 		recordHandlerError(span, err)
+		slog.ErrorContext(ctx, "slip: find all by commits failed",
+			"requested_repository", input.Body.Repository,
+			"commits_count", len(input.Body.Commits), "error", err)
 		return nil, mapError(err)
 	}
 	span.SetAttributes(attribute.Int("slip.results_count", len(results)))
 	span.SetStatus(codes.Ok, "")
+	slog.InfoContext(ctx, "slip: find all by commits returned",
+		"requested_repository", input.Body.Repository,
+		"commits_count", len(input.Body.Commits),
+		"results_count", len(results))
 	items := make([]FindAllByCommitsItem, len(results))
 	for i, r := range results {
 		items[i] = FindAllByCommitsItem{

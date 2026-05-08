@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -226,6 +227,8 @@ func (s *AutomationTestsStore) QueryTestsByCorrelation(
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, fmt.Sprintf("query failed: %v", err))
+		slog.ErrorContext(ctx, "automation_tests: query failed",
+			"correlation_id", q.CorrelationID.String(), "error", err)
 		return nil, fmt.Errorf("failed to query automation tests: %w", err)
 	}
 	defer func() {
@@ -258,6 +261,10 @@ func (s *AutomationTestsStore) QueryTestsByCorrelation(
 
 	span.SetAttributes(attribute.Int("test.result_count", result.Count))
 	span.SetStatus(codes.Ok, "")
+	slog.DebugContext(ctx, "automation_tests: query returned",
+		"correlation_id", q.CorrelationID.String(),
+		"result_count", result.Count,
+		"has_next_cursor", result.NextCursor != "")
 	return result, nil
 }
 
@@ -312,6 +319,9 @@ func (s *AutomationTestsStore) LoadTestByCorrelation(
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, fmt.Sprintf("query failed: %v", err))
+		slog.ErrorContext(ctx, "automation_test: load failed",
+			"correlation_id", q.CorrelationID.String(),
+			"test_id", q.TestID.String(), "error", err)
 		return nil, fmt.Errorf("failed to load automation test: %w", err)
 	}
 	defer func() {
@@ -325,6 +335,8 @@ func (s *AutomationTestsStore) LoadTestByCorrelation(
 			return nil, fmt.Errorf("error iterating automation test rows: %w", rowsErr)
 		}
 		span.SetStatus(codes.Ok, "not found")
+		slog.InfoContext(ctx, "automation_test: not found",
+			"correlation_id", q.CorrelationID.String(), "test_id", q.TestID.String())
 		return nil, domain.ErrTestNotFound
 	}
 
@@ -338,6 +350,8 @@ func (s *AutomationTestsStore) LoadTestByCorrelation(
 	}
 
 	span.SetStatus(codes.Ok, "")
+	slog.DebugContext(ctx, "automation_test: loaded",
+		"correlation_id", q.CorrelationID.String(), "test_id", q.TestID.String())
 	return &row, nil
 }
 

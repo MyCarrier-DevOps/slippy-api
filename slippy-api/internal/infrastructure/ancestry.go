@@ -49,7 +49,31 @@ func NewSlipResolverAdapter(
 var _ domain.SlipReader = (*SlipResolverAdapter)(nil)
 
 func (a *SlipResolverAdapter) Load(ctx context.Context, correlationID string) (*domain.Slip, error) {
-	return a.reader.Load(ctx, correlationID)
+	ctx, span := otel.Tracer(ancestryTracerName).Start(ctx, "ancestry.Load",
+		trace.WithAttributes(
+			attribute.String("slip.correlation_id", correlationID),
+		),
+	)
+	defer span.End()
+
+	slip, err := a.reader.Load(ctx, correlationID)
+	if err != nil {
+		span.RecordError(err)
+		if errors.Is(err, slippy.ErrSlipNotFound) {
+			span.SetStatus(codes.Unset, "not found")
+		} else {
+			span.SetStatus(codes.Error, "load failed")
+			slog.ErrorContext(ctx, "ancestry: load by correlation_id failed",
+				"correlation_id", correlationID, "error", err)
+		}
+		return nil, err
+	}
+	span.SetAttributes(
+		attribute.String("slip.slip_repository", slip.Repository),
+		attribute.String("slip.status", string(slip.Status)),
+	)
+	span.SetStatus(codes.Ok, "")
+	return slip, nil
 }
 
 func (a *SlipResolverAdapter) LoadByCommit(
@@ -65,7 +89,7 @@ func (a *SlipResolverAdapter) LoadByCommit(
 	defer span.End()
 
 	slog.InfoContext(ctx, "ancestry: resolving slip via library",
-		"repository", repository, "commit_sha", commitSHA)
+		"requested_repository", repository, "commit_sha", commitSHA)
 
 	result, err := a.resolver.ResolveSlip(ctx, slippy.ResolveOptions{
 		Repository: repository,
@@ -73,7 +97,8 @@ func (a *SlipResolverAdapter) LoadByCommit(
 	})
 	if err == nil {
 		slog.InfoContext(ctx, "ancestry: resolved slip",
-			"repository", repository,
+			"requested_repository", repository,
+			"slip_repository", result.Slip.Repository,
 			"commit_sha", commitSHA,
 			"resolved_by", result.ResolvedBy,
 			"matched_commit", result.MatchedCommit,
@@ -82,6 +107,7 @@ func (a *SlipResolverAdapter) LoadByCommit(
 			attribute.String("slip.resolved_by", result.ResolvedBy),
 			attribute.String("slip.matched_commit", result.MatchedCommit),
 			attribute.String("slip.correlation_id", result.Slip.CorrelationID),
+			attribute.String("slip.slip_repository", result.Slip.Repository),
 		)
 		span.SetStatus(codes.Ok, "resolved via "+result.ResolvedBy)
 		return result.Slip, nil
@@ -89,14 +115,14 @@ func (a *SlipResolverAdapter) LoadByCommit(
 
 	if !errors.Is(err, slippy.ErrSlipNotFound) {
 		slog.WarnContext(ctx, "ancestry: resolver error",
-			"repository", repository, "commit_sha", commitSHA, "error", err)
+			"requested_repository", repository, "commit_sha", commitSHA, "error", err)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "resolver error")
 		return nil, err
 	}
 
 	slog.InfoContext(ctx, "ancestry: slip not found via resolver",
-		"repository", repository, "commit_sha", commitSHA)
+		"requested_repository", repository, "commit_sha", commitSHA)
 	span.SetStatus(codes.Unset, "not found")
 	return nil, slippy.ErrSlipNotFound
 }
@@ -125,7 +151,7 @@ func (a *SlipResolverAdapter) FindByCommits(
 	defer span.End()
 
 	slog.InfoContext(ctx, "ancestry: resolving slip for commits via library",
-		"repository", repository, "commits_count", len(commits))
+		"requested_repository", repository, "commits_count", len(commits))
 
 	for _, commit := range commits {
 		result, resolveErr := a.resolver.ResolveSlip(ctx, slippy.ResolveOptions{
@@ -134,7 +160,8 @@ func (a *SlipResolverAdapter) FindByCommits(
 		})
 		if resolveErr == nil {
 			slog.InfoContext(ctx, "ancestry: resolved slip for commit",
-				"repository", repository,
+				"requested_repository", repository,
+				"slip_repository", result.Slip.Repository,
 				"input_commit", commit,
 				"resolved_by", result.ResolvedBy,
 				"matched_commit", result.MatchedCommit,
@@ -144,6 +171,7 @@ func (a *SlipResolverAdapter) FindByCommits(
 				attribute.String("slip.matched_commit", result.MatchedCommit),
 				attribute.String("slip.input_commit", commit),
 				attribute.String("slip.correlation_id", result.Slip.CorrelationID),
+				attribute.String("slip.slip_repository", result.Slip.Repository),
 			)
 			span.SetStatus(codes.Ok, "resolved via "+result.ResolvedBy)
 			return result.Slip, commit, nil
@@ -151,7 +179,7 @@ func (a *SlipResolverAdapter) FindByCommits(
 
 		if !errors.Is(resolveErr, slippy.ErrSlipNotFound) {
 			slog.WarnContext(ctx, "ancestry: resolver error for commit",
-				"repository", repository, "commit", commit, "error", resolveErr)
+				"requested_repository", repository, "commit", commit, "error", resolveErr)
 			span.RecordError(resolveErr)
 			span.SetStatus(codes.Error, "resolver error")
 			return nil, "", resolveErr
@@ -159,7 +187,7 @@ func (a *SlipResolverAdapter) FindByCommits(
 	}
 
 	slog.InfoContext(ctx, "ancestry: no slip found for any commit",
-		"repository", repository, "commits_count", len(commits))
+		"requested_repository", repository, "commits_count", len(commits))
 	span.SetStatus(codes.Unset, "not found")
 	return nil, "", slippy.ErrSlipNotFound
 }
@@ -188,7 +216,7 @@ func (a *SlipResolverAdapter) FindAllByCommits(
 	defer span.End()
 
 	slog.InfoContext(ctx, "ancestry: resolving all slips for commits via library",
-		"repository", repository, "commits_count", len(commits))
+		"requested_repository", repository, "commits_count", len(commits))
 
 	var allResults []domain.SlipWithCommit
 	for _, commit := range commits {
@@ -197,6 +225,13 @@ func (a *SlipResolverAdapter) FindAllByCommits(
 			Ref:        commit,
 		})
 		if resolveErr == nil {
+			slog.InfoContext(ctx, "ancestry: resolved slip in find-all",
+				"requested_repository", repository,
+				"slip_repository", result.Slip.Repository,
+				"input_commit", commit,
+				"resolved_by", result.ResolvedBy,
+				"matched_commit", result.MatchedCommit,
+				"correlation_id", result.Slip.CorrelationID)
 			allResults = append(allResults, domain.SlipWithCommit{
 				Slip:          result.Slip,
 				MatchedCommit: commit,
@@ -205,7 +240,7 @@ func (a *SlipResolverAdapter) FindAllByCommits(
 		}
 		if !errors.Is(resolveErr, slippy.ErrSlipNotFound) {
 			slog.WarnContext(ctx, "ancestry: resolver error for commit",
-				"repository", repository, "commit", commit, "error", resolveErr)
+				"requested_repository", repository, "commit", commit, "error", resolveErr)
 			span.RecordError(resolveErr)
 			span.SetStatus(codes.Error, "resolver error")
 			return nil, resolveErr
@@ -213,7 +248,7 @@ func (a *SlipResolverAdapter) FindAllByCommits(
 	}
 
 	slog.InfoContext(ctx, "ancestry: resolved slips for find-all",
-		"repository", repository, "results_count", len(allResults))
+		"requested_repository", repository, "results_count", len(allResults))
 	span.SetAttributes(attribute.Int("slip.results_count", len(allResults)))
 	span.SetStatus(codes.Ok, "resolved")
 	return allResults, nil

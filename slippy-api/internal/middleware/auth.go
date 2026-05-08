@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -31,10 +32,11 @@ func NewAPIKeyAuth(readKey, writeKey string) func(ctx huma.Context, next func(hu
 
 		// Start a span for the authentication check.
 		reqCtx := ctx.Context()
-		_, span := otel.Tracer(authTracerName).Start(reqCtx, "auth.validateAPIKey",
+		opID := ctx.Operation().OperationID
+		spanCtx, span := otel.Tracer(authTracerName).Start(reqCtx, "auth.validateAPIKey",
 			trace.WithAttributes(
 				attribute.String("auth.scheme", "bearer"),
-				attribute.String("auth.operation", ctx.Operation().OperationID),
+				attribute.String("auth.operation", opID),
 			),
 		)
 		defer span.End()
@@ -43,6 +45,8 @@ func NewAPIKeyAuth(readKey, writeKey string) func(ctx huma.Context, next func(hu
 		if token == "" {
 			span.SetAttributes(attribute.String("auth.result", "missing_token"))
 			span.SetStatus(codes.Error, "missing or malformed Authorization header")
+			slog.WarnContext(spanCtx, "auth: missing bearer token",
+				"operation", opID, "result", "missing_token")
 			writeError(ctx, http.StatusUnauthorized, "missing or malformed Authorization header")
 			return
 		}
@@ -52,6 +56,8 @@ func NewAPIKeyAuth(readKey, writeKey string) func(ctx huma.Context, next func(hu
 			if writeKey == "" || subtle.ConstantTimeCompare([]byte(token), []byte(writeKey)) != 1 {
 				span.SetAttributes(attribute.String("auth.result", "invalid_token"))
 				span.SetStatus(codes.Error, "invalid API key")
+				slog.WarnContext(spanCtx, "auth: invalid token for write operation",
+					"operation", opID, "result", "invalid_token", "required_level", "write")
 				writeError(ctx, http.StatusForbidden, "invalid API key")
 				return
 			}
@@ -59,6 +65,8 @@ func NewAPIKeyAuth(readKey, writeKey string) func(ctx huma.Context, next func(hu
 				attribute.String("auth.result", "success"),
 				attribute.String("auth.access_level", "write"),
 			)
+			slog.InfoContext(spanCtx, "auth: token accepted",
+				"operation", opID, "access_level", "write")
 		} else {
 			// Read operations: accept either the read key or the write key.
 			readMatch := subtle.ConstantTimeCompare([]byte(token), []byte(readKey))
@@ -69,6 +77,8 @@ func NewAPIKeyAuth(readKey, writeKey string) func(ctx huma.Context, next func(hu
 			if readMatch|writeMatch != 1 {
 				span.SetAttributes(attribute.String("auth.result", "invalid_token"))
 				span.SetStatus(codes.Error, "invalid API key")
+				slog.WarnContext(spanCtx, "auth: invalid token for read operation",
+					"operation", opID, "result", "invalid_token", "required_level", "read")
 				writeError(ctx, http.StatusForbidden, "invalid API key")
 				return
 			}
@@ -81,6 +91,8 @@ func NewAPIKeyAuth(readKey, writeKey string) func(ctx huma.Context, next func(hu
 				attribute.String("auth.result", "success"),
 				attribute.String("auth.access_level", level),
 			)
+			slog.InfoContext(spanCtx, "auth: token accepted",
+				"operation", opID, "access_level", level)
 		}
 
 		span.SetStatus(codes.Ok, "")

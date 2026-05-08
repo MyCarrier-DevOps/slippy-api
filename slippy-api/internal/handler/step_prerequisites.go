@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -78,15 +79,22 @@ func (h *StepPrerequisitesHandler) getStepPrerequisites(
 	)
 	defer span.End()
 
+	slog.InfoContext(ctx, "step_prerequisites: check",
+		"correlation_id", input.CorrelationID, "step", input.StepName)
+
 	// Validate the step name against the pipeline config.
 	if h.cfg == nil {
 		span.SetStatus(codes.Error, "pipeline config not loaded")
+		slog.ErrorContext(ctx, "step_prerequisites: pipeline config not loaded",
+			"correlation_id", input.CorrelationID, "step", input.StepName)
 		return nil, huma.NewError(http.StatusInternalServerError, "pipeline config not available")
 	}
 
 	stepCfg := h.cfg.GetStep(input.StepName)
 	if stepCfg == nil {
 		span.SetStatus(codes.Error, "unknown step")
+		slog.WarnContext(ctx, "step_prerequisites: unknown step",
+			"correlation_id", input.CorrelationID, "step", input.StepName)
 		return nil, huma.NewError(http.StatusBadRequest, "unknown step: "+input.StepName)
 	}
 
@@ -94,6 +102,8 @@ func (h *StepPrerequisitesHandler) getStepPrerequisites(
 	slip, err := h.reader.Load(ctx, input.CorrelationID)
 	if err != nil {
 		recordHandlerError(span, err)
+		slog.ErrorContext(ctx, "step_prerequisites: load failed",
+			"correlation_id", input.CorrelationID, "step", input.StepName, "error", err)
 		return nil, mapError(err)
 	}
 
@@ -137,6 +147,12 @@ func (h *StepPrerequisitesHandler) getStepPrerequisites(
 		attribute.Int("prereq.pending_count", len(pending)),
 		attribute.Int("prereq.failed_count", len(failedPrereqs)),
 	)
+	slog.InfoContext(ctx, "step_prerequisites: evaluated",
+		"correlation_id", input.CorrelationID,
+		"step", input.StepName,
+		"satisfied", satisfied,
+		"pending_count", len(pending),
+		"failed_count", len(failedPrereqs))
 
 	return &GetStepPrerequisitesOutput{
 		Body: &StepPrerequisitesResponseBody{

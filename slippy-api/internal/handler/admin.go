@@ -2,9 +2,14 @@ package handler
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	ch "github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse"
 	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
@@ -46,11 +51,29 @@ func RegisterAdminRoutes(api huma.API, h *AdminHandler) {
 }
 
 func (h *AdminHandler) getSchemaVersion(ctx context.Context, _ *struct{}) (*SchemaVersionOutput, error) {
+	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.getSchemaVersion",
+		trace.WithAttributes(attribute.String("slip.database", h.database)),
+	)
+	defer span.End()
+
+	slog.InfoContext(ctx, "admin: reading schema version", "database", h.database)
+
 	current, err := slippy.GetCurrentSchemaVersion(ctx, h.session.Conn(), h.database)
 	if err != nil {
+		recordHandlerError(span, err)
+		slog.ErrorContext(ctx, "admin: failed to read schema version",
+			"database", h.database, "error", err)
 		return nil, huma.NewError(http.StatusInternalServerError, "failed to read schema version")
 	}
 	target := slippy.GetDynamicMigrationVersion(h.pipeline)
+	span.SetAttributes(
+		attribute.Int("schema.current", current),
+		attribute.Int("schema.target", target),
+	)
+	span.SetStatus(codes.Ok, "")
+	slog.InfoContext(ctx, "admin: schema version retrieved",
+		"database", h.database, "current", current, "target", target)
+
 	out := &SchemaVersionOutput{}
 	out.Body.Current = current
 	out.Body.Target = target

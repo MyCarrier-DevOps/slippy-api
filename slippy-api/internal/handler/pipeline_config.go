@@ -2,10 +2,12 @@ package handler
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 
 	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
@@ -58,11 +60,14 @@ func (h *PipelineConfigHandler) getPipelineConfig(
 	ctx context.Context,
 	_ *struct{},
 ) (*GetPipelineConfigOutput, error) {
-	_, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.getPipelineConfig")
+	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.getPipelineConfig")
 	defer span.End()
+
+	slog.InfoContext(ctx, "pipeline_config: get")
 
 	if h.cfg == nil {
 		span.SetStatus(codes.Error, "pipeline config not loaded")
+		slog.ErrorContext(ctx, "pipeline_config: not loaded")
 		return nil, huma.NewError(http.StatusInternalServerError, "pipeline config not available")
 	}
 
@@ -77,7 +82,14 @@ func (h *PipelineConfigHandler) getPipelineConfig(
 		}
 	}
 
+	span.SetAttributes(
+		attribute.String("pipeline.version", h.cfg.Version),
+		attribute.String("pipeline.name", h.cfg.Name),
+		attribute.Int("pipeline.steps_count", len(steps)),
+	)
 	span.SetStatus(codes.Ok, "")
+	slog.InfoContext(ctx, "pipeline_config: returned",
+		"version", h.cfg.Version, "name", h.cfg.Name, "steps_count", len(steps))
 	return &GetPipelineConfigOutput{
 		Body: &PipelineConfigResponseBody{
 			Version: h.cfg.Version,

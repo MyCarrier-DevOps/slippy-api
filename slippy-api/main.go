@@ -176,7 +176,15 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
-	log.Printf("config loaded (port=%d, cache=%v, db=%s)", cfg.Port, cfg.CacheEnabled(), cfg.SlipDatabase)
+	log.Printf("config loaded (port=%d, cache=%v, db=%s, skip_migrations=%v)",
+		cfg.Port, cfg.CacheEnabled(), cfg.SlipDatabase, cfg.SkipMigrations)
+
+	// --- Library logger ---
+	// Single shared logger for the slippy library, ClickHouse store, migrations,
+	// and GitHub client. Without this, library-level operations (incl. migration
+	// execution) run silently. Debug mode is off; flip to true to surface trace
+	// detail.
+	libLogger := logger.NewStdLogger(false)
 
 	// --- Pipeline configuration ---
 	// The slippy library requires a PipelineConfig for all store operations because
@@ -192,10 +200,16 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("clickhouse config: %w", err)
 	}
+	if cfg.SkipMigrations {
+		log.Printf("clickhouse migrations disabled via SLIPPY_SKIP_MIGRATIONS")
+	} else {
+		log.Printf("clickhouse migrations: starting")
+	}
 	store, err := slippy.NewClickHouseStoreFromConfig(chCfg, slippy.ClickHouseStoreOptions{
 		SkipMigrations: cfg.SkipMigrations,
 		PipelineConfig: pipelineCfg,
 		Database:       cfg.SlipDatabase,
+		Logger:         libLogger,
 	})
 	if err != nil {
 		return fmt.Errorf("clickhouse store: %w", err)
@@ -218,13 +232,14 @@ func run() error {
 		PrivateKey:    cfg.GitHubPrivateKey,
 		EnterpriseURL: cfg.GitHubEnterpriseURL,
 	}
-	ghClient, ghErr := slippy.NewGitHubClient(ghCfg, logger.NewStdLogger(false))
+	ghClient, ghErr := slippy.NewGitHubClient(ghCfg, libLogger)
 	if ghErr != nil {
 		return fmt.Errorf("github client: %w", ghErr)
 	}
 	slippyClient := slippy.NewClientWithDependencies(store, ghClient, slippy.Config{
 		AncestryDepth:  cfg.AncestryDepth,
 		PipelineConfig: pipelineCfg,
+		Logger:         libLogger,
 	})
 	slipReader := infrastructure.NewSlipResolverAdapter(slippyClient, adapter)
 	log.Printf("github ancestry resolution enabled (depth=%d)", cfg.AncestryDepth)
