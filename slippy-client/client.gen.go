@@ -538,24 +538,6 @@ type GetLogsParams struct {
 // GetLogsParamsSort defines parameters for GetLogs.
 type GetLogsParamsSort string
 
-// CompleteStepParams defines parameters for CompleteStep.
-type CompleteStepParams struct {
-	// XForceOverwrite Bypass terminal-overwrite guard
-	XForceOverwrite *string `json:"X-Force-Overwrite,omitempty"`
-}
-
-// FailStepParams defines parameters for FailStep.
-type FailStepParams struct {
-	// XForceOverwrite Bypass terminal-overwrite guard
-	XForceOverwrite *string `json:"X-Force-Overwrite,omitempty"`
-}
-
-// StartStepParams defines parameters for StartStep.
-type StartStepParams struct {
-	// XForceOverwrite Bypass terminal-overwrite guard
-	XForceOverwrite *string `json:"X-Force-Overwrite,omitempty"`
-}
-
 // CreateSlipJSONRequestBody defines body for CreateSlip for application/json ContentType.
 type CreateSlipJSONRequestBody = CreateSlipInputBody
 
@@ -720,14 +702,14 @@ type ClientInterface interface {
 	GetStepPrerequisites(ctx context.Context, correlationID string, stepName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// CompleteStepWithBody request with any body
-	CompleteStepWithBody(ctx context.Context, correlationID string, stepName string, params *CompleteStepParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	CompleteStepWithBody(ctx context.Context, correlationID string, stepName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	CompleteStep(ctx context.Context, correlationID string, stepName string, params *CompleteStepParams, body CompleteStepJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	CompleteStep(ctx context.Context, correlationID string, stepName string, body CompleteStepJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// FailStepWithBody request with any body
-	FailStepWithBody(ctx context.Context, correlationID string, stepName string, params *FailStepParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	FailStepWithBody(ctx context.Context, correlationID string, stepName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	FailStep(ctx context.Context, correlationID string, stepName string, params *FailStepParams, body FailStepJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	FailStep(ctx context.Context, correlationID string, stepName string, body FailStepJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// SkipStepWithBody request with any body
 	SkipStepWithBody(ctx context.Context, correlationID string, stepName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -735,9 +717,9 @@ type ClientInterface interface {
 	SkipStep(ctx context.Context, correlationID string, stepName string, body SkipStepJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// StartStepWithBody request with any body
-	StartStepWithBody(ctx context.Context, correlationID string, stepName string, params *StartStepParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	StartStepWithBody(ctx context.Context, correlationID string, stepName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	StartStep(ctx context.Context, correlationID string, stepName string, params *StartStepParams, body StartStepJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	StartStep(ctx context.Context, correlationID string, stepName string, body StartStepJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 }
 
 func (c *Client) GetAutomationTestResults(ctx context.Context, correlationID string, params *GetAutomationTestResultsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -1004,8 +986,8 @@ func (c *Client) GetStepPrerequisites(ctx context.Context, correlationID string,
 	return c.Client.Do(req)
 }
 
-func (c *Client) CompleteStepWithBody(ctx context.Context, correlationID string, stepName string, params *CompleteStepParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewCompleteStepRequestWithBody(c.Server, correlationID, stepName, params, contentType, body)
+func (c *Client) CompleteStepWithBody(ctx context.Context, correlationID string, stepName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCompleteStepRequestWithBody(c.Server, correlationID, stepName, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -1016,8 +998,8 @@ func (c *Client) CompleteStepWithBody(ctx context.Context, correlationID string,
 	return c.Client.Do(req)
 }
 
-func (c *Client) CompleteStep(ctx context.Context, correlationID string, stepName string, params *CompleteStepParams, body CompleteStepJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewCompleteStepRequest(c.Server, correlationID, stepName, params, body)
+func (c *Client) CompleteStep(ctx context.Context, correlationID string, stepName string, body CompleteStepJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCompleteStepRequest(c.Server, correlationID, stepName, body)
 	if err != nil {
 		return nil, err
 	}
@@ -1028,8 +1010,8 @@ func (c *Client) CompleteStep(ctx context.Context, correlationID string, stepNam
 	return c.Client.Do(req)
 }
 
-func (c *Client) FailStepWithBody(ctx context.Context, correlationID string, stepName string, params *FailStepParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewFailStepRequestWithBody(c.Server, correlationID, stepName, params, contentType, body)
+func (c *Client) FailStepWithBody(ctx context.Context, correlationID string, stepName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewFailStepRequestWithBody(c.Server, correlationID, stepName, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -1040,8 +1022,8 @@ func (c *Client) FailStepWithBody(ctx context.Context, correlationID string, ste
 	return c.Client.Do(req)
 }
 
-func (c *Client) FailStep(ctx context.Context, correlationID string, stepName string, params *FailStepParams, body FailStepJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewFailStepRequest(c.Server, correlationID, stepName, params, body)
+func (c *Client) FailStep(ctx context.Context, correlationID string, stepName string, body FailStepJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewFailStepRequest(c.Server, correlationID, stepName, body)
 	if err != nil {
 		return nil, err
 	}
@@ -1076,8 +1058,8 @@ func (c *Client) SkipStep(ctx context.Context, correlationID string, stepName st
 	return c.Client.Do(req)
 }
 
-func (c *Client) StartStepWithBody(ctx context.Context, correlationID string, stepName string, params *StartStepParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewStartStepRequestWithBody(c.Server, correlationID, stepName, params, contentType, body)
+func (c *Client) StartStepWithBody(ctx context.Context, correlationID string, stepName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewStartStepRequestWithBody(c.Server, correlationID, stepName, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -1088,8 +1070,8 @@ func (c *Client) StartStepWithBody(ctx context.Context, correlationID string, st
 	return c.Client.Do(req)
 }
 
-func (c *Client) StartStep(ctx context.Context, correlationID string, stepName string, params *StartStepParams, body StartStepJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewStartStepRequest(c.Server, correlationID, stepName, params, body)
+func (c *Client) StartStep(ctx context.Context, correlationID string, stepName string, body StartStepJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewStartStepRequest(c.Server, correlationID, stepName, body)
 	if err != nil {
 		return nil, err
 	}
@@ -2173,18 +2155,18 @@ func NewGetStepPrerequisitesRequest(server string, correlationID string, stepNam
 }
 
 // NewCompleteStepRequest calls the generic CompleteStep builder with application/json body
-func NewCompleteStepRequest(server string, correlationID string, stepName string, params *CompleteStepParams, body CompleteStepJSONRequestBody) (*http.Request, error) {
+func NewCompleteStepRequest(server string, correlationID string, stepName string, body CompleteStepJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewCompleteStepRequestWithBody(server, correlationID, stepName, params, "application/json", bodyReader)
+	return NewCompleteStepRequestWithBody(server, correlationID, stepName, "application/json", bodyReader)
 }
 
 // NewCompleteStepRequestWithBody generates requests for CompleteStep with any type of body
-func NewCompleteStepRequestWithBody(server string, correlationID string, stepName string, params *CompleteStepParams, contentType string, body io.Reader) (*http.Request, error) {
+func NewCompleteStepRequestWithBody(server string, correlationID string, stepName string, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -2223,37 +2205,22 @@ func NewCompleteStepRequestWithBody(server string, correlationID string, stepNam
 
 	req.Header.Add("Content-Type", contentType)
 
-	if params != nil {
-
-		if params.XForceOverwrite != nil {
-			var headerParam0 string
-
-			headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-Force-Overwrite", *params.XForceOverwrite, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
-			if err != nil {
-				return nil, err
-			}
-
-			req.Header.Set("X-Force-Overwrite", headerParam0)
-		}
-
-	}
-
 	return req, nil
 }
 
 // NewFailStepRequest calls the generic FailStep builder with application/json body
-func NewFailStepRequest(server string, correlationID string, stepName string, params *FailStepParams, body FailStepJSONRequestBody) (*http.Request, error) {
+func NewFailStepRequest(server string, correlationID string, stepName string, body FailStepJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewFailStepRequestWithBody(server, correlationID, stepName, params, "application/json", bodyReader)
+	return NewFailStepRequestWithBody(server, correlationID, stepName, "application/json", bodyReader)
 }
 
 // NewFailStepRequestWithBody generates requests for FailStep with any type of body
-func NewFailStepRequestWithBody(server string, correlationID string, stepName string, params *FailStepParams, contentType string, body io.Reader) (*http.Request, error) {
+func NewFailStepRequestWithBody(server string, correlationID string, stepName string, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -2291,21 +2258,6 @@ func NewFailStepRequestWithBody(server string, correlationID string, stepName st
 	}
 
 	req.Header.Add("Content-Type", contentType)
-
-	if params != nil {
-
-		if params.XForceOverwrite != nil {
-			var headerParam0 string
-
-			headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-Force-Overwrite", *params.XForceOverwrite, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
-			if err != nil {
-				return nil, err
-			}
-
-			req.Header.Set("X-Force-Overwrite", headerParam0)
-		}
-
-	}
 
 	return req, nil
 }
@@ -2365,18 +2317,18 @@ func NewSkipStepRequestWithBody(server string, correlationID string, stepName st
 }
 
 // NewStartStepRequest calls the generic StartStep builder with application/json body
-func NewStartStepRequest(server string, correlationID string, stepName string, params *StartStepParams, body StartStepJSONRequestBody) (*http.Request, error) {
+func NewStartStepRequest(server string, correlationID string, stepName string, body StartStepJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewStartStepRequestWithBody(server, correlationID, stepName, params, "application/json", bodyReader)
+	return NewStartStepRequestWithBody(server, correlationID, stepName, "application/json", bodyReader)
 }
 
 // NewStartStepRequestWithBody generates requests for StartStep with any type of body
-func NewStartStepRequestWithBody(server string, correlationID string, stepName string, params *StartStepParams, contentType string, body io.Reader) (*http.Request, error) {
+func NewStartStepRequestWithBody(server string, correlationID string, stepName string, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -2414,21 +2366,6 @@ func NewStartStepRequestWithBody(server string, correlationID string, stepName s
 	}
 
 	req.Header.Add("Content-Type", contentType)
-
-	if params != nil {
-
-		if params.XForceOverwrite != nil {
-			var headerParam0 string
-
-			headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-Force-Overwrite", *params.XForceOverwrite, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
-			if err != nil {
-				return nil, err
-			}
-
-			req.Header.Set("X-Force-Overwrite", headerParam0)
-		}
-
-	}
 
 	return req, nil
 }
@@ -2537,14 +2474,14 @@ type ClientWithResponsesInterface interface {
 	GetStepPrerequisitesWithResponse(ctx context.Context, correlationID string, stepName string, reqEditors ...RequestEditorFn) (*GetStepPrerequisitesResponse, error)
 
 	// CompleteStepWithBodyWithResponse request with any body
-	CompleteStepWithBodyWithResponse(ctx context.Context, correlationID string, stepName string, params *CompleteStepParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CompleteStepResponse, error)
+	CompleteStepWithBodyWithResponse(ctx context.Context, correlationID string, stepName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CompleteStepResponse, error)
 
-	CompleteStepWithResponse(ctx context.Context, correlationID string, stepName string, params *CompleteStepParams, body CompleteStepJSONRequestBody, reqEditors ...RequestEditorFn) (*CompleteStepResponse, error)
+	CompleteStepWithResponse(ctx context.Context, correlationID string, stepName string, body CompleteStepJSONRequestBody, reqEditors ...RequestEditorFn) (*CompleteStepResponse, error)
 
 	// FailStepWithBodyWithResponse request with any body
-	FailStepWithBodyWithResponse(ctx context.Context, correlationID string, stepName string, params *FailStepParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*FailStepResponse, error)
+	FailStepWithBodyWithResponse(ctx context.Context, correlationID string, stepName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*FailStepResponse, error)
 
-	FailStepWithResponse(ctx context.Context, correlationID string, stepName string, params *FailStepParams, body FailStepJSONRequestBody, reqEditors ...RequestEditorFn) (*FailStepResponse, error)
+	FailStepWithResponse(ctx context.Context, correlationID string, stepName string, body FailStepJSONRequestBody, reqEditors ...RequestEditorFn) (*FailStepResponse, error)
 
 	// SkipStepWithBodyWithResponse request with any body
 	SkipStepWithBodyWithResponse(ctx context.Context, correlationID string, stepName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SkipStepResponse, error)
@@ -2552,9 +2489,9 @@ type ClientWithResponsesInterface interface {
 	SkipStepWithResponse(ctx context.Context, correlationID string, stepName string, body SkipStepJSONRequestBody, reqEditors ...RequestEditorFn) (*SkipStepResponse, error)
 
 	// StartStepWithBodyWithResponse request with any body
-	StartStepWithBodyWithResponse(ctx context.Context, correlationID string, stepName string, params *StartStepParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*StartStepResponse, error)
+	StartStepWithBodyWithResponse(ctx context.Context, correlationID string, stepName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*StartStepResponse, error)
 
-	StartStepWithResponse(ctx context.Context, correlationID string, stepName string, params *StartStepParams, body StartStepJSONRequestBody, reqEditors ...RequestEditorFn) (*StartStepResponse, error)
+	StartStepWithResponse(ctx context.Context, correlationID string, stepName string, body StartStepJSONRequestBody, reqEditors ...RequestEditorFn) (*StartStepResponse, error)
 }
 
 type GetAutomationTestResultsResponse struct {
@@ -3203,16 +3140,16 @@ func (c *ClientWithResponses) GetStepPrerequisitesWithResponse(ctx context.Conte
 }
 
 // CompleteStepWithBodyWithResponse request with arbitrary body returning *CompleteStepResponse
-func (c *ClientWithResponses) CompleteStepWithBodyWithResponse(ctx context.Context, correlationID string, stepName string, params *CompleteStepParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CompleteStepResponse, error) {
-	rsp, err := c.CompleteStepWithBody(ctx, correlationID, stepName, params, contentType, body, reqEditors...)
+func (c *ClientWithResponses) CompleteStepWithBodyWithResponse(ctx context.Context, correlationID string, stepName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CompleteStepResponse, error) {
+	rsp, err := c.CompleteStepWithBody(ctx, correlationID, stepName, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseCompleteStepResponse(rsp)
 }
 
-func (c *ClientWithResponses) CompleteStepWithResponse(ctx context.Context, correlationID string, stepName string, params *CompleteStepParams, body CompleteStepJSONRequestBody, reqEditors ...RequestEditorFn) (*CompleteStepResponse, error) {
-	rsp, err := c.CompleteStep(ctx, correlationID, stepName, params, body, reqEditors...)
+func (c *ClientWithResponses) CompleteStepWithResponse(ctx context.Context, correlationID string, stepName string, body CompleteStepJSONRequestBody, reqEditors ...RequestEditorFn) (*CompleteStepResponse, error) {
+	rsp, err := c.CompleteStep(ctx, correlationID, stepName, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -3220,16 +3157,16 @@ func (c *ClientWithResponses) CompleteStepWithResponse(ctx context.Context, corr
 }
 
 // FailStepWithBodyWithResponse request with arbitrary body returning *FailStepResponse
-func (c *ClientWithResponses) FailStepWithBodyWithResponse(ctx context.Context, correlationID string, stepName string, params *FailStepParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*FailStepResponse, error) {
-	rsp, err := c.FailStepWithBody(ctx, correlationID, stepName, params, contentType, body, reqEditors...)
+func (c *ClientWithResponses) FailStepWithBodyWithResponse(ctx context.Context, correlationID string, stepName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*FailStepResponse, error) {
+	rsp, err := c.FailStepWithBody(ctx, correlationID, stepName, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseFailStepResponse(rsp)
 }
 
-func (c *ClientWithResponses) FailStepWithResponse(ctx context.Context, correlationID string, stepName string, params *FailStepParams, body FailStepJSONRequestBody, reqEditors ...RequestEditorFn) (*FailStepResponse, error) {
-	rsp, err := c.FailStep(ctx, correlationID, stepName, params, body, reqEditors...)
+func (c *ClientWithResponses) FailStepWithResponse(ctx context.Context, correlationID string, stepName string, body FailStepJSONRequestBody, reqEditors ...RequestEditorFn) (*FailStepResponse, error) {
+	rsp, err := c.FailStep(ctx, correlationID, stepName, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -3254,16 +3191,16 @@ func (c *ClientWithResponses) SkipStepWithResponse(ctx context.Context, correlat
 }
 
 // StartStepWithBodyWithResponse request with arbitrary body returning *StartStepResponse
-func (c *ClientWithResponses) StartStepWithBodyWithResponse(ctx context.Context, correlationID string, stepName string, params *StartStepParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*StartStepResponse, error) {
-	rsp, err := c.StartStepWithBody(ctx, correlationID, stepName, params, contentType, body, reqEditors...)
+func (c *ClientWithResponses) StartStepWithBodyWithResponse(ctx context.Context, correlationID string, stepName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*StartStepResponse, error) {
+	rsp, err := c.StartStepWithBody(ctx, correlationID, stepName, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseStartStepResponse(rsp)
 }
 
-func (c *ClientWithResponses) StartStepWithResponse(ctx context.Context, correlationID string, stepName string, params *StartStepParams, body StartStepJSONRequestBody, reqEditors ...RequestEditorFn) (*StartStepResponse, error) {
-	rsp, err := c.StartStep(ctx, correlationID, stepName, params, body, reqEditors...)
+func (c *ClientWithResponses) StartStepWithResponse(ctx context.Context, correlationID string, stepName string, body StartStepJSONRequestBody, reqEditors ...RequestEditorFn) (*StartStepResponse, error) {
+	rsp, err := c.StartStep(ctx, correlationID, stepName, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
