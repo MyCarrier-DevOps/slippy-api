@@ -46,28 +46,26 @@ type Config struct {
 	// SlipDatabase is the ClickHouse database containing routing_slips (default: "ci")
 	SlipDatabase string
 
-	// WriteAPIKey is the bearer token for write endpoints (optional).
-	// When empty, write endpoints are not registered and the server runs read-only.
+	// WriteAPIKey is the bearer token for write endpoints (required).
 	WriteAPIKey string
 
-	// SkipMigrations controls whether ClickHouse schema migrations run at startup (default: true).
-	// Set SLIPPY_SKIP_MIGRATIONS=false to enable migrations — only do this on a single instance.
+	// SkipMigrations controls whether ClickHouse schema migrations run at startup (default: false).
+	// Set SLIPPY_SKIP_MIGRATIONS=true to disable migrations — useful when running multiple replicas.
 	SkipMigrations bool
 }
 
 // Load reads configuration from environment variables.
-// Required: SLIPPY_API_KEY, SLIPPY_GITHUB_APP_ID, SLIPPY_GITHUB_APP_PRIVATE_KEY
+// Required: SLIPPY_API_KEY, SLIPPY_WRITE_API_KEY, SLIPPY_GITHUB_APP_ID, SLIPPY_GITHUB_APP_PRIVATE_KEY
 // Optional: PORT, DRAGONFLY_HOST, DRAGONFLY_PORT, DRAGONFLY_PASSWORD, CACHE_TTL,
 //
-//	SLIPPY_GITHUB_ENTERPRISE_URL, SLIPPY_ANCESTRY_DEPTH
+//	SLIPPY_GITHUB_ENTERPRISE_URL, SLIPPY_ANCESTRY_DEPTH, SLIPPY_SKIP_MIGRATIONS
 func Load() (*Config, error) {
 	cfg := &Config{
-		Port:           8080,
-		DragonflyPort:  6379,
-		CacheTTL:       10 * time.Minute,
-		AncestryDepth:  defaultAncestryDepth,
-		SlipDatabase:   slippy.DefaultConfig().Database,
-		SkipMigrations: true,
+		Port:          8080,
+		DragonflyPort: 6379,
+		CacheTTL:      10 * time.Minute,
+		AncestryDepth: defaultAncestryDepth,
+		SlipDatabase:  slippy.DefaultConfig().Database,
 	}
 
 	// Required
@@ -143,8 +141,11 @@ func Load() (*Config, error) {
 		cfg.AncestryDepth = depth
 	}
 
-	// Optional: SLIPPY_WRITE_API_KEY (when absent, write endpoints are not registered)
+	// Required: SLIPPY_WRITE_API_KEY
 	cfg.WriteAPIKey = os.Getenv("SLIPPY_WRITE_API_KEY")
+	if cfg.WriteAPIKey == "" {
+		return nil, fmt.Errorf("SLIPPY_WRITE_API_KEY is required")
+	}
 
 	// Optional: SLIPPY_SKIP_MIGRATIONS (default: true for backward compatibility)
 	if v := os.Getenv("SLIPPY_SKIP_MIGRATIONS"); v != "" {

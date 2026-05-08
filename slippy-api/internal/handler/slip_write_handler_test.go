@@ -28,6 +28,8 @@ type mockWriter struct {
 	failStepFn             func(ctx context.Context, correlationID, stepName, componentName, reason string) error
 	skipStepFn             func(ctx context.Context, correlationID, stepName, componentName, reason string) error
 	setComponentImageTagFn func(ctx context.Context, correlationID, componentName, imageTag string) error
+	promoteSlipFn          func(ctx context.Context, correlationID, promotedTo string) error
+	abandonSlipFn          func(ctx context.Context, correlationID, supersededBy string) error
 }
 
 func (m *mockWriter) CreateSlipForPush(ctx context.Context, opts domain.PushOptions) (*domain.CreateSlipResult, error) {
@@ -48,6 +50,18 @@ func (m *mockWriter) SkipStep(ctx context.Context, cID, step, comp, reason strin
 func (m *mockWriter) SetComponentImageTag(ctx context.Context, cID, comp, tag string) error {
 	return m.setComponentImageTagFn(ctx, cID, comp, tag)
 }
+func (m *mockWriter) PromoteSlip(ctx context.Context, cID, promotedTo string) error {
+	if m.promoteSlipFn != nil {
+		return m.promoteSlipFn(ctx, cID, promotedTo)
+	}
+	return nil
+}
+func (m *mockWriter) AbandonSlip(ctx context.Context, cID, supersededBy string) error {
+	if m.abandonSlipFn != nil {
+		return m.abandonSlipFn(ctx, cID, supersededBy)
+	}
+	return nil
+}
 
 // setupWriteTestAPI creates a huma API with write routes and no auth for testing.
 func setupWriteTestAPI(w domain.SlipWriter) http.Handler {
@@ -55,7 +69,7 @@ func setupWriteTestAPI(w domain.SlipWriter) http.Handler {
 	cfg := huma.DefaultConfig("Test", "1.0.0")
 	api := humago.New(mux, cfg)
 
-	h := NewSlipWriteHandler(w)
+	h := NewSlipWriteHandler(w, nil)
 	RegisterWriteRoutes(api, h)
 	return mux
 }
@@ -505,6 +519,120 @@ func TestSetImageTag_InternalError(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
+// --- PromoteSlip tests ---
+
+func TestPromoteSlip_Success(t *testing.T) {
+	var gotCID, gotPromotedTo string
+	w := &mockWriter{
+		promoteSlipFn: func(_ context.Context, cID, promotedTo string) error {
+			gotCID, gotPromotedTo = cID, promotedTo
+			return nil
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	body := `{"promoted_to":"corr-main-merge"}`
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/promote", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, "abc-123", gotCID)
+	assert.Equal(t, "corr-main-merge", gotPromotedTo)
+}
+
+func TestPromoteSlip_NotFound(t *testing.T) {
+	w := &mockWriter{
+		promoteSlipFn: func(_ context.Context, _, _ string) error {
+			return slippy.ErrSlipNotFound
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	body := `{"promoted_to":"corr-main"}`
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/promote", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestPromoteSlip_InternalError(t *testing.T) {
+	w := &mockWriter{
+		promoteSlipFn: func(_ context.Context, _, _ string) error {
+			return errors.New("database error")
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	body := `{"promoted_to":"corr-main"}`
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/promote", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// --- AbandonSlip tests ---
+
+func TestAbandonSlip_Success(t *testing.T) {
+	var gotCID, gotSupersededBy string
+	w := &mockWriter{
+		abandonSlipFn: func(_ context.Context, cID, supersededBy string) error {
+			gotCID, gotSupersededBy = cID, supersededBy
+			return nil
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	body := `{"superseded_by":"corr-new-push"}`
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/abandon", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, "abc-123", gotCID)
+	assert.Equal(t, "corr-new-push", gotSupersededBy)
+}
+
+func TestAbandonSlip_NotFound(t *testing.T) {
+	w := &mockWriter{
+		abandonSlipFn: func(_ context.Context, _, _ string) error {
+			return slippy.ErrSlipNotFound
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	body := `{"superseded_by":"corr-new"}`
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/abandon", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestAbandonSlip_InternalError(t *testing.T) {
+	w := &mockWriter{
+		abandonSlipFn: func(_ context.Context, _, _ string) error {
+			return errors.New("database error")
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	body := `{"superseded_by":"corr-new"}`
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/abandon", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
 // --- mapWriteError tests ---
 
 func TestMapWriteError(t *testing.T) {
@@ -525,20 +653,6 @@ func TestMapWriteError(t *testing.T) {
 		},
 		{"slip error", slippy.NewSlipError("create", "id", errors.New("fail")), http.StatusUnprocessableEntity},
 		{"generic error", errors.New("something broke"), http.StatusInternalServerError},
-		{
-			"step already terminal (typed error)",
-			&domain.StepAlreadyTerminalError{
-				StepName:        "push_parsed",
-				CurrentStatus:   "failed",
-				RequestedStatus: "completed",
-			},
-			http.StatusConflict,
-		},
-		{
-			"step already terminal (sentinel only)",
-			domain.ErrStepAlreadyTerminal,
-			http.StatusConflict,
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -550,38 +664,11 @@ func TestMapWriteError(t *testing.T) {
 	}
 }
 
-// TestCompleteStep_Returns409_WhenAlreadyTerminal verifies that the handler
-// returns 409 Conflict when the writer returns ErrStepAlreadyTerminal.
-func TestCompleteStep_Returns409_WhenAlreadyTerminal(t *testing.T) {
-	w := &mockWriter{
-		completeStepFn: func(_ context.Context, _, _, _ string) error {
-			return &domain.StepAlreadyTerminalError{
-				StepName:        "push_parsed",
-				CurrentStatus:   "failed",
-				RequestedStatus: "completed",
-			}
-		},
-	}
-	handler := setupWriteTestAPI(w)
-
-	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/push_parsed/complete", nil)
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	assert.Equal(t, http.StatusConflict, rec.Code)
-
-	var resp map[string]any
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-	// Huma error body has "status" and "title" fields.
-	assert.EqualValues(t, http.StatusConflict, resp["status"])
-}
-
-// TestCompleteStep_ForceOverwrite_CallsWriterWithForceCtx verifies that when
-// X-Force-Overwrite: true is sent, the writer is still called (the handler does
-// not itself short-circuit). The guard bypass is exercised at the infrastructure
-// layer; here we confirm the handler path reaches the writer.
-func TestCompleteStep_ForceOverwrite_CallsWriter(t *testing.T) {
+// TestCompleteStep_AllowsRecoveryFromFailed verifies that the handler accepts a
+// CompleteStep call after a prior FailStep — the documented `failed → completed`
+// recovery flow (STATE_MACHINE_V3.md §Recovery Rules). No step-level state is
+// immutable.
+func TestCompleteStep_AllowsRecoveryFromFailed(t *testing.T) {
 	var called bool
 	w := &mockWriter{
 		completeStepFn: func(_ context.Context, _, _, _ string) error {
@@ -591,35 +678,11 @@ func TestCompleteStep_ForceOverwrite_CallsWriter(t *testing.T) {
 	}
 	handler := setupWriteTestAPI(w)
 
-	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/push_parsed/complete", nil)
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/prod_deploy/complete", nil)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Force-Overwrite", "true")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusNoContent, rec.Code)
-	assert.True(t, called, "writer must be called when X-Force-Overwrite is set")
-}
-
-// TestFailStep_Returns409_WhenAlreadyTerminal verifies that the handler
-// returns 409 Conflict when FailStep detects a terminal conflict.
-func TestFailStep_Returns409_WhenAlreadyTerminal(t *testing.T) {
-	w := &mockWriter{
-		failStepFn: func(_ context.Context, _, _, _, _ string) error {
-			return &domain.StepAlreadyTerminalError{
-				StepName:        "push_parsed",
-				CurrentStatus:   "completed",
-				RequestedStatus: "failed",
-			}
-		},
-	}
-	handler := setupWriteTestAPI(w)
-
-	body := `{"reason":"late failure"}`
-	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/push_parsed/fail", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	assert.Equal(t, http.StatusConflict, rec.Code)
+	assert.True(t, called, "writer must be called for failed → completed recovery")
 }

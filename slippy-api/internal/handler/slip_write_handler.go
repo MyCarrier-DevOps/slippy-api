@@ -3,7 +3,6 @@ package handler
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 
@@ -16,17 +15,26 @@ import (
 	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
 
 	"github.com/MyCarrier-DevOps/slippy-api/internal/domain"
-	"github.com/MyCarrier-DevOps/slippy-api/internal/infrastructure"
 )
 
 // SlipWriteHandler holds dependencies for write route handlers.
 type SlipWriteHandler struct {
-	writer domain.SlipWriter
+	writer      domain.SlipWriter
+	invalidator domain.Invalidator // nil-safe; skipped when nil
 }
 
 // NewSlipWriteHandler creates a handler backed by the given writer.
-func NewSlipWriteHandler(writer domain.SlipWriter) *SlipWriteHandler {
-	return &SlipWriteHandler{writer: writer}
+// invalidator is optional — pass nil when caching is not enabled.
+func NewSlipWriteHandler(writer domain.SlipWriter, invalidator domain.Invalidator) *SlipWriteHandler {
+	return &SlipWriteHandler{writer: writer, invalidator: invalidator}
+}
+
+// invalidate evicts the cached slip entry after a successful write.
+// It is a no-op when no invalidator is configured.
+func (h *SlipWriteHandler) invalidate(ctx context.Context, correlationID string) {
+	if h.invalidator != nil {
+		h.invalidator.InvalidateByCorrelationID(ctx, correlationID)
+	}
 }
 
 // writeApiKeySecurity marks an operation as requiring write API key authentication.
@@ -73,10 +81,9 @@ type StepBody struct {
 // Body is a pointer so that the request body is optional in the OpenAPI spec —
 // pipeline-level steps don't need a body at all.
 type StepInput struct {
-	CorrelationID  string `path:"correlationID" doc:"Routing slip correlation ID"`
-	StepName       string `path:"stepName"      doc:"Pipeline step name"`
-	ForceOverwrite string `header:"X-Force-Overwrite" required:"false" doc:"Bypass terminal-overwrite guard"` //nolint:golines // struct tag cannot be split
-	Body           *StepBody
+	CorrelationID string `path:"correlationID" doc:"Routing slip correlation ID"`
+	StepName      string `path:"stepName"      doc:"Pipeline step name"`
+	Body          *StepBody
 }
 
 // componentName returns the component name from the optional body, or empty string if no body.
@@ -89,10 +96,9 @@ func (s *StepInput) componentName() string {
 
 // FailStepInput captures path params and body for step failure.
 type FailStepInput struct {
-	CorrelationID  string `path:"correlationID" doc:"Routing slip correlation ID"`
-	StepName       string `path:"stepName"      doc:"Pipeline step name"`
-	ForceOverwrite string `header:"X-Force-Overwrite" required:"false" doc:"Bypass terminal-overwrite guard"` //nolint:golines // struct tag cannot be split
-	Body           struct {
+	CorrelationID string `path:"correlationID" doc:"Routing slip correlation ID"`
+	StepName      string `path:"stepName"      doc:"Pipeline step name"`
+	Body          struct {
 		ComponentName string `json:"component_name,omitempty" doc:"Component name (required for aggregate steps, empty for pipeline steps)"`
 		Reason        string `json:"reason" doc:"Failure reason"`
 	}
@@ -122,6 +128,22 @@ func (s *SkipStepInput) reason() string {
 		return ""
 	}
 	return s.Body.Reason
+}
+
+// PromoteSlipInput captures path params and body for promoting a slip.
+type PromoteSlipInput struct {
+	CorrelationID string `path:"correlationID" doc:"Routing slip correlation ID"`
+	Body          struct {
+		PromotedTo string `json:"promoted_to" doc:"Correlation ID of the new slip on the target branch"`
+	}
+}
+
+// AbandonSlipInput captures path params and body for abandoning a slip.
+type AbandonSlipInput struct {
+	CorrelationID string `path:"correlationID" doc:"Routing slip correlation ID"`
+	Body          struct {
+		SupersededBy string `json:"superseded_by" doc:"Correlation ID of the newer slip that supersedes this one"`
+	}
 }
 
 // SetImageTagInput captures path params and body for setting an image tag.
@@ -196,6 +218,26 @@ func RegisterWriteRoutes(api huma.API, h *SlipWriteHandler) {
 		DefaultStatus: http.StatusNoContent,
 		Tags:          []string{"v1"},
 	}, h.setImageTag)
+
+	huma.Register(api, huma.Operation{
+		OperationID:   "promote-slip",
+		Method:        http.MethodPost,
+		Path:          "/slips/{correlationID}/promote",
+		Summary:       "Mark a routing slip as promoted to another branch",
+		Security:      writeApiKeySecurity,
+		DefaultStatus: http.StatusNoContent,
+		Tags:          []string{"v1"},
+	}, h.promoteSlip)
+
+	huma.Register(api, huma.Operation{
+		OperationID:   "abandon-slip",
+		Method:        http.MethodPost,
+		Path:          "/slips/{correlationID}/abandon",
+		Summary:       "Mark a routing slip as abandoned, superseded by a newer push",
+		Security:      writeApiKeySecurity,
+		DefaultStatus: http.StatusNoContent,
+		Tags:          []string{"v1"},
+	}, h.abandonSlip)
 }
 
 // --- Handlers ------------------------------------------------------------
@@ -231,6 +273,7 @@ func (h *SlipWriteHandler) createSlip(ctx context.Context, input *CreateSlipInpu
 	}
 
 	span.SetStatus(codes.Ok, "")
+	h.invalidate(ctx, input.Body.CorrelationID)
 	out := &CreateSlipOutput{}
 	out.Body.Slip = result.Slip
 	out.Body.AncestryResolved = result.AncestryResolved
@@ -255,6 +298,7 @@ func (h *SlipWriteHandler) startStep(ctx context.Context, input *StepInput) (*st
 		recordHandlerError(span, err)
 		return nil, mapWriteError(err)
 	}
+	h.invalidate(ctx, input.CorrelationID)
 	span.SetStatus(codes.Ok, "")
 	return &struct{}{}, nil
 }
@@ -270,13 +314,11 @@ func (h *SlipWriteHandler) completeStep(ctx context.Context, input *StepInput) (
 	)
 	defer span.End()
 
-	if strings.EqualFold(input.ForceOverwrite, "true") {
-		ctx = infrastructure.WithForceOverwrite(ctx)
-	}
 	if err := h.writer.CompleteStep(ctx, input.CorrelationID, input.StepName, componentName); err != nil {
 		recordHandlerError(span, err)
 		return nil, mapWriteError(err)
 	}
+	h.invalidate(ctx, input.CorrelationID)
 	span.SetStatus(codes.Ok, "")
 	return &struct{}{}, nil
 }
@@ -291,9 +333,6 @@ func (h *SlipWriteHandler) failStep(ctx context.Context, input *FailStepInput) (
 	)
 	defer span.End()
 
-	if strings.EqualFold(input.ForceOverwrite, "true") {
-		ctx = infrastructure.WithForceOverwrite(ctx)
-	}
 	if err := h.writer.FailStep(
 		ctx,
 		input.CorrelationID,
@@ -304,6 +343,7 @@ func (h *SlipWriteHandler) failStep(ctx context.Context, input *FailStepInput) (
 		recordHandlerError(span, err)
 		return nil, mapWriteError(err)
 	}
+	h.invalidate(ctx, input.CorrelationID)
 	span.SetStatus(codes.Ok, "")
 	return &struct{}{}, nil
 }
@@ -328,6 +368,7 @@ func (h *SlipWriteHandler) skipStep(ctx context.Context, input *SkipStepInput) (
 		recordHandlerError(span, err)
 		return nil, mapWriteError(err)
 	}
+	h.invalidate(ctx, input.CorrelationID)
 	span.SetStatus(codes.Ok, "")
 	return &struct{}{}, nil
 }
@@ -351,6 +392,43 @@ func (h *SlipWriteHandler) setImageTag(ctx context.Context, input *SetImageTagIn
 		recordHandlerError(span, err)
 		return nil, mapWriteError(err)
 	}
+	h.invalidate(ctx, input.CorrelationID)
+	span.SetStatus(codes.Ok, "")
+	return &struct{}{}, nil
+}
+
+func (h *SlipWriteHandler) promoteSlip(ctx context.Context, input *PromoteSlipInput) (*struct{}, error) {
+	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.promoteSlip",
+		trace.WithAttributes(
+			attribute.String("slip.correlation_id", input.CorrelationID),
+			attribute.String("slip.promoted_to", input.Body.PromotedTo),
+		),
+	)
+	defer span.End()
+
+	if err := h.writer.PromoteSlip(ctx, input.CorrelationID, input.Body.PromotedTo); err != nil {
+		recordHandlerError(span, err)
+		return nil, mapWriteError(err)
+	}
+	h.invalidate(ctx, input.CorrelationID)
+	span.SetStatus(codes.Ok, "")
+	return &struct{}{}, nil
+}
+
+func (h *SlipWriteHandler) abandonSlip(ctx context.Context, input *AbandonSlipInput) (*struct{}, error) {
+	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.abandonSlip",
+		trace.WithAttributes(
+			attribute.String("slip.correlation_id", input.CorrelationID),
+			attribute.String("slip.superseded_by", input.Body.SupersededBy),
+		),
+	)
+	defer span.End()
+
+	if err := h.writer.AbandonSlip(ctx, input.CorrelationID, input.Body.SupersededBy); err != nil {
+		recordHandlerError(span, err)
+		return nil, mapWriteError(err)
+	}
+	h.invalidate(ctx, input.CorrelationID)
 	span.SetStatus(codes.Ok, "")
 	return &struct{}{}, nil
 }
@@ -360,15 +438,6 @@ func (h *SlipWriteHandler) setImageTag(ctx context.Context, input *SetImageTagIn
 // mapWriteError converts domain/store errors to huma status errors for write ops.
 func mapWriteError(err error) error {
 	switch {
-	case errors.Is(err, domain.ErrStepAlreadyTerminal):
-		var termErr *domain.StepAlreadyTerminalError
-		if errors.As(err, &termErr) {
-			return huma.NewError(http.StatusConflict, termErr.Error(),
-				fmt.Errorf("step_name=%s current_status=%s requested_status=%s",
-					termErr.StepName, termErr.CurrentStatus, termErr.RequestedStatus),
-			)
-		}
-		return huma.NewError(http.StatusConflict, err.Error())
 	case errors.Is(err, slippy.ErrSlipNotFound):
 		return huma.NewError(http.StatusNotFound, "slip not found")
 	case errors.Is(err, slippy.ErrInvalidCorrelationID):

@@ -39,6 +39,7 @@ func TestLoad_MissingAPIKey(t *testing.T) {
 func TestLoad_Defaults(t *testing.T) {
 	clearEnv(t)
 	t.Setenv("SLIPPY_API_KEY", "test-key-123")
+	t.Setenv("SLIPPY_WRITE_API_KEY", "test-write-key")
 	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
 	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "test-pem")
 
@@ -46,6 +47,7 @@ func TestLoad_Defaults(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "test-key-123", cfg.APIKey)
+	assert.Equal(t, "test-write-key", cfg.WriteAPIKey)
 	assert.Equal(t, 8080, cfg.Port)
 	assert.Equal(t, "", cfg.DragonflyHost)
 	assert.Equal(t, 6379, cfg.DragonflyPort)
@@ -56,8 +58,7 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, "", cfg.GitHubEnterpriseURL)
 	assert.Equal(t, 25, cfg.AncestryDepth)
 	assert.Equal(t, "ci", cfg.SlipDatabase)
-	assert.Equal(t, "", cfg.WriteAPIKey)
-	assert.True(t, cfg.SkipMigrations)
+	assert.False(t, cfg.SkipMigrations)
 }
 
 func TestLoad_SlipDatabase_DerivedFromNamespace(t *testing.T) {
@@ -77,6 +78,7 @@ func TestLoad_SlipDatabase_DerivedFromNamespace(t *testing.T) {
 		t.Run(tt.namespace, func(t *testing.T) {
 			clearEnv(t)
 			t.Setenv("SLIPPY_API_KEY", "key")
+			t.Setenv("SLIPPY_WRITE_API_KEY", "write-key")
 			t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
 			t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
 			if tt.namespace != "" {
@@ -93,6 +95,7 @@ func TestLoad_SlipDatabase_DerivedFromNamespace(t *testing.T) {
 func TestLoad_AllValues(t *testing.T) {
 	clearEnv(t)
 	t.Setenv("SLIPPY_API_KEY", "my-secret")
+	t.Setenv("SLIPPY_WRITE_API_KEY", "write-secret")
 	t.Setenv("PORT", "9090")
 	t.Setenv("DRAGONFLY_HOST", "dragonfly.local")
 	t.Setenv("DRAGONFLY_PORT", "6380")
@@ -188,6 +191,7 @@ func TestLoad_MissingGitHubPrivateKey(t *testing.T) {
 func TestLoad_GitHubConfig(t *testing.T) {
 	clearEnv(t)
 	t.Setenv("SLIPPY_API_KEY", "key")
+	t.Setenv("SLIPPY_WRITE_API_KEY", "write-key")
 	t.Setenv("SLIPPY_GITHUB_APP_ID", "12345")
 	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "test-key-pem")
 	t.Setenv("SLIPPY_GITHUB_ENTERPRISE_URL", "https://github.example.com")
@@ -249,15 +253,15 @@ func TestLoad_WriteAPIKey(t *testing.T) {
 	assert.Equal(t, "write-key-abc", cfg.WriteAPIKey)
 }
 
-func TestLoad_WriteAPIKeyOptional(t *testing.T) {
+func TestLoad_MissingWriteAPIKey(t *testing.T) {
 	clearEnv(t)
 	t.Setenv("SLIPPY_API_KEY", "read-key")
 	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
 	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
 
 	cfg, err := Load()
-	require.NoError(t, err)
-	assert.Equal(t, "", cfg.WriteAPIKey)
+	assert.Nil(t, cfg)
+	assert.ErrorContains(t, err, "SLIPPY_WRITE_API_KEY is required")
 }
 
 func TestLoad_SkipMigrations(t *testing.T) {
@@ -266,7 +270,7 @@ func TestLoad_SkipMigrations(t *testing.T) {
 		envVal   string
 		expected bool
 	}{
-		{"default (absent)", "", true},
+		{"default (absent)", "", false},
 		{"explicit true", "true", true},
 		{"explicit TRUE", "TRUE", true},
 		{"explicit 1", "1", true},
@@ -278,6 +282,7 @@ func TestLoad_SkipMigrations(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			clearEnv(t)
 			t.Setenv("SLIPPY_API_KEY", "key")
+			t.Setenv("SLIPPY_WRITE_API_KEY", "write-key")
 			t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
 			t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
 			if tt.envVal != "" {
@@ -294,6 +299,7 @@ func TestLoad_SkipMigrations(t *testing.T) {
 func TestLoad_SkipMigrations_Invalid(t *testing.T) {
 	clearEnv(t)
 	t.Setenv("SLIPPY_API_KEY", "key")
+	t.Setenv("SLIPPY_WRITE_API_KEY", "write-key")
 	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
 	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
 	t.Setenv("SLIPPY_SKIP_MIGRATIONS", "yes")
