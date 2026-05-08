@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -65,9 +66,14 @@ func (h *ImageTagHandler) getImageTags(ctx context.Context, input *GetImageTagsI
 	)
 	defer span.End()
 
+	slog.InfoContext(ctx, "image_tag: resolve",
+		"correlation_id", input.CorrelationID)
+
 	result, err := h.imageTagReader.ResolveImageTags(ctx, input.CorrelationID)
 	if err != nil {
 		recordHandlerError(span, err)
+		slog.ErrorContext(ctx, "image_tag: resolve failed",
+			"correlation_id", input.CorrelationID, "error", err)
 		return nil, mapImageTagError(err)
 	}
 
@@ -77,6 +83,11 @@ func (h *ImageTagHandler) getImageTags(ctx context.Context, input *GetImageTagsI
 		attribute.Int("image_tag.component_count", len(result.Tags)),
 	)
 	span.SetStatus(codes.Ok, "")
+	slog.InfoContext(ctx, "image_tag: resolved",
+		"correlation_id", input.CorrelationID,
+		"build_scope", result.BuildScope,
+		"slip_tag", result.SlipTag,
+		"component_count", len(result.Tags))
 	return &GetImageTagsOutput{Body: result}, nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/google/uuid"
@@ -134,6 +135,8 @@ func (s *AutomationTestResultsStore) runQuery(
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, fmt.Sprintf("query failed: %v", err))
+		slog.ErrorContext(ctx, "automation_test_results: query failed",
+			"op", opLabel, "error", err)
 		return nil, fmt.Errorf("failed to query %s: %w", opLabel, err)
 	}
 	defer func() {
@@ -182,5 +185,7 @@ func (s *AutomationTestResultsStore) runQuery(
 	}
 	span.SetAttributes(attribute.Int("test.result_count", result.Count))
 	span.SetStatus(codes.Ok, "")
+	slog.DebugContext(ctx, "automation_test_results: query returned",
+		"op", opLabel, "result_count", result.Count)
 	return result, nil
 }

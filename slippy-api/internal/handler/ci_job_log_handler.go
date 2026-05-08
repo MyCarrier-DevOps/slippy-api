@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -106,9 +107,17 @@ func (h *CIJobLogHandler) getLogs(ctx context.Context, input *GetLogsInput) (*Ge
 		BuildBranch:     input.BuildBranch,
 	}
 
+	slog.InfoContext(ctx, "logs: query",
+		"correlation_id", input.CorrelationID,
+		"limit", input.Limit,
+		"sort", input.Sort,
+		"has_cursor", input.Cursor != "")
+
 	result, err := h.reader.QueryLogs(ctx, query)
 	if err != nil {
 		recordHandlerError(span, err)
+		slog.ErrorContext(ctx, "logs: query failed",
+			"correlation_id", input.CorrelationID, "error", err)
 		if errors.Is(err, domain.ErrInvalidCursor) {
 			return nil, huma.NewError(http.StatusBadRequest, "invalid cursor parameter")
 		}
@@ -117,6 +126,10 @@ func (h *CIJobLogHandler) getLogs(ctx context.Context, input *GetLogsInput) (*Ge
 
 	span.SetAttributes(attribute.Int("log.result_count", result.Count))
 	span.SetStatus(codes.Ok, "")
+	slog.InfoContext(ctx, "logs: query returned",
+		"correlation_id", input.CorrelationID,
+		"result_count", result.Count,
+		"has_next_page", result.NextCursor != "")
 
 	out := &GetLogsOutput{}
 	out.Body.Logs = result.Logs

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -150,6 +151,8 @@ func (s *CIJobLogStore) QueryLogs(
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, fmt.Sprintf("query failed: %v", err))
+		slog.ErrorContext(ctx, "cijob: query failed",
+			"correlation_id", q.CorrelationID, "error", err)
 		return nil, fmt.Errorf("failed to query ci job logs: %w", err)
 	}
 	defer func() {
@@ -190,6 +193,10 @@ func (s *CIJobLogStore) QueryLogs(
 
 	span.SetAttributes(attribute.Int("log.result_count", result.Count))
 	span.SetStatus(codes.Ok, "")
+	slog.DebugContext(ctx, "cijob: query returned",
+		"correlation_id", q.CorrelationID,
+		"result_count", result.Count,
+		"has_next_cursor", result.NextCursor != "")
 	return result, nil
 }
 

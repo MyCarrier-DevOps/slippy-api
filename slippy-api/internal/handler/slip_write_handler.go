@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -247,9 +248,19 @@ func (h *SlipWriteHandler) createSlip(ctx context.Context, input *CreateSlipInpu
 		trace.WithAttributes(
 			attribute.String("slip.correlation_id", input.Body.CorrelationID),
 			attribute.String("slip.repository", input.Body.Repository),
+			attribute.String("slip.branch", input.Body.Branch),
+			attribute.String("slip.commit_sha", input.Body.CommitSHA),
+			attribute.Int("slip.components_count", len(input.Body.Components)),
 		),
 	)
 	defer span.End()
+
+	slog.InfoContext(ctx, "slip: create",
+		"correlation_id", input.Body.CorrelationID,
+		"repository", input.Body.Repository,
+		"branch", input.Body.Branch,
+		"commit_sha", input.Body.CommitSHA,
+		"components_count", len(input.Body.Components))
 
 	components := make([]domain.ComponentDefinition, len(input.Body.Components))
 	for i, c := range input.Body.Components {
@@ -269,10 +280,23 @@ func (h *SlipWriteHandler) createSlip(ctx context.Context, input *CreateSlipInpu
 	})
 	if err != nil {
 		recordHandlerError(span, err)
+		slog.ErrorContext(ctx, "slip: create failed",
+			"correlation_id", input.Body.CorrelationID,
+			"repository", input.Body.Repository, "error", err)
 		return nil, mapWriteError(err)
 	}
 
+	span.SetAttributes(
+		attribute.Bool("slip.ancestry_resolved", result.AncestryResolved),
+		attribute.Int("slip.warnings_count", len(result.Warnings)),
+	)
 	span.SetStatus(codes.Ok, "")
+	slog.InfoContext(ctx, "slip: created",
+		"correlation_id", input.Body.CorrelationID,
+		"repository", input.Body.Repository,
+		"ancestry_resolved", result.AncestryResolved,
+		"warnings_count", len(result.Warnings))
+
 	h.invalidate(ctx, input.Body.CorrelationID)
 	out := &CreateSlipOutput{}
 	out.Body.Slip = result.Slip
@@ -283,6 +307,7 @@ func (h *SlipWriteHandler) createSlip(ctx context.Context, input *CreateSlipInpu
 	return out, nil
 }
 
+//nolint:dupl // startStep and completeStep share intentional parallel structure; the operations are semantically distinct.
 func (h *SlipWriteHandler) startStep(ctx context.Context, input *StepInput) (*struct{}, error) {
 	componentName := input.componentName()
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.startStep",
@@ -294,15 +319,26 @@ func (h *SlipWriteHandler) startStep(ctx context.Context, input *StepInput) (*st
 	)
 	defer span.End()
 
+	slog.InfoContext(ctx, "step: start",
+		"correlation_id", input.CorrelationID,
+		"step", input.StepName, "component", componentName)
+
 	if err := h.writer.StartStep(ctx, input.CorrelationID, input.StepName, componentName); err != nil {
 		recordHandlerError(span, err)
+		slog.ErrorContext(ctx, "step: start failed",
+			"correlation_id", input.CorrelationID,
+			"step", input.StepName, "component", componentName, "error", err)
 		return nil, mapWriteError(err)
 	}
 	h.invalidate(ctx, input.CorrelationID)
 	span.SetStatus(codes.Ok, "")
+	slog.InfoContext(ctx, "step: started",
+		"correlation_id", input.CorrelationID,
+		"step", input.StepName, "component", componentName)
 	return &struct{}{}, nil
 }
 
+//nolint:dupl // completeStep and startStep share intentional parallel structure; the operations are semantically distinct.
 func (h *SlipWriteHandler) completeStep(ctx context.Context, input *StepInput) (*struct{}, error) {
 	componentName := input.componentName()
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.completeStep",
@@ -314,12 +350,22 @@ func (h *SlipWriteHandler) completeStep(ctx context.Context, input *StepInput) (
 	)
 	defer span.End()
 
+	slog.InfoContext(ctx, "step: complete",
+		"correlation_id", input.CorrelationID,
+		"step", input.StepName, "component", componentName)
+
 	if err := h.writer.CompleteStep(ctx, input.CorrelationID, input.StepName, componentName); err != nil {
 		recordHandlerError(span, err)
+		slog.ErrorContext(ctx, "step: complete failed",
+			"correlation_id", input.CorrelationID,
+			"step", input.StepName, "component", componentName, "error", err)
 		return nil, mapWriteError(err)
 	}
 	h.invalidate(ctx, input.CorrelationID)
 	span.SetStatus(codes.Ok, "")
+	slog.InfoContext(ctx, "step: completed",
+		"correlation_id", input.CorrelationID,
+		"step", input.StepName, "component", componentName)
 	return &struct{}{}, nil
 }
 
@@ -333,6 +379,11 @@ func (h *SlipWriteHandler) failStep(ctx context.Context, input *FailStepInput) (
 	)
 	defer span.End()
 
+	slog.InfoContext(ctx, "step: fail",
+		"correlation_id", input.CorrelationID,
+		"step", input.StepName, "component", input.Body.ComponentName,
+		"reason", input.Body.Reason)
+
 	if err := h.writer.FailStep(
 		ctx,
 		input.CorrelationID,
@@ -341,35 +392,47 @@ func (h *SlipWriteHandler) failStep(ctx context.Context, input *FailStepInput) (
 		input.Body.Reason,
 	); err != nil {
 		recordHandlerError(span, err)
+		slog.ErrorContext(ctx, "step: fail failed",
+			"correlation_id", input.CorrelationID,
+			"step", input.StepName, "component", input.Body.ComponentName, "error", err)
 		return nil, mapWriteError(err)
 	}
 	h.invalidate(ctx, input.CorrelationID)
 	span.SetStatus(codes.Ok, "")
+	slog.InfoContext(ctx, "step: failed (recorded)",
+		"correlation_id", input.CorrelationID,
+		"step", input.StepName, "component", input.Body.ComponentName)
 	return &struct{}{}, nil
 }
 
 func (h *SlipWriteHandler) skipStep(ctx context.Context, input *SkipStepInput) (*struct{}, error) {
+	componentName := input.componentName()
+	reason := input.reason()
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.skipStep",
 		trace.WithAttributes(
 			attribute.String("slip.correlation_id", input.CorrelationID),
 			attribute.String("slip.step_name", input.StepName),
-			attribute.String("slip.component_name", input.componentName()),
+			attribute.String("slip.component_name", componentName),
 		),
 	)
 	defer span.End()
 
-	if err := h.writer.SkipStep(
-		ctx,
-		input.CorrelationID,
-		input.StepName,
-		input.componentName(),
-		input.reason(),
-	); err != nil {
+	slog.InfoContext(ctx, "step: skip",
+		"correlation_id", input.CorrelationID,
+		"step", input.StepName, "component", componentName, "reason", reason)
+
+	if err := h.writer.SkipStep(ctx, input.CorrelationID, input.StepName, componentName, reason); err != nil {
 		recordHandlerError(span, err)
+		slog.ErrorContext(ctx, "step: skip failed",
+			"correlation_id", input.CorrelationID,
+			"step", input.StepName, "component", componentName, "error", err)
 		return nil, mapWriteError(err)
 	}
 	h.invalidate(ctx, input.CorrelationID)
 	span.SetStatus(codes.Ok, "")
+	slog.InfoContext(ctx, "step: skipped",
+		"correlation_id", input.CorrelationID,
+		"step", input.StepName, "component", componentName)
 	return &struct{}{}, nil
 }
 
@@ -383,6 +446,10 @@ func (h *SlipWriteHandler) setImageTag(ctx context.Context, input *SetImageTagIn
 	)
 	defer span.End()
 
+	slog.InfoContext(ctx, "image_tag: set",
+		"correlation_id", input.CorrelationID,
+		"component", input.ComponentName, "image_tag", input.Body.ImageTag)
+
 	if err := h.writer.SetComponentImageTag(
 		ctx,
 		input.CorrelationID,
@@ -390,13 +457,20 @@ func (h *SlipWriteHandler) setImageTag(ctx context.Context, input *SetImageTagIn
 		input.Body.ImageTag,
 	); err != nil {
 		recordHandlerError(span, err)
+		slog.ErrorContext(ctx, "image_tag: set failed",
+			"correlation_id", input.CorrelationID,
+			"component", input.ComponentName, "error", err)
 		return nil, mapWriteError(err)
 	}
 	h.invalidate(ctx, input.CorrelationID)
 	span.SetStatus(codes.Ok, "")
+	slog.InfoContext(ctx, "image_tag: set ok",
+		"correlation_id", input.CorrelationID,
+		"component", input.ComponentName, "image_tag", input.Body.ImageTag)
 	return &struct{}{}, nil
 }
 
+//nolint:dupl // promoteSlip and abandonSlip share intentional parallel structure; the operations are semantically distinct.
 func (h *SlipWriteHandler) promoteSlip(ctx context.Context, input *PromoteSlipInput) (*struct{}, error) {
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.promoteSlip",
 		trace.WithAttributes(
@@ -406,15 +480,24 @@ func (h *SlipWriteHandler) promoteSlip(ctx context.Context, input *PromoteSlipIn
 	)
 	defer span.End()
 
+	slog.InfoContext(ctx, "slip: promote",
+		"correlation_id", input.CorrelationID, "promoted_to", input.Body.PromotedTo)
+
 	if err := h.writer.PromoteSlip(ctx, input.CorrelationID, input.Body.PromotedTo); err != nil {
 		recordHandlerError(span, err)
+		slog.ErrorContext(ctx, "slip: promote failed",
+			"correlation_id", input.CorrelationID,
+			"promoted_to", input.Body.PromotedTo, "error", err)
 		return nil, mapWriteError(err)
 	}
 	h.invalidate(ctx, input.CorrelationID)
 	span.SetStatus(codes.Ok, "")
+	slog.InfoContext(ctx, "slip: promoted",
+		"correlation_id", input.CorrelationID, "promoted_to", input.Body.PromotedTo)
 	return &struct{}{}, nil
 }
 
+//nolint:dupl // abandonSlip and promoteSlip share intentional parallel structure; the operations are semantically distinct.
 func (h *SlipWriteHandler) abandonSlip(ctx context.Context, input *AbandonSlipInput) (*struct{}, error) {
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.abandonSlip",
 		trace.WithAttributes(
@@ -424,12 +507,20 @@ func (h *SlipWriteHandler) abandonSlip(ctx context.Context, input *AbandonSlipIn
 	)
 	defer span.End()
 
+	slog.InfoContext(ctx, "slip: abandon",
+		"correlation_id", input.CorrelationID, "superseded_by", input.Body.SupersededBy)
+
 	if err := h.writer.AbandonSlip(ctx, input.CorrelationID, input.Body.SupersededBy); err != nil {
 		recordHandlerError(span, err)
+		slog.ErrorContext(ctx, "slip: abandon failed",
+			"correlation_id", input.CorrelationID,
+			"superseded_by", input.Body.SupersededBy, "error", err)
 		return nil, mapWriteError(err)
 	}
 	h.invalidate(ctx, input.CorrelationID)
 	span.SetStatus(codes.Ok, "")
+	slog.InfoContext(ctx, "slip: abandoned",
+		"correlation_id", input.CorrelationID, "superseded_by", input.Body.SupersededBy)
 	return &struct{}{}, nil
 }
 

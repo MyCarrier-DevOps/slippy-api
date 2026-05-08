@@ -49,7 +49,31 @@ func NewSlipResolverAdapter(
 var _ domain.SlipReader = (*SlipResolverAdapter)(nil)
 
 func (a *SlipResolverAdapter) Load(ctx context.Context, correlationID string) (*domain.Slip, error) {
-	return a.reader.Load(ctx, correlationID)
+	ctx, span := otel.Tracer(ancestryTracerName).Start(ctx, "ancestry.Load",
+		trace.WithAttributes(
+			attribute.String("slip.correlation_id", correlationID),
+		),
+	)
+	defer span.End()
+
+	slip, err := a.reader.Load(ctx, correlationID)
+	if err != nil {
+		span.RecordError(err)
+		if errors.Is(err, slippy.ErrSlipNotFound) {
+			span.SetStatus(codes.Unset, "not found")
+		} else {
+			span.SetStatus(codes.Error, "load failed")
+			slog.ErrorContext(ctx, "ancestry: load by correlation_id failed",
+				"correlation_id", correlationID, "error", err)
+		}
+		return nil, err
+	}
+	span.SetAttributes(
+		attribute.String("slip.slip_repository", slip.Repository),
+		attribute.String("slip.status", string(slip.Status)),
+	)
+	span.SetStatus(codes.Ok, "")
+	return slip, nil
 }
 
 func (a *SlipResolverAdapter) LoadByCommit(

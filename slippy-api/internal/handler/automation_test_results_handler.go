@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -159,9 +160,18 @@ func (h *AutomationTestResultsHandler) getAutomationTestResults(
 	)
 	defer span.End()
 
+	slog.InfoContext(ctx, "automation_test_results: query",
+		"correlation_id", input.CorrelationID,
+		"environment", input.Environment,
+		"stack", input.Stack,
+		"stage", input.Stage,
+		"attempt", input.Attempt)
+
 	correlationID, err := uuid.Parse(input.CorrelationID)
 	if err != nil {
 		recordHandlerError(span, err)
+		slog.WarnContext(ctx, "automation_test_results: invalid correlation_id",
+			"correlation_id", input.CorrelationID, "error", err)
 		return nil, huma.NewError(http.StatusBadRequest, "invalid correlationID")
 	}
 
@@ -174,11 +184,15 @@ func (h *AutomationTestResultsHandler) getAutomationTestResults(
 	})
 	if err != nil {
 		recordHandlerError(span, err)
+		slog.ErrorContext(ctx, "automation_test_results: query failed",
+			"correlation_id", input.CorrelationID, "error", err)
 		return nil, huma.NewError(http.StatusInternalServerError, "internal error")
 	}
 
 	span.SetAttributes(attribute.Int("test.result_count", result.Count))
 	span.SetStatus(codes.Ok, "")
+	slog.InfoContext(ctx, "automation_test_results: query returned",
+		"correlation_id", input.CorrelationID, "result_count", result.Count)
 
 	out := &GetAutomationTestResultsOutput{}
 	out.Body.Runs = result.Runs
@@ -207,13 +221,26 @@ func (h *AutomationTestResultsHandler) getTestsByCorrelationID(
 	)
 	defer span.End()
 
+	slog.InfoContext(ctx, "automation_tests: query by correlation",
+		"correlation_id", input.CorrelationID,
+		"environment", input.Environment,
+		"stack", input.Stack,
+		"stage", input.Stage,
+		"attempt", input.Attempt,
+		"status", status,
+		"limit", input.Limit)
+
 	correlationID, err := uuid.Parse(input.CorrelationID)
 	if err != nil {
 		recordHandlerError(span, err)
+		slog.WarnContext(ctx, "automation_tests: invalid correlation_id",
+			"correlation_id", input.CorrelationID, "error", err)
 		return nil, huma.NewError(http.StatusBadRequest, "invalid correlationID")
 	}
 
 	if input.Attempt > 255 {
+		slog.WarnContext(ctx, "automation_tests: attempt out of range",
+			"correlation_id", input.CorrelationID, "attempt", input.Attempt)
 		return nil, huma.NewError(http.StatusBadRequest, "attempt must be between 0 and 255")
 	}
 
@@ -229,6 +256,8 @@ func (h *AutomationTestResultsHandler) getTestsByCorrelationID(
 	})
 	if err != nil {
 		recordHandlerError(span, err)
+		slog.ErrorContext(ctx, "automation_tests: query by correlation failed",
+			"correlation_id", input.CorrelationID, "error", err)
 		if errors.Is(err, domain.ErrInvalidTestsCursor) {
 			return nil, huma.NewError(http.StatusBadRequest, "invalid cursor parameter")
 		}
@@ -237,6 +266,10 @@ func (h *AutomationTestResultsHandler) getTestsByCorrelationID(
 
 	span.SetAttributes(attribute.Int("test.result_count", result.Count))
 	span.SetStatus(codes.Ok, "")
+	slog.InfoContext(ctx, "automation_tests: query by correlation returned",
+		"correlation_id", input.CorrelationID,
+		"result_count", result.Count,
+		"has_next_page", result.NextCursor != "")
 
 	out := &GetTestsOutput{}
 	out.Body.Tests = result.Tests
@@ -262,14 +295,21 @@ func (h *AutomationTestResultsHandler) getTestByCorrelationID(
 	)
 	defer span.End()
 
+	slog.InfoContext(ctx, "automation_test: load",
+		"correlation_id", input.CorrelationID, "test_id", input.TestID)
+
 	correlationID, err := uuid.Parse(input.CorrelationID)
 	if err != nil {
 		recordHandlerError(span, err)
+		slog.WarnContext(ctx, "automation_test: invalid correlation_id",
+			"correlation_id", input.CorrelationID, "error", err)
 		return nil, huma.NewError(http.StatusBadRequest, "invalid correlationID")
 	}
 	testID, err := uuid.Parse(input.TestID)
 	if err != nil {
 		recordHandlerError(span, err)
+		slog.WarnContext(ctx, "automation_test: invalid test_id",
+			"correlation_id", input.CorrelationID, "test_id", input.TestID, "error", err)
 		return nil, huma.NewError(http.StatusBadRequest, "invalid testId")
 	}
 
@@ -279,6 +319,8 @@ func (h *AutomationTestResultsHandler) getTestByCorrelationID(
 	})
 	if err != nil {
 		recordHandlerError(span, err)
+		slog.ErrorContext(ctx, "automation_test: load failed",
+			"correlation_id", input.CorrelationID, "test_id", input.TestID, "error", err)
 		if errors.Is(err, domain.ErrTestNotFound) {
 			return nil, huma.NewError(http.StatusNotFound, "test not found")
 		}
@@ -286,6 +328,8 @@ func (h *AutomationTestResultsHandler) getTestByCorrelationID(
 	}
 
 	span.SetStatus(codes.Ok, "")
+	slog.InfoContext(ctx, "automation_test: loaded",
+		"correlation_id", input.CorrelationID, "test_id", input.TestID)
 	return &GetTestOutput{Body: *res}, nil
 }
 
