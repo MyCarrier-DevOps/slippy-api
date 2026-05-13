@@ -49,6 +49,59 @@ REST API for CI/CD routing slips. Provides read endpoints to query routing slips
 
 ## Recent Changes
 
+### 2026-05-11 — Async-Insert Race Fix in hydrateAndPersist (PR: fix/hydrate-and-persist-async-insert-race)
+
+**Context:** Production slip `b058127d-fe0a-497d-81e6-08edc7ea71b2` (MC.Shipment, `dev_tests` step) showed `dev_tests_status=running` in `routing_slips` despite TestEngine.Worker having called `CompleteStep`. Root cause: same ClickHouse `async_insert=1` visibility race as goLibMyCarrier PR #59, but in the `hydrateAndPersist` code path in `SlipWriterAdapter` rather than inside the library.
+
+**Race mechanism:**
+1. CLI/TestEngine calls `POST /v1/slips/{id}/steps/dev_tests/complete`
+2. `SlipWriterAdapter.CompleteStep` calls `client.CompleteStep` → writes row to `slip_component_states` (`appendHistoryWithOverrides` in goLibMyCarrier)
+3. `hydrateAndPersist` calls `client.Load(correlationID)` → `hydrateSlip` SELECT from `slip_component_states` — but the row just written is not yet visible (async buffer not flushed, ~200ms lag)
+4. `Update()` writes the stale `running` status back to `routing_slips.<dev_tests_status>` — permanently stuck (I5 violation)
+
+**Scope:** Affects all pure pipeline steps (`unit_tests`, `secret_scan`, `dev_tests`, `dev_deploy`, `preprod_deploy`, `preprod_tests`, etc.) — any step where `isPipelineStep()` returns `true`. Aggregate steps (`builds`) are already fixed by goLibMyCarrier PR #59 (`overlayComponentState`).
+
+#### Fix (`slippy-api/internal/infrastructure/slip_writer.go`)
+
+1. **`overlayPipelineStep`** — new pure function. Read-your-own-writes safety net: after `Load()` returns inside `hydrateAndPersist`, merges the just-written step state directly into the in-memory `slip.Steps[stepName]` before `Update()`. Mirrors the sentinel path of goLibMyCarrier's `overlayComponentState` (PR #59), applied to `slippy.Step` rather than `ComponentStepData`.
+2. **`hydrateAndPersist` signature extended** — now accepts `(stepName string, status StepStatus, writtenAt time.Time)`. `writtenAt` is captured before the library call so the overlay timestamp is always at-or-before the ClickHouse INSERT clock.
+3. **Callers updated** — `StartStep` (→ `running`), `CompleteStep` (→ `completed`), `FailStep` (→ `failed`), `SkipStep` (→ `skipped`) each capture `writtenAt := time.Now()` before the underlying library call and pass the appropriate status to `hydrateAndPersist`.
+4. **Overlay rule** — `step.CompletedAt == nil || writtenAt.After(*step.CompletedAt)` — the new status wins unless the `Load`-returned value is provably newer. Defensive guard prevents overwriting a concurrent terminal event.
+
+#### Tests
+
+- `TestHydrateAndPersist_AsyncInsertRace_CompleteStep` — core regression: Load returns stale `running`, after overlay persisted step must be `completed`. Mirrors `TestOverlayUpdatesStepsStatus_T1Regression` in goLibMyCarrier.
+- `TestHydrateAndPersist_AsyncInsertRace_FailStep` — same for `failed` path.
+- `TestHydrateAndPersist_OverlaySkipsNewerStatus` — guard: overlay does not overwrite a newer `CompletedAt` from Load.
+- `TestOverlayPipelineStep_NilSlip`, `TestOverlayPipelineStep_MissingStep`, `TestOverlayPipelineStep_NilCompletedAt`, `TestOverlayPipelineStep_OlderCompletedAt` — unit tests for `overlayPipelineStep` helper.
+
+#### Round-1 review findings applied (F1–F5)
+
+Round-1 DA review caught a critical secondary bug in the initial fix and produced five findings:
+
+- **F1 (P1, critical)** — `overlayPipelineStep` guard `step.CompletedAt == nil || writtenAt.After(*step.CompletedAt)` allowed a non-terminal `running` overlay to clobber a terminal `completed` status. Concrete bug: slip `b058127d` had a second `StartStep` at 17:01 arriving after `CompleteStep` at 16:58 — `writtenAt` (`time.Now()`) was after the 16:58 `CompletedAt`, so the overlay wrote `running` over `completed`. **Fix:** added early-return guard `if !status.IsTerminal() && step.CompletedAt != nil { return }` before the timestamp check. This enforces terminal-wins invariant (I2/I5).
+- **F2** — Added two new regression tests that FAIL without the F1 guard and PASS with it: `TestOverlayPipelineStep_RunningDoesNotClobberTerminal` (unit) and `TestHydrateAndPersist_StartStep_DoesNotClobberTerminalStatus` (end-to-end via `StartStep`).
+- **F3** — Added doc comment to `overlayPipelineStep` explaining `ApplyStatusTransition` set-once `CompletedAt` behaviour on re-run paths.
+- **F4** — Added doc comment noting cross-repo duplication with `goLibMyCarrier`'s `overlayComponentState` and explaining why it is intentional.
+- **F5** — Added `slip.Steps == nil` early-return guard for nil-map symmetry with `overlayComponentState`'s `Aggregates` nil-init pattern.
+
+#### Spec alignment
+
+| Invariant | Impact |
+|---|---|
+| **I5** (cached column == event-log-derived) | **Strengthened** — eliminates permanent stale window for pipeline-level steps. External CH readers retain bounded ~200ms staleness during async flush (unchanged); the fix only eliminates permanent staleness from the write-back path. |
+| I1–I4 | Unaffected — enforced by `checkPipelineCompletion` inside goLibMyCarrier, which runs before `hydrateAndPersist`. |
+
+#### Out of scope (follow-ups from PR #59 still apply)
+
+1. Cache invalidation — `cache.go` is passthrough; when Dragonfly cache activates, invalidate at `slip_write_handler.go:364`.
+2. Crash recovery — if slippy-api crashes between library INSERT and `hydrateAndPersist` Update, no re-fire mechanism exists. Needs WAL or periodic reconciler.
+
+**Sibling fix:** goLibMyCarrier PR #59 (aggregate steps).
+**Coverage:** `overlayPipelineStep` 100% · `hydrateAndPersist` 100% · infrastructure package 95.9% · lint 0 issues.
+
+---
+
 ### 2026-04-13: End-to-end testing, .dockerignore, routing_slips write-back analysis
 
 **End-to-end test script** (`slippy-api/scripts/test-script.sh`):

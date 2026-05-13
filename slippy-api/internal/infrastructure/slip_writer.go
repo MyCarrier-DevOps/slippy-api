@@ -3,6 +3,7 @@ package infrastructure
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -66,12 +67,15 @@ func (a *SlipWriterAdapter) StartStep(ctx context.Context, correlationID, stepNa
 	)
 	defer span.End()
 
+	writtenAt := time.Now()
 	if err := a.client.StartStep(ctx, correlationID, stepName, componentName); err != nil {
 		recordWriterError(span, err)
 		return err
 	}
 	if a.isPipelineStep(stepName, componentName) {
-		if err := a.hydrateAndPersist(ctx, correlationID); err != nil {
+		if err := a.hydrateAndPersist(
+			ctx, correlationID, stepName, slippy.StepStatusRunning, writtenAt,
+		); err != nil {
 			span.AddEvent("hydration failed", trace.WithAttributes(attribute.String("error", err.Error())))
 		}
 	}
@@ -92,6 +96,7 @@ func (a *SlipWriterAdapter) CompleteStep(ctx context.Context, correlationID, ste
 	// Pipeline-level terminal events route directly: steps.go:101 guard fires
 	// checkPipelineCompletion automatically, saving a redundant Load.
 	// Component events MUST go through RunPostExecution to drive aggregate recomputation.
+	writtenAt := time.Now()
 	if componentName != "" {
 		if _, err := a.client.RunPostExecution(ctx, slippy.PostExecutionOptions{
 			CorrelationID:     correlationID,
@@ -109,7 +114,9 @@ func (a *SlipWriterAdapter) CompleteStep(ctx context.Context, correlationID, ste
 		}
 	}
 	if a.isPipelineStep(stepName, componentName) {
-		if err := a.hydrateAndPersist(ctx, correlationID); err != nil {
+		if err := a.hydrateAndPersist(
+			ctx, correlationID, stepName, slippy.StepStatusCompleted, writtenAt,
+		); err != nil {
 			span.AddEvent("hydration failed", trace.WithAttributes(attribute.String("error", err.Error())))
 		}
 	}
@@ -130,6 +137,7 @@ func (a *SlipWriterAdapter) FailStep(ctx context.Context, correlationID, stepNam
 	// Pipeline-level terminal events route directly: steps.go:101 guard fires
 	// checkPipelineCompletion automatically, saving a redundant Load.
 	// Component events MUST go through RunPostExecution to drive aggregate recomputation.
+	writtenAt := time.Now()
 	if componentName != "" {
 		if _, err := a.client.RunPostExecution(ctx, slippy.PostExecutionOptions{
 			CorrelationID:     correlationID,
@@ -148,7 +156,9 @@ func (a *SlipWriterAdapter) FailStep(ctx context.Context, correlationID, stepNam
 		}
 	}
 	if a.isPipelineStep(stepName, componentName) {
-		if err := a.hydrateAndPersist(ctx, correlationID); err != nil {
+		if err := a.hydrateAndPersist(
+			ctx, correlationID, stepName, slippy.StepStatusFailed, writtenAt,
+		); err != nil {
 			span.AddEvent("hydration failed", trace.WithAttributes(attribute.String("error", err.Error())))
 		}
 	}
@@ -166,12 +176,15 @@ func (a *SlipWriterAdapter) SkipStep(ctx context.Context, correlationID, stepNam
 	)
 	defer span.End()
 
+	writtenAt := time.Now()
 	if err := a.client.SkipStep(ctx, correlationID, stepName, componentName, reason); err != nil {
 		recordWriterError(span, err)
 		return err
 	}
 	if a.isPipelineStep(stepName, componentName) {
-		if err := a.hydrateAndPersist(ctx, correlationID); err != nil {
+		if err := a.hydrateAndPersist(
+			ctx, correlationID, stepName, slippy.StepStatusSkipped, writtenAt,
+		); err != nil {
 			span.AddEvent("hydration failed", trace.WithAttributes(attribute.String("error", err.Error())))
 		}
 	}
@@ -254,17 +267,39 @@ func (a *SlipWriterAdapter) isPipelineStep(stepName, componentName string) bool 
 // for pipeline steps, whose AppendHistory path copies columns verbatim and would
 // otherwise leave *_status stale until the next aggregate write.
 //
+// Read-your-own-writes overlay (I5 safety net):
+// With ClickHouse async_insert=1 active server-side, the INSERT emitted by the
+// preceding client call (StartStep / CompleteStep / FailStep / SkipStep) may not
+// be visible to the SELECT inside Load's hydrateSlip. That would cause the
+// just-written status to be overwritten with the pre-insert stale value, leaving
+// routing_slips permanently stuck (I5 violation). To close this window, after
+// Load returns we overlay the just-written step state directly into the in-memory
+// slip before calling Update. This mirrors the overlayComponentState pattern from
+// goLibMyCarrier PR #59, applied here to pipeline-level steps.
+//
+// Only pipeline-level steps are handled here (callers are guarded by
+// isPipelineStep which filters out aggregate and component steps). The aggregate
+// race is handled inside goLibMyCarrier by overlayComponentState in the
+// updateAggregateStatusFromComponentStates* functions.
+//
 // Update is called directly on the store rather than through Client because Client
 // does not expose an Update method. This intentionally bypasses any future
 // Client-level hooks around Update; revisit if Client gains such hooks.
 //
 // Errors are returned to the caller but treated as non-fatal — the step event is
 // already durably recorded in slip_component_states.
-func (a *SlipWriterAdapter) hydrateAndPersist(ctx context.Context, correlationID string) error {
+func (a *SlipWriterAdapter) hydrateAndPersist(
+	ctx context.Context,
+	correlationID, stepName string,
+	status slippy.StepStatus,
+	writtenAt time.Time,
+) error {
 	ctx, span := otel.Tracer(writerTracerName).Start(ctx, "writer.hydrateAndPersist",
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(
 			attribute.String("slip.correlation_id", correlationID),
+			attribute.String("slip.step_name", stepName),
+			attribute.String("slip.status", string(status)),
 		),
 	)
 	defer span.End()
@@ -275,12 +310,69 @@ func (a *SlipWriterAdapter) hydrateAndPersist(ctx context.Context, correlationID
 		return fmt.Errorf("hydrateAndPersist: load failed: %w", err)
 	}
 
+	// Read-your-own-writes overlay: merge the just-written step state into the
+	// in-memory slip so Update writes the authoritative value even when the
+	// async-insert buffer has not yet flushed. This directly addresses the I5
+	// materialization race for pipeline-level steps (componentName == "").
+	//
+	// Strengthens I5: routing_slips.<step>_status == event-log-derived status.
+	// Does not affect I1–I4 (those are enforced by checkPipelineCompletion inside
+	// the library, which runs before this hydration path).
+	overlayPipelineStep(slip, stepName, status, writtenAt)
+
 	if err := a.client.Store().Update(ctx, slip); err != nil {
 		recordWriterError(span, err)
 		return fmt.Errorf("hydrateAndPersist: update failed: %w", err)
 	}
 
 	return nil
+}
+
+// overlayPipelineStep applies a just-written pipeline-step state to an in-memory
+// slip, acting as a read-your-own-writes safety net for ClickHouse async-insert
+// visibility lag.
+//
+// Only pipeline-level steps (componentName == "") are handled. Aggregate steps
+// are handled inside goLibMyCarrier by overlayComponentState.
+//
+// Overlay rule: if the step exists in slip.Steps and the writtenAt timestamp is
+// strictly after the existing CompletedAt (or CompletedAt is nil), the new status
+// wins. This is the sentinel path from goLibMyCarrier's overlayComponentState
+// (clickhouse_store.go) applied to slippy.Step rather than ComponentStepData.
+//
+// Note: ApplyStatusTransition sets CompletedAt only on the first terminal
+// transition (when CompletedAt is nil). On a re-run path (failed → running →
+// completed) where a prior CompletedAt exists, the Status is updated correctly
+// but CompletedAt retains the prior run's timestamp. This is intentional and
+// consistent with ComponentStepData.ApplyStatusTransition in goLibMyCarrier.
+//
+// Mirrors the sentinel-path logic of goLibMyCarrier's overlayComponentState
+// (clickhouse_store.go:2233-2241). Duplication is intentional:
+// overlayComponentState is an unexported function and cannot be called from
+// this module. Both functions must stay in sync.
+func overlayPipelineStep(slip *slippy.Slip, stepName string, status slippy.StepStatus, writtenAt time.Time) {
+	if slip == nil {
+		return
+	}
+	if slip.Steps == nil {
+		return
+	}
+	step, ok := slip.Steps[stepName]
+	if !ok {
+		return
+	}
+	// Never overwrite a terminal status with a non-terminal one. This handles the
+	// case where a StartStep arrives after a concurrent (or out-of-order re-trigger)
+	// terminal event has already completed and become visible to Load(). Without
+	// this guard, writtenAt = time.Now() would be after the past CompletedAt and
+	// the overlay would clobber terminal → running, violating I5 and I2.
+	if !status.IsTerminal() && step.CompletedAt != nil {
+		return
+	}
+	if step.CompletedAt == nil || writtenAt.After(*step.CompletedAt) {
+		step.ApplyStatusTransition(status, writtenAt)
+		slip.Steps[stepName] = step
+	}
 }
 
 // recordWriterError records an error on a span, distinguishing client errors

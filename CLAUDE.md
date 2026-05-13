@@ -119,3 +119,15 @@ When bumping `goLibMyCarrier/slippy` to a new version:
 - Type aliases in `domain/slip.go` keep handlers decoupled from direct `goLibMyCarrier/slippy` imports.
 - Hydration (`hydrateAndPersist`) is non-fatal — step events are durable in `slip_component_states` even if the post-write hydration fails.
 - Mock implementations of `slippy.SlipStore` live in `internal/infrastructure/store_test.go`. The compile-time check `var _ slippy.SlipStore = (*mockSlipStore)(nil)` in `z_slipstore_interface_test.go` will catch interface drift on every build.
+
+### Critical Design Pattern: Read-Your-Own-Writes Overlay
+
+**Problem:** With ClickHouse `async_insert=1`, a row inserted by a library call (e.g. `CompleteStep`) may not be visible to the immediately following `SELECT` inside `Load()`. If `hydrateAndPersist` calls `Load` and then `Update`, it can write a stale `running` status back to `routing_slips`, permanently violating I5 (materialization consistency invariant).
+
+**Fix pattern (`overlayPipelineStep` in `slip_writer.go`):** Capture `writtenAt := time.Now()` before the library INSERT call. After `Load()` returns in `hydrateAndPersist`, overlay the just-written `(stepName, status, writtenAt)` into `slip.Steps[stepName]` before `Update()`. The overlay wins if `CompletedAt == nil || writtenAt.After(*CompletedAt)`.
+
+**When to use:** Any new code path that calls `hydrateAndPersist` (or any equivalent Load+Update pattern) immediately after a library INSERT must apply this overlay. The event log row is the truth; the overlay makes the in-memory slip consistent with it before the write-back.
+
+**Aggregate steps:** Do NOT apply this pattern for aggregate steps in slippy-api — those are handled inside goLibMyCarrier by `overlayComponentState` (PR #59). The `isPipelineStep()` guard ensures `hydrateAndPersist` is never called for aggregate or component steps.
+
+**Reference:** goLibMyCarrier PR #59 (`overlayComponentState` in `slippy/clickhouse_store.go`) is the sibling fix for aggregate steps. `STATE_MACHINE_V3.md` §I5 documents the invariant.
