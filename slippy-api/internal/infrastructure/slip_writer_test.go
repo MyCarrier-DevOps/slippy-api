@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -828,4 +829,297 @@ func TestSlipWriterAdapter_CompleteStep_FromFailed_Recovery(t *testing.T) {
 	require.NoError(t, err, "failed → completed recovery must be permitted")
 	assert.True(t, writeCalled, "underlying write must run for recovery transition")
 	assert.Equal(t, slippy.StepStatusCompleted, writtenStatus)
+}
+
+// --- Read-your-own-writes overlay regression tests ---
+//
+// These tests verify that hydrateAndPersist overlays the just-written step status
+// into the in-memory slip before calling Update, even when Load returns a stale
+// value (simulating ClickHouse async-insert visibility lag). Without the overlay,
+// the stale running status would be written back to routing_slips — permanently
+// violating I5. Mirror of TestOverlayUpdatesStepsStatus_T1Regression in goLibMyCarrier.
+
+// TestHydrateAndPersist_AsyncInsertRace_CompleteStep verifies that when Load returns
+// a stale running status for a pipeline step (simulating async-insert lag), CompleteStep
+// overlays completed before Update so routing_slips is not permanently stuck.
+func TestHydrateAndPersist_AsyncInsertRace_CompleteStep(t *testing.T) {
+	const id = "b058127d-fe0a-497d-81e6-08edc7ea71b2"
+	const stepName = "dev_tests"
+
+	// Slip returned by Load has the step still running — simulates async-insert lag
+	// where the just-inserted completed event is not yet visible to the SELECT.
+	staleSlip := &slippy.Slip{
+		CorrelationID: id,
+		Status:        slippy.SlipStatusInProgress,
+		Steps: map[string]slippy.Step{
+			stepName: {Status: slippy.StepStatusRunning},
+		},
+	}
+
+	var persistedSlip *slippy.Slip
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			return nil
+		},
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			// Return a copy to prevent the overlay from modifying the original.
+			copy := *staleSlip
+			steps := make(map[string]slippy.Step, len(staleSlip.Steps))
+			for k, v := range staleSlip.Steps {
+				steps[k] = v
+			}
+			copy.Steps = steps
+			return &copy, nil
+		},
+		updateFn: func(_ context.Context, s *slippy.Slip) error {
+			persistedSlip = s
+			return nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	err := adapter.CompleteStep(context.Background(), id, stepName, "")
+	require.NoError(t, err)
+	require.NotNil(t, persistedSlip, "Update must be called")
+
+	// Core assertion: despite Load returning running (stale), the persisted step
+	// must show completed — the overlay won. This is the I5 invariant.
+	require.Contains(t, persistedSlip.Steps, stepName, "step must be present in persisted slip")
+	assert.Equal(
+		t,
+		slippy.StepStatusCompleted,
+		persistedSlip.Steps[stepName].Status,
+		"overlay must write completed status even when Load returns stale running: I5 regression",
+	)
+}
+
+// TestHydrateAndPersist_AsyncInsertRace_FailStep verifies the overlay for FailStep
+// on a pipeline step when Load returns a stale running status.
+func TestHydrateAndPersist_AsyncInsertRace_FailStep(t *testing.T) {
+	const id = "abc-fail-overlay"
+	const stepName = "dev_tests"
+
+	staleSlip := &slippy.Slip{
+		CorrelationID: id,
+		Status:        slippy.SlipStatusInProgress,
+		Steps: map[string]slippy.Step{
+			stepName: {Status: slippy.StepStatusRunning},
+		},
+	}
+
+	var persistedSlip *slippy.Slip
+	var loadCalls int
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			return nil
+		},
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			loadCalls++
+			copy := *staleSlip
+			steps := make(map[string]slippy.Step, len(staleSlip.Steps))
+			for k, v := range staleSlip.Steps {
+				steps[k] = v
+			}
+			copy.Steps = steps
+			return &copy, nil
+		},
+		updateFn: func(_ context.Context, s *slippy.Slip) error {
+			persistedSlip = s
+			return nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	err := adapter.FailStep(context.Background(), id, stepName, "", "test engine timeout")
+	require.NoError(t, err)
+	require.NotNil(t, persistedSlip, "Update must be called")
+	assert.Equal(
+		t,
+		slippy.StepStatusFailed,
+		persistedSlip.Steps[stepName].Status,
+		"overlay must write failed status even when Load returns stale running: I5 regression",
+	)
+}
+
+// TestHydrateAndPersist_OverlaySkipsNewerStatus verifies the guard condition: if the
+// slip returned by Load already has a newer CompletedAt (e.g. from a concurrent
+// terminal event), the overlay must leave the newer status untouched.
+func TestHydrateAndPersist_OverlaySkipsNewerStatus(t *testing.T) {
+	const id = "abc-newer-guard"
+	const stepName = "dev_tests"
+
+	futureTime := time.Now().Add(time.Hour) // Load returns a step completed in the future
+
+	slipWithNewerStatus := &slippy.Slip{
+		CorrelationID: id,
+		Status:        slippy.SlipStatusInProgress,
+		Steps: map[string]slippy.Step{
+			stepName: {Status: slippy.StepStatusCompleted, CompletedAt: &futureTime},
+		},
+	}
+
+	var persistedSlip *slippy.Slip
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			return nil
+		},
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			copy := *slipWithNewerStatus
+			steps := make(map[string]slippy.Step, len(slipWithNewerStatus.Steps))
+			for k, v := range slipWithNewerStatus.Steps {
+				steps[k] = v
+			}
+			copy.Steps = steps
+			return &copy, nil
+		},
+		updateFn: func(_ context.Context, s *slippy.Slip) error {
+			persistedSlip = s
+			return nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	// CompleteStep for dev_tests — writtenAt will be time.Now() which is < futureTime.
+	err := adapter.CompleteStep(context.Background(), id, stepName, "")
+	require.NoError(t, err)
+	require.NotNil(t, persistedSlip, "Update must be called")
+
+	// The overlay must NOT overwrite the newer CompletedAt from Load.
+	assert.Equal(
+		t,
+		&futureTime,
+		persistedSlip.Steps[stepName].CompletedAt,
+		"overlay must preserve newer CompletedAt from Load (defensive guard)",
+	)
+}
+
+// TestOverlayPipelineStep_NilSlip verifies that overlayPipelineStep is a no-op when
+// called with a nil slip (defensive guard, mirrors overlayComponentState nil check).
+func TestOverlayPipelineStep_NilSlip(t *testing.T) {
+	// Must not panic.
+	overlayPipelineStep(nil, "dev_tests", slippy.StepStatusCompleted, time.Now())
+}
+
+// TestOverlayPipelineStep_MissingStep verifies that overlayPipelineStep is a no-op
+// when the stepName is not present in slip.Steps.
+func TestOverlayPipelineStep_MissingStep(t *testing.T) {
+	slip := &slippy.Slip{
+		Steps: map[string]slippy.Step{},
+	}
+	overlayPipelineStep(slip, "nonexistent_step", slippy.StepStatusCompleted, time.Now())
+	// No panic, no entry added.
+	assert.Empty(t, slip.Steps)
+}
+
+// TestOverlayPipelineStep_NilCompletedAt verifies that an overlay always wins when
+// the existing step has no CompletedAt (i.e. it is still running / pending).
+func TestOverlayPipelineStep_NilCompletedAt(t *testing.T) {
+	slip := &slippy.Slip{
+		Steps: map[string]slippy.Step{
+			"dev_tests": {Status: slippy.StepStatusRunning, CompletedAt: nil},
+		},
+	}
+	now := time.Now()
+	overlayPipelineStep(slip, "dev_tests", slippy.StepStatusCompleted, now)
+	assert.Equal(t, slippy.StepStatusCompleted, slip.Steps["dev_tests"].Status)
+	require.NotNil(t, slip.Steps["dev_tests"].CompletedAt)
+}
+
+// TestOverlayPipelineStep_OlderCompletedAt verifies that an overlay wins when
+// writtenAt is strictly after the existing CompletedAt.
+func TestOverlayPipelineStep_OlderCompletedAt(t *testing.T) {
+	past := time.Now().Add(-time.Hour)
+	slip := &slippy.Slip{
+		Steps: map[string]slippy.Step{
+			"dev_tests": {Status: slippy.StepStatusFailed, CompletedAt: &past},
+		},
+	}
+	now := time.Now()
+	overlayPipelineStep(slip, "dev_tests", slippy.StepStatusCompleted, now)
+	assert.Equal(t, slippy.StepStatusCompleted, slip.Steps["dev_tests"].Status)
+}
+
+// TestOverlayPipelineStep_RunningDoesNotClobberTerminal is the F1 unit regression test.
+// Verifies that a non-terminal (running) overlay is silently dropped when the step
+// already has a terminal status with a past CompletedAt. This is the exact scenario
+// from slip b058127d where a second StartStep at 17:01 arrived after CompleteStep at
+// 16:58, and the overlay clobbered "completed" with "running".
+func TestOverlayPipelineStep_RunningDoesNotClobberTerminal(t *testing.T) {
+	past := time.Now().Add(-3 * time.Minute) // CompleteStep fired 3 min ago
+	slip := &slippy.Slip{
+		Steps: map[string]slippy.Step{
+			"dev_tests": {Status: slippy.StepStatusCompleted, CompletedAt: &past},
+		},
+	}
+	// writtenAt is time.Now() — after past, so the old timestamp guard would have let this through.
+	overlayPipelineStep(slip, "dev_tests", slippy.StepStatusRunning, time.Now())
+	assert.Equal(
+		t,
+		slippy.StepStatusCompleted,
+		slip.Steps["dev_tests"].Status,
+		"running must not clobber completed: F1 guard regression",
+	)
+	assert.Equal(
+		t,
+		&past,
+		slip.Steps["dev_tests"].CompletedAt,
+		"CompletedAt must be preserved when overlay is rejected",
+	)
+}
+
+// TestHydrateAndPersist_StartStep_DoesNotClobberTerminalStatus is the F1 end-to-end
+// regression test via the real hydrateAndPersist path. Reproduces the production
+// scenario from slip b058127d where a second StartStep arrived 3 minutes after
+// CompleteStep, and the overlay clobbered "completed" with "running".
+func TestHydrateAndPersist_StartStep_DoesNotClobberTerminalStatus(t *testing.T) {
+	const id = "b058127d-fe0a-497d-81e6-08edc7ea71b2"
+	const stepName = "push_parsed"
+
+	// Load returns a slip whose step is already terminal (completed 3 min ago).
+	// This simulates the scenario where CompleteStep already flushed and the
+	// second StartStep fires (out-of-order re-trigger).
+	completedAt := time.Now().Add(-3 * time.Minute)
+	terminalSlip := &slippy.Slip{
+		CorrelationID: id,
+		Status:        slippy.SlipStatusInProgress,
+		Steps: map[string]slippy.Step{
+			stepName: {Status: slippy.StepStatusCompleted, CompletedAt: &completedAt},
+		},
+	}
+
+	var persistedSlip *slippy.Slip
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			return nil
+		},
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			// Return a copy so the overlay operates on a fresh value each call.
+			cp := *terminalSlip
+			steps := make(map[string]slippy.Step, len(terminalSlip.Steps))
+			for k, v := range terminalSlip.Steps {
+				steps[k] = v
+			}
+			cp.Steps = steps
+			return &cp, nil
+		},
+		updateFn: func(_ context.Context, s *slippy.Slip) error {
+			persistedSlip = s
+			return nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	// StartStep on a pipeline step (componentName == "") triggers hydrateAndPersist
+	// with StepStatusRunning. The F1 guard must prevent the running overlay from
+	// clobbering the terminal completed status already visible in Load.
+	err := adapter.StartStep(context.Background(), id, stepName, "")
+	require.NoError(t, err)
+	require.NotNil(t, persistedSlip, "Update must still be called (hydration runs)")
+
+	assert.Equal(
+		t,
+		slippy.StepStatusCompleted,
+		persistedSlip.Steps[stepName].Status,
+		"StartStep must not clobber terminal completed status: F1 regression (slip b058127d)",
+	)
 }
