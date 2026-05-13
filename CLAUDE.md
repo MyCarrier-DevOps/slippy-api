@@ -53,20 +53,31 @@ bd close <id>         # Complete work
 
 ## Build & Test
 
+**Always use Makefile targets, NOT raw `go` / `golangci-lint` commands.** The Makefile encodes the canonical lint config, coverage thresholds, and tool versions used by CI. Raw `go test ./...` may pass while `make test` (and CI) fail because of different flags.
+
 ```bash
-# Build all modules
-cd slippy-api && go build ./...
-cd slippy-client && go build ./...
-
-# Run tests (unit only, skip integration/e2e containers)
-cd slippy-api && go test ./... -short -timeout 60s
-
-# Full test suite (requires Docker for testcontainers)
-cd slippy-api && go test ./...
-
-# Lint (installs golangci-lint if missing)
-make lint
+make lint            # golangci-lint w/ repo config (NOT raw `golangci-lint run`)
+make test            # full test suite w/ race + coverage (NOT raw `go test ./...`)
+make fmt             # formatters w/ install-tools (NOT raw `gofmt -l`)
+make tidy            # go mod tidy across modules
+make check-sec       # gosec scan
+make build           # build all binaries
+make clean           # remove build artifacts
+make generate-spec   # regenerate OpenAPI spec
+make generate-client # regenerate slippy-client from spec
 ```
+
+Available targets: `grep -E "^[a-z_-]+:" Makefile`.
+
+**Quick verification (acceptable during iteration):**
+```bash
+go build ./...   # quick compile check
+go vet ./...     # quick static analysis
+```
+
+But **final gate before commit MUST be `make lint && make test`** — CI compares against Makefile output.
+
+**For subagents:** brief them to use `make lint` / `make test` explicitly. Don't let them substitute raw commands. If a target is unfamiliar, list them first via `grep -E "^[a-z_-]+:" Makefile`.
 
 ## Architecture Overview
 
