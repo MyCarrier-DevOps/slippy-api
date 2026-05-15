@@ -13,12 +13,12 @@ github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse v1.3.76 h1:TXMtBIKRJNmQyEn
 github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse v1.3.76/go.mod h1:EnUxH4i1b4IPtQyg+rPTtkbao8FoRodL+h9AaB77bm8=
 github.com/MyCarrier-DevOps/goLibMyCarrier/clickhousemigrator v1.3.76 h1:YR2f+GD07kECdxLmHZ3eDFVCcH/g11oUW8bqGtVq4KE=
 github.com/MyCarrier-DevOps/goLibMyCarrier/clickhousemigrator v1.3.76/go.mod h1:sXdtB7wi0DxKZMkt3QCUmedGcaGf8VG2juBtKz8VhW8=
-github.com/MyCarrier-DevOps/goLibMyCarrier/github v1.3.82-fix-jwt-exp-margin-clock-skew.2 h1:izSoXUEERppkMwN+SY+FzodR8vOKu9Vxe6B5M4dos3g=
-github.com/MyCarrier-DevOps/goLibMyCarrier/github v1.3.82-fix-jwt-exp-margin-clock-skew.2/go.mod h1:LvQXO20huoREbzLtG7UWw7ySQs0DXv/39IuPJ/ujLnE=
+github.com/MyCarrier-DevOps/goLibMyCarrier/github v1.3.82 h1:/S3rJ6VWSmgpncW3oyfjLnoOTsnayIcP6dt3s9aSD68=
+github.com/MyCarrier-DevOps/goLibMyCarrier/github v1.3.82/go.mod h1:LvQXO20huoREbzLtG7UWw7ySQs0DXv/39IuPJ/ujLnE=
 github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.76 h1:kZo5ZsIkR4IPVHszqTLao9lAWbvDmINBXpK0hPfUNaA=
 github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.76/go.mod h1:8ZFrEONoNfgaoY8TnAbq7ZeYDjJcW6XFk5XzwYhzdhs=
-github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.82-fix-jwt-exp-margin-clock-skew.2 h1:VzNOysYBwwfacyiT8GgZkyXjNxSew4YKp1Ew/WSCWAA=
-github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.82-fix-jwt-exp-margin-clock-skew.2/go.mod h1:sySJl+SNkgi8d163l13JO9JSzT6Wbc1obkc2n5GTvjM=
+github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.82 h1:Oecyn2Jw7mSQtWzMy8SfGdpUufHnwpWbYGSc0Qxr6mU=
+github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.82/go.mod h1:sySJl+SNkgi8d163l13JO9JSzT6Wbc1obkc2n5GTvjM=
 github.com/ProtonMail/go-crypto v1.4.1 h1:9RfcZHqEQUvP8RzecWEUafnZVtEvrBVL9BiF67IQOfM=
 github.com/ProtonMail/go-crypto v1.4.1/go.mod h1:e1OaTyu5SYVrO9gKOEhTc+5UcXtTUa+P3uLudwcgPqo=
 github.com/alicebob/miniredis/v2 v2.38.0 h1:nZAzCR+Lj+Vxk4ZXzm2NuKq2O33RXj1XxJ2e2uP9jiw=
