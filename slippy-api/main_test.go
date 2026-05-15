@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	tcredis "github.com/testcontainers/testcontainers-go/modules/redis"
 
 	"github.com/MyCarrier-DevOps/slippy-api/internal/config"
 	"github.com/MyCarrier-DevOps/slippy-api/internal/domain"
@@ -489,29 +489,15 @@ func TestConnectCache_PingFailure(t *testing.T) {
 }
 
 func TestConnectCache_PingSuccess(t *testing.T) {
-	t.Setenv("TESTCONTAINERS_RYUK_DISABLED", "true")
+	// Use miniredis (in-memory pure-Go Redis) instead of testcontainers to
+	// eliminate Docker daemon dependency and AzDO .UnitTestV2 flake.
+	mr := miniredis.RunT(t)
 
-	if testing.Short() {
-		t.Skip("skipping test that requires container runtime in short mode")
-	}
-
-	ctx := context.Background()
-
-	// Start a real Redis container via testcontainers.
-	container, err := tcredis.Run(ctx, "redis:7-alpine")
-	require.NoError(t, err, "failed to start redis container")
-	t.Cleanup(func() { require.NoError(t, container.Terminate(ctx)) })
-
-	connStr, err := container.ConnectionString(ctx)
+	port, err := strconv.Atoi(mr.Port())
 	require.NoError(t, err)
-	opts, err := redis.ParseURL(connStr)
-	require.NoError(t, err)
-
-	// Extract host and port from the container's connection
-	host, port := splitHostPort(opts.Addr)
 
 	cfg := &config.Config{
-		DragonflyHost: host,
+		DragonflyHost: mr.Host(),
 		DragonflyPort: port,
 		CacheTTL:      5 * time.Minute,
 	}
@@ -615,13 +601,3 @@ func TestRun_MissingClickhouseConfig(t *testing.T) {
 	assert.Contains(t, err.Error(), "clickhouse")
 }
 
-// splitHostPort splits an "host:port" string into its components.
-func splitHostPort(addr string) (string, int) {
-	for i := len(addr) - 1; i >= 0; i-- {
-		if addr[i] == ':' {
-			port, _ := strconv.Atoi(addr[i+1:])
-			return addr[:i], port
-		}
-	}
-	return addr, 0
-}

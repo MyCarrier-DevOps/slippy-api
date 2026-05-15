@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	tcredis "github.com/testcontainers/testcontainers-go/modules/redis"
 
 	"github.com/MyCarrier-DevOps/slippy-api/internal/domain"
 	"github.com/MyCarrier-DevOps/slippy-api/internal/handler"
@@ -112,33 +112,16 @@ func buildTestServer(apiKey string, reader domain.SlipReader, rdb redis.Cmdable,
 	return mux
 }
 
-// TestE2E_FullStack_WithRedisContainer spins up a real Redis container via testcontainers,
-// wires the full API stack (auth + cache + handlers), and exercises the endpoints.
-func TestE2E_FullStack_WithRedisContainer(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping e2e test in short mode")
-	}
-
-	// Disable Ryuk reaper — required for Podman compatibility (Ryuk tries to
-	// mount the container socket which Podman does not support).
-	t.Setenv("TESTCONTAINERS_RYUK_DISABLED", "true")
-
+// TestE2E_FullStack_WithRedis wires the full API stack (auth + cache + handlers)
+// against an in-memory miniredis instance (pure Go, no Docker dependency) and
+// exercises the endpoints. Replaces the previous testcontainers-based setup,
+// which flaked on AzDO's Docker daemon.
+func TestE2E_FullStack_WithRedis(t *testing.T) {
 	ctx := context.Background()
 
-	// --- Start Redis container ---
-	redisContainer, err := tcredis.Run(ctx, "redis:7-alpine")
-	require.NoError(t, err, "failed to start redis container")
-	t.Cleanup(func() {
-		require.NoError(t, redisContainer.Terminate(ctx))
-	})
-
-	connStr, err := redisContainer.ConnectionString(ctx)
-	require.NoError(t, err)
-
-	// Parse the connection string into redis.Options
-	opts, err := redis.ParseURL(connStr)
-	require.NoError(t, err)
-	rdb := redis.NewClient(opts)
+	// --- Start in-memory Redis (miniredis) ---
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { rdb.Close() })
 
 	// Verify Redis connectivity
@@ -304,10 +287,11 @@ func TestE2E_FullStack_WithRedisContainer(t *testing.T) {
 		assert.Empty(t, items)
 	})
 
-	// --- Test: Verify Redis received data (cache decorator write-through) ---
-	// Since the current cache decorator is pass-through, we just verify Redis is alive
+	// Verify Redis SET/GET round-trip. The cache decorator is currently a passthrough
+	// (infrastructure/cache.go) — this subtest exercises the client+miniredis path as a
+	// known-good baseline for future cache-population work.
 	t.Run("redis_alive", func(t *testing.T) {
-		err := rdb.Set(ctx, "test:e2e:ping", "pong", time.Minute).Err()
+		err := rdb.Set(ctx, "test:e2e:ping", "pong", 0).Err()
 		require.NoError(t, err)
 		val, err := rdb.Get(ctx, "test:e2e:ping").Result()
 		require.NoError(t, err)
