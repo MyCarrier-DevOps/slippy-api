@@ -287,10 +287,11 @@ func TestE2E_FullStack_WithRedis(t *testing.T) {
 		assert.Empty(t, items)
 	})
 
-	// --- Test: Verify Redis received data (cache decorator write-through) ---
-	// Since the current cache decorator is pass-through, we just verify Redis is alive
+	// Verify Redis SET/GET round-trip. The cache decorator is currently a passthrough
+	// (infrastructure/cache.go) — this subtest exercises the client+miniredis path as a
+	// known-good baseline for future cache-population work.
 	t.Run("redis_alive", func(t *testing.T) {
-		err := rdb.Set(ctx, "test:e2e:ping", "pong", time.Minute).Err()
+		err := rdb.Set(ctx, "test:e2e:ping", "pong", 0).Err()
 		require.NoError(t, err)
 		val, err := rdb.Get(ctx, "test:e2e:ping").Result()
 		require.NoError(t, err)
