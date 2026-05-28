@@ -237,6 +237,45 @@ func buildDedupWriteServer(
 	return mux
 }
 
+// buildNoLockWriteServer wires the same write stack as buildDedupWriteServer but
+// with a NIL locker — dedup disabled. It is the negative control proving the lock
+// is what prevents the duplicate: without it, two concurrent identical-(repo,sha)
+// POSTs both pass the lib's LoadByCommit (which is empty inside the async-insert
+// visibility lag) and each calls Create, materializing TWO slips.
+func buildNoLockWriteServer(
+	t *testing.T,
+	apiKey string,
+	store *asyncInsertSlipStore,
+) http.Handler {
+	t.Helper()
+
+	pipelineCfg, err := slippy.ParsePipelineConfig([]byte(dedupPipelineConfigJSON))
+	require.NoError(t, err)
+
+	client := slippy.NewClientWithDependencies(store, dedupGitHubAPI{}, slippy.Config{
+		AncestryDepth:  5,
+		PipelineConfig: pipelineCfg,
+	})
+
+	// Nil locker → dedup disabled (original lock-free behavior).
+	reader := storeReaderAdapter{store: store}
+	writer := infrastructure.NewSlipWriterAdapter(client, nil, reader)
+
+	mux := http.NewServeMux()
+	apiConfig := huma.DefaultConfig("Slippy API No-Lock E2E", "0.0.1")
+	apiConfig.Components.SecuritySchemes = map[string]*huma.SecurityScheme{
+		"writeApiKey": {Type: "http", Scheme: "bearer"},
+	}
+	api := humago.New(mux, apiConfig)
+	api.UseMiddleware(middleware.NewAPIKeyAuth(apiKey, apiKey))
+
+	v1Only := huma.NewGroup(api, "/v1")
+	wh := handler.NewSlipWriteHandler(writer, nil)
+	handler.RegisterWriteRoutes(v1Only, wh)
+
+	return mux
+}
+
 // postCreateSlip issues POST /v1/slips and returns the HTTP status + decoded body.
 func postCreateSlip(
 	t *testing.T,
@@ -320,6 +359,54 @@ func TestE2E_DedupLock_ConcurrentDuplicatePost(t *testing.T) {
 		results[1].out.Body.Slip.CorrelationID,
 		"both duplicate responses must return the same slip correlationID",
 	)
+}
+
+// TestE2E_NoLock_ConcurrentDuplicatePost_CreatesTwo is the NEGATIVE CONTROL for
+// TestE2E_DedupLock_ConcurrentDuplicatePost: it runs the identical two concurrent
+// duplicate POSTs through the SAME async-insert harness but with the dedup lock
+// DISABLED (nil locker). With no lock, both callers see "no slip" inside the
+// async-insert visibility lag and both Create — materializing TWO slips. This
+// proves the lock (not some other code path) is what suppresses the duplicate.
+func TestE2E_NoLock_ConcurrentDuplicatePost_CreatesTwo(t *testing.T) {
+	// 200ms async-insert lag: long enough that both concurrent callers race inside
+	// the visibility window and both pass the lib's LoadByCommit pre-check.
+	store := newAsyncInsertSlipStore(200 * time.Millisecond)
+	apiKey := "nolock-e2e-secret"
+	srv := buildNoLockWriteServer(t, apiKey, store)
+	authHeader := "Bearer " + apiKey
+
+	const repo, branch, sha = "Org/My-Service", "main", "abc123def456"
+
+	type result struct {
+		code int
+		out  handler.CreateSlipOutput
+	}
+	results := make([]result, 2)
+	corrIDs := []string{"corr-nolock-A", "corr-nolock-B"}
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range 2 {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start // release both goroutines simultaneously
+			code, out := postCreateSlip(t, srv, authHeader, corrIDs[idx], repo, branch, sha)
+			results[idx] = result{code: code, out: out}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	// Both requests succeed (no lock to suppress either one).
+	for i, r := range results {
+		require.Equalf(t, http.StatusCreated, r.code, "request %d failed (corr=%s)", i, corrIDs[i])
+		require.NotNilf(t, r.out.Body.Slip, "request %d returned nil slip", i)
+	}
+
+	// NEGATIVE CONTROL: without the lock, BOTH requests materialized a slip.
+	assert.Equal(t, 2, store.createCount(),
+		"without the dedup lock, two concurrent duplicate requests must create TWO slips (negative control)")
 }
 
 // TestE2E_DedupLock_SequentialDuplicate_Idempotent verifies that once the first

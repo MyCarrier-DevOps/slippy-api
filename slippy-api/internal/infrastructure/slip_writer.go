@@ -103,7 +103,15 @@ func (a *SlipWriterAdapter) CreateSlipForPush(
 		result, err := a.client.CreateSlipForPush(ctx, opts)
 		if err != nil {
 			// Release on failure so a genuine retry can re-acquire and proceed.
-			if relErr := a.locker.Release(ctx, key, token); relErr != nil {
+			// Decouple the release from the request ctx: on client disconnect /
+			// write-timeout the request ctx is cancelled, and go-redis short-circuits
+			// Eval on a cancelled ctx, so the CAS-del would never run and the lock
+			// would linger the full TTL — 409-ing legitimate retries of a slip that
+			// was never created. context.WithoutCancel + a short timeout guarantees
+			// the release attempt actually reaches Redis/Dragonfly.
+			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+			defer cancel()
+			if relErr := a.locker.Release(releaseCtx, key, token); relErr != nil {
 				span.AddEvent("dedup_lock_release_failed",
 					trace.WithAttributes(attribute.String("error", relErr.Error())))
 			}
@@ -330,11 +338,21 @@ func (a *SlipWriterAdapter) awaitExistingSlip(
 	}
 
 	deadline := time.Now().Add(a.lockWait)
-	backoff := 250 * time.Millisecond
+	// Start small (50ms) so the common near-simultaneous-duplicate case — where the
+	// winner's slip becomes visible almost immediately — resolves with minimal added
+	// latency. The backoff still doubles up to maxBackoff for the slower async-insert
+	// visibility window.
+	backoff := 50 * time.Millisecond
 	const maxBackoff = time.Second
 
 	for {
 		existing, err := a.reader.LoadByCommit(ctx, opts.Repository, opts.CommitSHA)
+		// Deliberate choice: a TERMINAL existing slip for this (repo, sha) is NOT
+		// returned as an in-flight result. Returning a finished slip as if creation
+		// were still "in progress" would be misleading, and a genuinely new push for
+		// the same sha should not silently alias an old terminal slip. The duplicate
+		// instead falls through to ErrCreationInProgress (→ HTTP 409); this self-heals
+		// once the dedup lock TTL expires and the next attempt re-acquires the lock.
 		if err == nil && existing != nil && !existing.Status.IsTerminal() {
 			span.AddEvent("dedup_existing_slip_returned",
 				trace.WithAttributes(attribute.String("slip.correlation_id", existing.CorrelationID)))

@@ -257,6 +257,37 @@ func TestSlipWriterAdapter_Dedup_LockMiss_ReturnsExistingSlip(t *testing.T) {
 	assert.Equal(t, "winner-corr", result.Slip.CorrelationID, "lock-miss must return the in-flight winner's slip")
 }
 
+func TestSlipWriterAdapter_Dedup_LockMiss_TerminalExistingReturnsRetryable(t *testing.T) {
+	// Deliberate design: on a lock-miss, a TERMINAL existing slip for the same
+	// (repo, sha) is NOT returned as in-flight. The duplicate must instead get a
+	// retryable error wrapping domain.ErrCreationInProgress (→ HTTP 409), which
+	// self-heals once the lock TTL expires. See awaitExistingSlip's !IsTerminal guard.
+	locker := &stubLocker{
+		acquireFn: func(_ context.Context, _ string, _ time.Duration) (bool, string, error) {
+			return false, "", nil // duplicate in flight
+		},
+	}
+	terminal := &slippy.Slip{
+		CorrelationID: "terminal-corr",
+		Repository:    "Org/Repo",
+		CommitSHA:     "DEAD",
+		Status:        slippy.SlipStatusCompleted, // terminal — must NOT be returned
+	}
+	reader := &stubReader{
+		loadByCommitFn: func(_ context.Context, _, _ string) (*slippy.Slip, error) {
+			return terminal, nil
+		},
+	}
+	adapter := newWriterAdapterWithDeps(dedupTestStore(), locker, reader)
+
+	result, err := adapter.CreateSlipForPush(context.Background(), dedupPushOpts())
+	assert.Nil(t, result, "terminal existing slip must not be returned as in-flight")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "creation in progress, retry")
+	assert.True(t, errors.Is(err, domain.ErrCreationInProgress),
+		"lock-miss with a terminal existing slip must wrap domain.ErrCreationInProgress")
+}
+
 func TestSlipWriterAdapter_Dedup_LockMiss_TimeoutReturnsRetryable(t *testing.T) {
 	locker := &stubLocker{
 		acquireFn: func(_ context.Context, _ string, _ time.Duration) (bool, string, error) {
