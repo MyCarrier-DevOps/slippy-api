@@ -462,9 +462,10 @@ func TestConnectCache_Disabled(t *testing.T) {
 		return nil
 	}
 
-	result := connectCache(cfg, reader, dial)
-	// Should return the original reader unchanged
+	result, rdb := connectCache(cfg, reader, dial)
+	// Should return the original reader unchanged and a nil client.
 	assert.Equal(t, reader, result)
+	assert.Nil(t, rdb)
 }
 
 func TestConnectCache_PingFailure(t *testing.T) {
@@ -483,9 +484,11 @@ func TestConnectCache_PingFailure(t *testing.T) {
 		return redis.NewClient(opts)
 	}
 
-	result := connectCache(cfg, reader, dial)
+	result, rdb := connectCache(cfg, reader, dial)
 	// On ping failure, the original reader is returned (caching disabled gracefully)
+	// and no client is surfaced (dedup lock disabled / fail-open).
 	assert.Equal(t, reader, result)
+	assert.Nil(t, rdb)
 }
 
 func TestConnectCache_PingSuccess(t *testing.T) {
@@ -507,11 +510,13 @@ func TestConnectCache_PingSuccess(t *testing.T) {
 		return redis.NewClient(o)
 	}
 
-	result := connectCache(cfg, reader, dial)
+	result, rdb := connectCache(cfg, reader, dial)
 	// Should return a CachedSlipReader, not the original reader
 	assert.NotEqual(t, reader, result)
 	_, isCached := result.(*infrastructure.CachedSlipReader)
 	assert.True(t, isCached, "expected CachedSlipReader when ping succeeds")
+	// On success the live client is surfaced so the dedup Locker can reuse it.
+	assert.NotNil(t, rdb)
 }
 
 func TestConnectCache_PassesCorrectOptions(t *testing.T) {
@@ -532,7 +537,7 @@ func TestConnectCache_PassesCorrectOptions(t *testing.T) {
 		return redis.NewClient(opts)
 	}
 
-	_ = connectCache(cfg, reader, dial)
+	_, _ = connectCache(cfg, reader, dial)
 
 	// Verify the correct address and password were passed
 	require.NotNil(t, capturedOpts)
