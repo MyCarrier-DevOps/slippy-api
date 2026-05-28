@@ -164,7 +164,7 @@ func (s *asyncInsertSlipStore) ResolveAncestry(
 	return nil, nil
 }
 
-func (s *asyncInsertSlipStore) Close() error               { return nil }
+func (s *asyncInsertSlipStore) Close() error                 { return nil }
 func (s *asyncInsertSlipStore) Ping(_ context.Context) error { return nil }
 
 // dedupGitHubAPI is a no-op GitHubAPI (no ancestry resolution in the e2e).

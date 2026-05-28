@@ -274,6 +274,9 @@ func TestSlipWriterAdapter_Dedup_LockMiss_TimeoutReturnsRetryable(t *testing.T) 
 	assert.Nil(t, result)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "creation in progress, retry")
+	// Downstream (handler mapWriteError) classifies this as 409 via errors.Is.
+	assert.True(t, errors.Is(err, domain.ErrCreationInProgress),
+		"lock-miss timeout error must wrap domain.ErrCreationInProgress")
 }
 
 func TestSlipWriterAdapter_Dedup_LockMiss_NoReaderReturnsRetryable(t *testing.T) {
@@ -288,6 +291,9 @@ func TestSlipWriterAdapter_Dedup_LockMiss_NoReaderReturnsRetryable(t *testing.T)
 	assert.Nil(t, result)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "creation in progress, retry")
+	// Downstream (handler mapWriteError) classifies this as 409 via errors.Is.
+	assert.True(t, errors.Is(err, domain.ErrCreationInProgress),
+		"lock-miss (nil reader) error must wrap domain.ErrCreationInProgress")
 }
 
 func TestSlipWriterAdapter_Dedup_FailOpenOnLockerError(t *testing.T) {

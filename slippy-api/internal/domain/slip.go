@@ -2,9 +2,16 @@ package domain
 
 import (
 	"context"
+	"errors"
 
 	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
 )
+
+// ErrCreationInProgress indicates a concurrent creation of the same repo:sha
+// slip is in progress and the dedup lock-miss path could not observe the slip
+// before its poll deadline. Callers should treat this as a duplicate/conflict
+// (HTTP 409), not a server fault (HTTP 500).
+var ErrCreationInProgress = errors.New("slip creation in progress")
 
 // Slip is an alias for the upstream slippy.Slip type.
 // This keeps domain consumers decoupled from direct import of the library package,

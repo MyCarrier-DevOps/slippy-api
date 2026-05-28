@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -652,6 +653,12 @@ func TestMapWriteError(t *testing.T) {
 			http.StatusUnprocessableEntity,
 		},
 		{"slip error", slippy.NewSlipError("create", "id", errors.New("fail")), http.StatusUnprocessableEntity},
+		{"creation in progress (sentinel)", domain.ErrCreationInProgress, http.StatusConflict},
+		{
+			"creation in progress (wrapped, as returned by writer)",
+			fmt.Errorf("dedup: slip for repo:sha creation in progress, retry: %w", domain.ErrCreationInProgress),
+			http.StatusConflict,
+		},
 		{"generic error", errors.New("something broke"), http.StatusInternalServerError},
 	}
 	for _, tt := range tests {

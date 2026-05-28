@@ -537,6 +537,11 @@ func mapWriteError(err error) error {
 		return huma.NewError(http.StatusBadRequest, "invalid repository")
 	case errors.Is(err, slippy.ErrInvalidConfiguration):
 		return huma.NewError(http.StatusBadRequest, "invalid configuration")
+	case errors.Is(err, domain.ErrCreationInProgress):
+		return huma.NewError(
+			http.StatusConflict,
+			"slip creation already in progress for this commit; duplicate suppressed",
+		)
 	default:
 		if strings.Contains(err.Error(), "invalid push options") {
 			return huma.NewError(http.StatusBadRequest, err.Error())

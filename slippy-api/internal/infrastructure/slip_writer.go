@@ -326,7 +326,7 @@ func (a *SlipWriterAdapter) awaitExistingSlip(
 	if a.reader == nil {
 		// No reader to poll with — degrade to a retryable error; the caller (and
 		// upstream webhook delivery) can retry once the first create lands.
-		return nil, fmt.Errorf("dedup: slip for %s creation in progress, retry", key)
+		return nil, fmt.Errorf("dedup: slip for %s creation in progress, retry: %w", key, domain.ErrCreationInProgress)
 	}
 
 	deadline := time.Now().Add(a.lockWait)
@@ -364,7 +364,7 @@ func (a *SlipWriterAdapter) awaitExistingSlip(
 	// Deadline exceeded without a visible non-terminal slip. Do NOT create a second
 	// slip — return a retryable error so the duplicate is not materialized.
 	span.AddEvent("dedup_wait_timeout")
-	return nil, fmt.Errorf("dedup: slip for %s creation in progress, retry", key)
+	return nil, fmt.Errorf("dedup: slip for %s creation in progress, retry: %w", key, domain.ErrCreationInProgress)
 }
 
 // isPipelineStep reports whether a step transition should trigger a post-write

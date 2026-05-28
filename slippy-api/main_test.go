@@ -605,4 +605,3 @@ func TestRun_MissingClickhouseConfig(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "clickhouse")
 }
-
