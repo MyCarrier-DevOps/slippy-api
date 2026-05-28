@@ -56,7 +56,9 @@ func newTestWriterAdapter(store slippy.SlipStore) *SlipWriterAdapter {
 		PipelineConfig: pipelineCfg,
 	}
 	client := slippy.NewClientWithDependencies(store, &mockGitHubAPI{}, cfg)
-	return NewSlipWriterAdapter(client)
+	// nil locker + nil reader → preserves the original lock-free behavior, exercising
+	// the regression path that must keep passing when the cache is disabled.
+	return NewSlipWriterAdapter(client, nil, nil)
 }
 
 // --- Compile-time check ---
@@ -367,7 +369,7 @@ func TestSlipWriterAdapter_SetComponentImageTag_NoPipelineConfig(t *testing.T) {
 	store := &mockSlipStore{}
 	// Create client without pipeline config.
 	client := slippy.NewClientWithDependencies(store, nil, slippy.Config{})
-	adapter := NewSlipWriterAdapter(client)
+	adapter := NewSlipWriterAdapter(client, nil, nil)
 
 	err := adapter.SetComponentImageTag(context.Background(), "abc-123", "api", "26.09.abc1234")
 	assert.Error(t, err)
@@ -600,7 +602,7 @@ func TestSlipWriterAdapter_IsPipelineStep_NilPipelineConfig(t *testing.T) {
 	}
 	// Construct a client with no pipeline config so PipelineConfig() returns nil.
 	client := slippy.NewClientWithDependencies(store, &mockGitHubAPI{}, slippy.Config{})
-	adapter := NewSlipWriterAdapter(client)
+	adapter := NewSlipWriterAdapter(client, nil, nil)
 
 	// componentName empty and pipelineCfg nil → isPipelineStep returns true →
 	// hydrateAndPersist is invoked. Both Load and Update must be called.

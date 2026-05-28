@@ -24,11 +24,35 @@ const writerTracerName = "slippy-api/writer"
 // include atomic history appends.
 type SlipWriterAdapter struct {
 	client *slippy.Client
+	// locker serializes CreateSlipForPush across processes on a repo:sha key to
+	// prevent duplicate GitHub push webhooks from creating two routing slips
+	// ("phantom slip"). A nil locker disables dedup (cache disabled / ping failed)
+	// and preserves the original lock-free behavior.
+	locker Locker
+	// reader is used on the lock-miss path to poll for the in-flight slip so a
+	// suppressed duplicate returns the SAME slip (true idempotency). Only consulted
+	// when locker is non-nil and the lock was not acquired.
+	reader domain.SlipReader
+	// lockTTL / lockWait tune the dedup lock. Zero values fall back to defaults.
+	lockTTL  time.Duration
+	lockWait time.Duration
 }
 
 // NewSlipWriterAdapter wraps a slippy.Client as a SlipWriter.
-func NewSlipWriterAdapter(client *slippy.Client) *SlipWriterAdapter {
-	return &SlipWriterAdapter{client: client}
+//
+// locker and reader enable cross-process slip-creation deduplication. Pass a nil
+// locker to disable dedup entirely (the original behavior) — for example when the
+// Dragonfly/Redis cache is not configured or its startup ping failed (fail-open).
+// reader is only consulted on the lock-miss path; it may be the cache-decorated
+// reader so the poll observes committed rows.
+func NewSlipWriterAdapter(client *slippy.Client, locker Locker, reader domain.SlipReader) *SlipWriterAdapter {
+	return &SlipWriterAdapter{
+		client:   client,
+		locker:   locker,
+		reader:   reader,
+		lockTTL:  DefaultLockTTL,
+		lockWait: DefaultLockWait,
+	}
 }
 
 // Compile-time interface compliance check.
@@ -48,12 +72,62 @@ func (a *SlipWriterAdapter) CreateSlipForPush(
 	)
 	defer span.End()
 
-	result, err := a.client.CreateSlipForPush(ctx, opts)
-	if err != nil {
-		recordWriterError(span, err)
-		return nil, err
+	// Dedup disabled (no cache / ping failed) → behave exactly as before.
+	if a.locker == nil {
+		result, err := a.client.CreateSlipForPush(ctx, opts)
+		if err != nil {
+			recordWriterError(span, err)
+			return nil, err
+		}
+		return result, nil
 	}
-	return result, nil
+
+	key := DedupKey(opts.Repository, opts.CommitSHA)
+	span.SetAttributes(attribute.String("dedup.key", key))
+
+	acquired, token, lockErr := a.locker.TryAcquire(ctx, key, a.lockTTL)
+	if lockErr != nil {
+		// FAIL-OPEN: never block CI on a cache outage. Proceed unlocked.
+		span.AddEvent("dedup_lock_unavailable",
+			trace.WithAttributes(attribute.String("error", lockErr.Error())))
+		result, err := a.client.CreateSlipForPush(ctx, opts)
+		if err != nil {
+			recordWriterError(span, err)
+			return nil, err
+		}
+		return result, nil
+	}
+
+	if acquired {
+		span.AddEvent("dedup_lock_acquired")
+		result, err := a.client.CreateSlipForPush(ctx, opts)
+		if err != nil {
+			// Release on failure so a genuine retry can re-acquire and proceed.
+			// Decouple the release from the request ctx: on client disconnect /
+			// write-timeout the request ctx is cancelled, and go-redis short-circuits
+			// Eval on a cancelled ctx, so the CAS-del would never run and the lock
+			// would linger the full TTL — 409-ing legitimate retries of a slip that
+			// was never created. context.WithoutCancel + a short timeout guarantees
+			// the release attempt actually reaches Redis/Dragonfly.
+			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+			defer cancel()
+			if relErr := a.locker.Release(releaseCtx, key, token); relErr != nil {
+				span.AddEvent("dedup_lock_release_failed",
+					trace.WithAttributes(attribute.String("error", relErr.Error())))
+			}
+			recordWriterError(span, err)
+			return nil, err
+		}
+		// SUCCESS: do NOT release. Let the TTL expire so a near-simultaneous
+		// duplicate stays blocked through the ClickHouse async-insert visibility
+		// window. The lib's handlePushRetry is idempotent once the slip is visible.
+		return result, nil
+	}
+
+	// Lock not acquired → a duplicate is in flight or was just created. Return the
+	// SAME slip (idempotent) by polling LoadByCommit until it becomes visible.
+	span.AddEvent("dedup_duplicate_suppressed")
+	return a.awaitExistingSlip(ctx, span, key, opts)
 }
 
 func (a *SlipWriterAdapter) StartStep(ctx context.Context, correlationID, stepName, componentName string) error {
@@ -244,6 +318,71 @@ func (a *SlipWriterAdapter) AbandonSlip(ctx context.Context, correlationID, supe
 		return err
 	}
 	return nil
+}
+
+// awaitExistingSlip polls the reader for an already-in-flight slip matching the
+// dedup key after a lock miss. It returns a CreateSlipResult wrapping the existing
+// non-terminal slip (mirroring the lib's handlePushRetry result shape) so the
+// handler is unchanged. If no non-terminal slip becomes visible before the wait
+// deadline, it returns a retryable error rather than creating a second slip.
+func (a *SlipWriterAdapter) awaitExistingSlip(
+	ctx context.Context,
+	span trace.Span,
+	key string,
+	opts domain.PushOptions,
+) (*domain.CreateSlipResult, error) {
+	if a.reader == nil {
+		// No reader to poll with — degrade to a retryable error; the caller (and
+		// upstream webhook delivery) can retry once the first create lands.
+		return nil, fmt.Errorf("dedup: slip for %s creation in progress, retry: %w", key, domain.ErrCreationInProgress)
+	}
+
+	deadline := time.Now().Add(a.lockWait)
+	// Start small (50ms) so the common near-simultaneous-duplicate case — where the
+	// winner's slip becomes visible almost immediately — resolves with minimal added
+	// latency. The backoff still doubles up to maxBackoff for the slower async-insert
+	// visibility window.
+	backoff := 50 * time.Millisecond
+	const maxBackoff = time.Second
+
+	for {
+		existing, err := a.reader.LoadByCommit(ctx, opts.Repository, opts.CommitSHA)
+		// Deliberate choice: a TERMINAL existing slip for this (repo, sha) is NOT
+		// returned as an in-flight result. Returning a finished slip as if creation
+		// were still "in progress" would be misleading, and a genuinely new push for
+		// the same sha should not silently alias an old terminal slip. The duplicate
+		// instead falls through to ErrCreationInProgress (→ HTTP 409); this self-heals
+		// once the dedup lock TTL expires and the next attempt re-acquires the lock.
+		if err == nil && existing != nil && !existing.Status.IsTerminal() {
+			span.AddEvent("dedup_existing_slip_returned",
+				trace.WithAttributes(attribute.String("slip.correlation_id", existing.CorrelationID)))
+			return &domain.CreateSlipResult{
+				Slip:             existing,
+				Warnings:         make([]error, 0),
+				AncestryResolved: len(existing.Ancestry) > 0,
+			}, nil
+		}
+
+		if time.Now().After(deadline) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(backoff):
+		}
+		if backoff < maxBackoff {
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+	}
+
+	// Deadline exceeded without a visible non-terminal slip. Do NOT create a second
+	// slip — return a retryable error so the duplicate is not materialized.
+	span.AddEvent("dedup_wait_timeout")
+	return nil, fmt.Errorf("dedup: slip for %s creation in progress, retry: %w", key, domain.ErrCreationInProgress)
 }
 
 // isPipelineStep reports whether a step transition should trigger a post-write

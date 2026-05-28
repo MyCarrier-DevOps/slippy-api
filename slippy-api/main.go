@@ -133,14 +133,20 @@ var redisDial = func(opts *redis.Options) redis.Cmdable {
 
 // connectCache optionally wraps reader with a Dragonfly/Redis caching layer.
 // If caching is not enabled in cfg, or the Redis ping fails, the original reader
-// is returned unchanged. The dial function creates the Redis client.
+// is returned unchanged and the returned client is nil. The dial function creates
+// the Redis client.
+//
+// The returned redis.Cmdable (nil when caching is disabled or the ping failed) is
+// surfaced so the write path can build a dedup Locker from the SAME connection —
+// see run(). A nil client there means dedup is disabled (fail-open), exactly
+// mirroring the cache graceful-degrade.
 func connectCache(
 	cfg *config.Config,
 	reader domain.SlipReader,
 	dial func(*redis.Options) redis.Cmdable,
-) domain.SlipReader {
+) (domain.SlipReader, redis.Cmdable) {
 	if !cfg.CacheEnabled() {
-		return reader
+		return reader, nil
 	}
 	rdb := dial(&redis.Options{
 		Addr:     fmt.Sprintf("%s:%d", cfg.DragonflyHost, cfg.DragonflyPort),
@@ -151,9 +157,9 @@ func connectCache(
 	defer cancel()
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		log.Printf("warning: dragonfly ping failed, caching disabled: %v", err)
-		return reader
+		return reader, nil
 	}
-	return infrastructure.NewCachedSlipReader(reader, rdb, cfg.CacheTTL)
+	return infrastructure.NewCachedSlipReader(reader, rdb, cfg.CacheTTL), rdb
 }
 
 // run wires up all components and starts the HTTP server with graceful shutdown.
@@ -245,7 +251,10 @@ func run() error {
 	log.Printf("github ancestry resolution enabled (depth=%d)", cfg.AncestryDepth)
 
 	// --- Optional Dragonfly/Redis cache ---
-	reader := connectCache(cfg, slipReader, redisDial)
+	// rdb is the shared cache connection (nil when caching is disabled or the
+	// startup ping failed); it is reused below to build the slip-creation dedup
+	// Locker so we never open a second Redis connection (TLS/options stay aligned).
+	reader, rdb := connectCache(cfg, slipReader, redisDial)
 
 	// --- BuildInfo reader for image tag resolution ---
 	// Uses the same ClickHouse session as the slip store to query ci.buildinfo
@@ -266,7 +275,21 @@ func run() error {
 
 	// --- Write support ---
 	// SLIPPY_WRITE_API_KEY is required; config.Load() already validated it.
-	writer := infrastructure.NewSlipWriterAdapter(slippyClient)
+	//
+	// Slip-creation dedup: when the shared cache connection is live, build a
+	// repo:sha Locker so duplicate GitHub push webhooks cannot create two routing
+	// slips ("phantom slip"). A nil Locker (cache disabled / ping failed) preserves
+	// the original lock-free behavior — fail-open, CI never depends on cache uptime.
+	// The cache-decorated reader powers the lock-miss poll so it observes committed
+	// rows.
+	var locker infrastructure.Locker
+	if rdb != nil {
+		locker = infrastructure.NewRedisLocker(rdb)
+		log.Printf("slip-creation dedup lock enabled")
+	} else {
+		log.Printf("slip-creation dedup lock disabled (no cache)")
+	}
+	writer := infrastructure.NewSlipWriterAdapter(slippyClient, locker, reader)
 	log.Printf("write endpoints enabled")
 
 	// --- Admin handler ---
