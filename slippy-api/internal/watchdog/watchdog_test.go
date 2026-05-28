@@ -5,12 +5,16 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse/clickhousetest"
 	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
@@ -151,7 +155,7 @@ func TestDetectStuckSteps_BuildsDynamicColumns(t *testing.T) {
 	// Terminal slips excluded.
 	assert.Contains(t, capturedQuery, "status NOT IN ('completed', 'compensated', 'abandoned', 'promoted')")
 	// updated_at staleness filter + batch limit.
-	assert.Contains(t, capturedQuery, "updated_at < {cutoff:DateTime64(9, 'UTC')}")
+	assert.Contains(t, capturedQuery, "updated_at < {cutoff:DateTime64(3, 'UTC')}")
 	assert.Contains(t, capturedQuery, "LIMIT 1 BY correlation_id")
 	assert.Contains(t, capturedQuery, "ci_test.routing_slips")
 	require.Len(t, capturedArgs, 2)
@@ -309,18 +313,147 @@ func TestSweepOnce_DetectionError_ReturnsError(t *testing.T) {
 	assert.Empty(t, w.failStepCalls())
 }
 
-func TestStepStillRunning_EmptyEventLogTreatedAsRunning(t *testing.T) {
-	// Shape B (materialization-only stuck): no pipeline-level event-log rows.
+func TestStepConfirmedRunning_EmptyEventLogNotConfirmed(t *testing.T) {
+	// Inverted NEW-2 semantics: an empty argMax read is ambiguous (no events, or an
+	// async-lagged terminal not yet visible) so it must NOT be treated as running.
+	var capturedQuery string
 	session := &clickhousetest.MockSession{
 		QueryRowFunc: func(ctx context.Context, query string, args ...any) driver.Row {
+			capturedQuery = query
 			return &clickhousetest.MockRow{ScanData: []any{""}}
 		},
 	}
 	wd := newTestWatchdog(t, config.WatchdogModeEnforce, session, &mockWriter{})
 
-	running, err := wd.stepStillRunning(context.Background(), "slip-x", "builds")
+	confirmed, err := wd.stepConfirmedRunning(context.Background(), "slip-x", "builds")
 	require.NoError(t, err)
-	assert.True(t, running, "empty event log => still treat as running (self-heal path)")
+	assert.False(t, confirmed, "empty event log => cannot confirm running => skip (async-lag safe side)")
+
+	// The re-check must mirror the canonical composite tiebreaker from goLibMyCarrier
+	// doLoadComponentStates (sortKeyNoImageTag) so it agrees on equal-microsecond ties.
+	assert.Contains(t, capturedQuery,
+		"argMax(status, toUInt64(toUnixTimestamp64Micro(timestamp)) * 100 + toUInt64(toUInt8(status)))")
+}
+
+func TestStepConfirmedRunning_PositiveRunningConfirmed(t *testing.T) {
+	session := &clickhousetest.MockSession{
+		QueryRowFunc: func(ctx context.Context, query string, args ...any) driver.Row {
+			return &clickhousetest.MockRow{ScanData: []any{string(slippy.StepStatusRunning)}}
+		},
+	}
+	wd := newTestWatchdog(t, config.WatchdogModeEnforce, session, &mockWriter{})
+
+	confirmed, err := wd.stepConfirmedRunning(context.Background(), "slip-x", "builds")
+	require.NoError(t, err)
+	assert.True(t, confirmed, "positive running status => confirmed")
+}
+
+// TestSweepOnce_EmptyRecheck_SkipsNoFail asserts the end-to-end inverted NEW-2
+// behavior: an empty re-check result must skip the step, never call FailStep.
+func TestSweepOnce_EmptyRecheck_SkipsNoFail(t *testing.T) {
+	updated := time.Now().Add(-3 * time.Hour)
+	rows := [][]any{{"slip-x", updated, "running", "pending", "pending"}}
+	session := &clickhousetest.MockSession{
+		QueryWithArgsFunc: func(ctx context.Context, query string, args ...any) (driver.Rows, error) {
+			return detectionRows(rows), nil
+		},
+		// Re-check returns empty: unconfirmed (possibly async-lagged terminal).
+		QueryRowFunc: func(ctx context.Context, query string, args ...any) driver.Row {
+			return &clickhousetest.MockRow{ScanData: []any{""}}
+		},
+	}
+	w := &mockWriter{}
+	wd := newTestWatchdog(t, config.WatchdogModeEnforce, session, w)
+
+	stuck, failed, err := wd.sweepOnce(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, stuck, "still detected")
+	assert.Equal(t, 0, failed, "but skipped: empty re-check cannot confirm running")
+	assert.Empty(t, w.failStepCalls(), "must not fail an unconfirmed step (async-lag safe side)")
+}
+
+// sumCounter returns the total of all data points for the named Sum[int64]
+// instrument across the collected metrics, or 0 if absent.
+func sumCounter(rm *metricdata.ResourceMetrics, name string) int64 {
+	var total int64
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			if s, ok := m.Data.(metricdata.Sum[int64]); ok {
+				for _, dp := range s.DataPoints {
+					total += dp.Value
+				}
+			}
+		}
+	}
+	return total
+}
+
+// TestRun_SurvivesPanickingSweep injects a sweep that panics and asserts the Run
+// loop contains it (process/loop continues), increments the error counter, and
+// keeps ticking — a safety-net daemon must never crash the API it protects.
+func TestRun_SurvivesPanickingSweep(t *testing.T) {
+	// Install a manual-reader meter provider so we can read the error counter.
+	reader := metric.NewManualReader()
+	mp := metric.NewMeterProvider(metric.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() { otel.SetMeterProvider(prev) })
+
+	var sweepAttempts int64
+	// Detection panics on the first few ticks, then succeeds — proving the loop
+	// survives a panic AND keeps running afterward.
+	session := &clickhousetest.MockSession{
+		QueryWithArgsFunc: func(ctx context.Context, query string, args ...any) (driver.Rows, error) {
+			n := atomic.AddInt64(&sweepAttempts, 1)
+			if n <= 2 {
+				panic("boom: simulated sweep panic")
+			}
+			return detectionRows(nil), nil
+		},
+	}
+	wd := newTestWatchdog(t, config.WatchdogModeAlert, session, &mockWriter{})
+	wd.interval = 5 * time.Millisecond
+
+	var panicsContained int64
+	wd.onSweepPanic = func(recovered any) { atomic.AddInt64(&panicsContained, 1) }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		wd.Run(ctx)
+		close(done)
+	}()
+
+	// Wait until the loop has survived both panics and run at least one clean sweep.
+	deadline := time.After(3 * time.Second)
+	for atomic.LoadInt64(&sweepAttempts) < 3 {
+		select {
+		case <-deadline:
+			cancel()
+			t.Fatalf("loop did not continue past panics; attempts=%d contained=%d",
+				atomic.LoadInt64(&sweepAttempts), atomic.LoadInt64(&panicsContained))
+		default:
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watchdog Run did not stop on context cancel")
+	}
+
+	assert.GreaterOrEqual(t, atomic.LoadInt64(&panicsContained), int64(2),
+		"both panicking sweeps must be recovered, not crash the loop")
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	assert.GreaterOrEqual(t, sumCounter(&rm, "watchdog.sweep.errors"), int64(2),
+		"error counter must be incremented on each recovered panic")
 }
 
 func TestRun_StopsOnContextCancel(t *testing.T) {

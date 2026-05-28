@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"time"
@@ -241,6 +242,12 @@ func Load() (*Config, error) {
 		}
 		if n < 1 {
 			return nil, fmt.Errorf("SLIPPY_WATCHDOG_BATCH_LIMIT must be at least 1")
+		}
+		// The watchdog passes this to ClickHouse as a UInt32 via uint32(batchLimit)
+		// (watchdog.detectStuckSteps). Reject anything above MaxInt32 so a large
+		// config value can't silently wrap to a tiny — or zero — batch at the cast.
+		if n > math.MaxInt32 {
+			return nil, fmt.Errorf("SLIPPY_WATCHDOG_BATCH_LIMIT must not exceed %d", math.MaxInt32)
 		}
 		cfg.WatchdogBatchLimit = n
 	}

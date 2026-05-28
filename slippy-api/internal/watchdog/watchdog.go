@@ -11,13 +11,24 @@
 // canonical SlipWriter.FailStep mutation path so it inherits the I5
 // read-your-own-writes materialization fix and pipeline-completion propagation.
 //
-// Correctness: the watchdog must LOSE to a genuine completion. Three guards make
-// that so — a generous updated_at-based threshold (a step about to complete is
-// still emitting transitions, so its slip is never stale enough to be selected),
-// a pre-mutate re-check of the latest event-log status (skip if no longer
-// "running"), and the timestamp-versioned event-sourced store as a backstop. It
-// is idempotent: a failed step no longer matches "running", so no dedup table is
-// needed and re-fail storms cannot happen.
+// Correctness: the watchdog must LOSE to a genuine completion. Two guards push
+// in that direction — a generous updated_at-based threshold (a step about to
+// complete is still emitting transitions, so its slip is never stale enough to be
+// selected) and a pre-mutate re-check of the latest event-log status that is
+// SAFE-SIDE biased: it fails a step ONLY when it can positively confirm the step
+// is still "running"; any empty/unconfirmed read means "cannot confirm running →
+// skip", because the event-sourced store is NOT a clobber backstop here — under
+// ClickHouse async_insert a freshly-landed terminal event may not yet be visible
+// to this read, which is precisely the async-lag window that could otherwise
+// clobber a real completion. It is idempotent: a failed step no longer matches
+// "running", so no dedup table is needed and re-fail storms cannot happen.
+//
+// NOT PRODUCTION-SAFE in enforce mode yet. The re-check still cannot fully close
+// the async-lag race (an empty read is ambiguous between "no events" and "events
+// not yet visible"), and multiple API replicas have no leader election, so two
+// instances can sweep concurrently. Both are deferred to follow-up mycarrier-2x8
+// (async-lag-safe re-check + leader election). Until that lands, run enforce only
+// where those risks are understood/accepted; the DEFAULT mode stays "off".
 package watchdog
 
 import (
@@ -55,6 +66,15 @@ const (
 	// materialized) step events. The watchdog only ever operates on
 	// pipeline-level step columns, so the re-check uses the empty component.
 	pipelineComponent = ""
+
+	// recheckSortKey is the argMax tiebreaker for the pre-mutate re-check. It is
+	// mirrored EXACTLY from goLibMyCarrier slippy clickhouse_store.go
+	// doLoadComponentStates (sortKeyNoImageTag, v1.3.82) so the watchdog's view of
+	// the latest status agrees with the canonical hydration on equal-microsecond
+	// ties: later timestamp wins, then higher status ordinal (completed=4 beats
+	// running=3) on a same-microsecond tie. The watchdog reads pipeline-level
+	// status only (no image_tag), so it mirrors the no-image-tag key.
+	recheckSortKey = "toUInt64(toUnixTimestamp64Micro(timestamp)) * 100 + toUInt64(toUInt8(status))"
 )
 
 // stuckStep is one (correlationID, stepName) pair detected as stuck.
@@ -97,6 +117,11 @@ type Watchdog struct {
 
 	// now is overridable in tests; defaults to time.Now.
 	now func() time.Time
+
+	// onSweepPanic, when set, is invoked from the panic-recovery path in runSweep
+	// after logging and incrementing the error counter. Test-only seam used to
+	// deterministically assert that a panicking sweep was contained.
+	onSweepPanic func(recovered any)
 }
 
 // New constructs a Watchdog. It reads configuration and the pipeline step list
@@ -157,10 +182,30 @@ func (w *Watchdog) Run(ctx context.Context) {
 			w.logger.InfoContext(ctx, "watchdog stopped", "reason", ctx.Err())
 			return
 		case <-ticker.C:
-			if _, _, err := w.sweepOnce(ctx); err != nil {
-				w.logger.ErrorContext(ctx, "watchdog sweep failed", "error", err)
+			w.runSweep(ctx)
+		}
+	}
+}
+
+// runSweep executes a single sweep and contains any panic so it can never crash
+// the API process the watchdog is meant to protect. A safety-net daemon must
+// degrade to a logged-and-counted error, never take down its host service.
+func (w *Watchdog) runSweep(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			w.logger.ErrorContext(ctx, "watchdog sweep panicked; recovered and continuing",
+				"panic", fmt.Sprintf("%v", r))
+			if w.errorCounter != nil {
+				w.errorCounter.Add(ctx, 1)
+			}
+			if w.onSweepPanic != nil {
+				w.onSweepPanic(r)
 			}
 		}
+	}()
+
+	if _, _, err := w.sweepOnce(ctx); err != nil {
+		w.logger.ErrorContext(ctx, "watchdog sweep failed", "error", err)
 	}
 }
 
@@ -219,10 +264,13 @@ func (w *Watchdog) sweepOnce(ctx context.Context) (stuckFound, failed int, err e
 			continue
 		}
 
-		// Re-check immediately before mutating: a genuine terminal event may have
-		// landed in the detection→action gap. If the step is no longer running, we
-		// LOSE the race and skip — the real completion wins.
-		stillRunning, rcErr := w.stepStillRunning(ctx, s.CorrelationID, s.StepName)
+		// Re-check immediately before mutating: only fail when we can POSITIVELY
+		// confirm the step is still running in the event log. A genuine terminal
+		// event may have landed in the detection→action gap; if the latest confirmed
+		// status is not "running" — OR the read is empty/unconfirmed (e.g. the
+		// terminal INSERT is not yet visible under async_insert) — we skip. The
+		// watchdog must never fail a step it cannot confirm is still running.
+		confirmedRunning, rcErr := w.stepConfirmedRunning(ctx, s.CorrelationID, s.StepName)
 		if rcErr != nil {
 			// Conservative: on re-check error, do NOT fail the step (avoid failing a
 			// step that may have completed). Log and move on.
@@ -233,12 +281,12 @@ func (w *Watchdog) sweepOnce(ctx context.Context) (stuckFound, failed int, err e
 			}
 			continue
 		}
-		if !stillRunning {
-			span.AddEvent("stuck_step_recovered_skipped", trace.WithAttributes(
+		if !confirmedRunning {
+			span.AddEvent("stuck_step_not_confirmed_skipped", trace.WithAttributes(
 				attribute.String("slip.correlation_id", s.CorrelationID),
 				attribute.String("slip.step_name", s.StepName),
 			))
-			w.logger.InfoContext(ctx, "watchdog skip: step no longer running",
+			w.logger.InfoContext(ctx, "watchdog skip: step not confirmed running",
 				"correlation_id", s.CorrelationID, "step", s.StepName)
 			continue
 		}
@@ -305,7 +353,7 @@ func (w *Watchdog) detectStuckSteps(ctx context.Context, cutoff time.Time) (resu
 		SELECT correlation_id, updated_at, %s
 		FROM %s.routing_slips
 		WHERE sign = 1
-		  AND updated_at < {cutoff:DateTime64(9, 'UTC')}
+		  AND updated_at < {cutoff:DateTime64(3, 'UTC')}
 		  AND status NOT IN ('completed', 'compensated', 'abandoned', 'promoted')
 		ORDER BY correlation_id, version DESC
 		LIMIT 1 BY correlation_id
@@ -358,19 +406,33 @@ func (w *Watchdog) detectStuckSteps(ctx context.Context, cutoff time.Time) (resu
 	return result, nil
 }
 
-// stepStillRunning re-reads the latest pipeline-level status for a step from the
-// event log (argMax(status, timestamp) over slip_component_states with the empty
-// component) and reports whether it is still "running". This is the primary race
-// guard: if a genuine terminal event landed since detection, the step is no
-// longer running and the watchdog must skip it.
-func (w *Watchdog) stepStillRunning(ctx context.Context, correlationID, stepName string) (bool, error) {
+// stepConfirmedRunning re-reads the latest pipeline-level status for a step from
+// the event log and reports whether it can POSITIVELY confirm the step is still
+// "running". This is the primary race guard, biased to the safe side: the
+// watchdog fails a step only on a positive "running" confirmation.
+//
+// The argMax tiebreaker is mirrored exactly from goLibMyCarrier slippy
+// doLoadComponentStates (recheckSortKey) so the watchdog agrees with the
+// materialized truth on equal-microsecond ties — a same-microsecond completed
+// event (status ordinal 4) beats a running event (3), so a real completion is
+// seen as completed here too and the step is skipped.
+//
+// Empty/unconfirmed result => returns false (do NOT fail). With ClickHouse
+// async_insert, a freshly-landed terminal event may not yet be visible to this
+// read; an empty argMax is therefore ambiguous between "no events" and "events
+// not yet visible". Failing on that ambiguity is exactly the async-lag clobber we
+// must avoid (see RCA cc5622f7). The genuine Shape-B self-heal — a step wedged
+// "running" in the materialized column with no contradicting event — is
+// intentionally deferred: an async-lag-safe re-check that can distinguish the two
+// cases lands in mycarrier-2x8. Until then, unconfirmed means skip.
+func (w *Watchdog) stepConfirmedRunning(ctx context.Context, correlationID, stepName string) (bool, error) {
 	query := fmt.Sprintf(`
-		SELECT argMax(status, timestamp)
+		SELECT argMax(status, %s)
 		FROM %s.%s
 		WHERE correlation_id = {correlationId:String}
 		  AND step = {step:String}
 		  AND component = {component:String}`,
-		w.database, componentStatesTable,
+		recheckSortKey, w.database, componentStatesTable,
 	)
 
 	row := w.session.QueryRow(ctx, query,
@@ -384,14 +446,9 @@ func (w *Watchdog) stepStillRunning(ctx context.Context, correlationID, stepName
 		return false, fmt.Errorf("watchdog: re-check status read failed: %w", scanErr)
 	}
 
-	// An empty result (no event-log rows for the pipeline-level step) means we
-	// cannot confirm it is running via the event log; the materialized column is
-	// the wedge in that case (Shape B). Treat empty as "still running" so the
-	// watchdog can self-heal the stuck materialization — the threshold + the
-	// materialized-running detection already established staleness.
-	if latest == "" {
-		return true, nil
-	}
+	// Only a positive "running" confirmation permits a fail. Empty (no rows, or
+	// async-lagged terminal not yet visible) and any non-running status both mean
+	// "cannot confirm running" => skip.
 	return latest == runningStatus, nil
 }
 

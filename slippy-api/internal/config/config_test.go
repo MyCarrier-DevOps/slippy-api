@@ -169,6 +169,29 @@ func TestLoad_WatchdogBatchLimit_TooSmall(t *testing.T) {
 	assert.ErrorContains(t, err, "SLIPPY_WATCHDOG_BATCH_LIMIT must be at least 1")
 }
 
+func TestLoad_WatchdogBatchLimit_TooLarge(t *testing.T) {
+	clearEnv(t)
+	setRequiredEnv(t)
+	// MaxInt32 + 1: would wrap when cast to uint32 at the ClickHouse query sink.
+	t.Setenv("SLIPPY_WATCHDOG_BATCH_LIMIT", "2147483648")
+
+	cfg, err := Load()
+	assert.Nil(t, cfg)
+	assert.ErrorContains(t, err, "SLIPPY_WATCHDOG_BATCH_LIMIT must not exceed 2147483647")
+}
+
+func TestLoad_WatchdogBatchLimit_MaxInt32Accepted(t *testing.T) {
+	clearEnv(t)
+	setRequiredEnv(t)
+	// Boundary: MaxInt32 is still within uint32 range and must be accepted.
+	t.Setenv("SLIPPY_WATCHDOG_BATCH_LIMIT", "2147483647")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	assert.Equal(t, 2147483647, cfg.WatchdogBatchLimit)
+}
+
 func TestLoad_SlipDatabase_DerivedFromNamespace(t *testing.T) {
 	tests := []struct {
 		namespace string
