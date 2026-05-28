@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -25,6 +26,7 @@ import (
 	"github.com/MyCarrier-DevOps/slippy-api/internal/infrastructure"
 	"github.com/MyCarrier-DevOps/slippy-api/internal/middleware"
 	"github.com/MyCarrier-DevOps/slippy-api/internal/telemetry"
+	"github.com/MyCarrier-DevOps/slippy-api/internal/watchdog"
 )
 
 func main() {
@@ -292,6 +294,23 @@ func run() error {
 	writer := infrastructure.NewSlipWriterAdapter(slippyClient, locker, reader)
 	log.Printf("write endpoints enabled")
 
+	// --- Stuck-step watchdog (defense-in-depth for lost terminal callbacks) ---
+	// Only started when SLIPPY_WATCHDOG_MODE != "off". Reads via store.Session()
+	// and mutates EXCLUSIVELY through the writer (SlipWriterAdapter.FailStep) so it
+	// inherits the I5 hydration fix and pipeline-completion propagation. The
+	// watchdog context is cancelled in the shutdown path so the sweep loop exits
+	// cleanly alongside srv.Shutdown.
+	wdCtx, wdCancel := context.WithCancel(context.Background())
+	defer wdCancel()
+	if cfg.WatchdogEnabled() {
+		wd := watchdog.New(cfg, store.Session(), writer, pipelineCfg, slog.Default())
+		go wd.Run(wdCtx)
+		log.Printf("watchdog enabled (mode=%s, threshold=%s, interval=%s, batch_limit=%d)",
+			cfg.WatchdogMode, cfg.StepRunningMaxDuration, cfg.WatchdogSweepInterval, cfg.WatchdogBatchLimit)
+	} else {
+		log.Printf("watchdog disabled (SLIPPY_WATCHDOG_MODE=off)")
+	}
+
 	// --- Admin handler ---
 	adminH := handler.NewAdminHandler(store.Session(), cfg.SlipDatabase, pipelineCfg)
 
@@ -322,6 +341,9 @@ func run() error {
 	case err := <-errCh:
 		return fmt.Errorf("server: %w", err)
 	}
+
+	// Stop the watchdog sweep loop first so it does not issue writes during teardown.
+	wdCancel()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
