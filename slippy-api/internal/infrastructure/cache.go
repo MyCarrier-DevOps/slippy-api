@@ -84,6 +84,37 @@ func (c *CachedSlipReader) LoadByCommit(ctx context.Context, repository, commitS
 	return slip, nil
 }
 
+func (c *CachedSlipReader) LoadByCommitExact(ctx context.Context, repository, commitSHA string) (*domain.Slip, error) {
+	// TODO(caching): when LoadByCommitExact caching is implemented, the cache key
+	// is keyed on (repository, commitSHA) — NOT correlationID — so the existing
+	// InvalidateByCorrelationID API does not match the shape needed here. On a
+	// slip transitioning to terminal status, this entry must be invalidated by
+	// (repo, sha). Either extend the Invalidator interface with an
+	// InvalidateByCommit(repo, sha) method, or have the writer adapter mirror
+	// terminal transitions into a (repo, sha) → correlation_id reverse-index.
+	// Until then, callers MUST NOT cache the result: a returned terminal slip
+	// would mask a subsequent re-push for the same (repo, sha) and break the
+	// dedup-lock-miss await path.
+	ctx, span := otel.Tracer(cacheTracerName).Start(ctx, "cache.LoadByCommitExact",
+		trace.WithAttributes(
+			attribute.String("cache.system", "dragonfly"),
+			attribute.String("cache.operation", "LoadByCommitExact"),
+			attribute.String("slip.repository", repository),
+			attribute.String("slip.commit_sha", commitSHA),
+		),
+	)
+	defer span.End()
+
+	span.SetAttributes(attribute.String("cache.result", "passthrough"))
+	slip, err := c.reader.LoadByCommitExact(ctx, repository, commitSHA)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	return slip, nil
+}
+
 func (c *CachedSlipReader) FindByCommits(
 	ctx context.Context,
 	repository string,

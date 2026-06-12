@@ -16,11 +16,12 @@ import (
 // --- mockSlipStore implements slippy.SlipStore for testing the adapter ---
 
 type mockSlipStore struct {
-	loadFn             func(ctx context.Context, id string) (*slippy.Slip, error)
-	loadByCommitFn     func(ctx context.Context, repo, sha string) (*slippy.Slip, error)
-	findByCommitsFn    func(ctx context.Context, repo string, commits []string) (*slippy.Slip, string, error)
-	findAllByCommitsFn func(ctx context.Context, repo string, commits []string) ([]slippy.SlipWithCommit, error)
-	closeFn            func() error
+	loadFn              func(ctx context.Context, id string) (*slippy.Slip, error)
+	loadByCommitFn      func(ctx context.Context, repo, sha string) (*slippy.Slip, error)
+	loadLiveByCommitFn  func(ctx context.Context, repo, sha string) (*slippy.Slip, error)
+	findByCommitsFn     func(ctx context.Context, repo string, commits []string) (*slippy.Slip, string, error)
+	findAllByCommitsFn  func(ctx context.Context, repo string, commits []string) ([]slippy.SlipWithCommit, error)
+	closeFn             func() error
 
 	// Write methods (unused by adapter, but required by the interface)
 	createFn                func(ctx context.Context, slip *slippy.Slip) error
@@ -43,6 +44,13 @@ func (m *mockSlipStore) Load(ctx context.Context, id string) (*slippy.Slip, erro
 
 func (m *mockSlipStore) LoadByCommit(ctx context.Context, repo, sha string) (*slippy.Slip, error) {
 	return m.loadByCommitFn(ctx, repo, sha)
+}
+
+func (m *mockSlipStore) LoadLiveByCommit(ctx context.Context, repo, sha string) (*slippy.Slip, error) {
+	if m.loadLiveByCommitFn != nil {
+		return m.loadLiveByCommitFn(ctx, repo, sha)
+	}
+	return nil, slippy.ErrSlipNotFound
 }
 
 func (m *mockSlipStore) FindByCommits(
@@ -235,6 +243,48 @@ func TestSlipStoreAdapter_LoadByCommit_InvalidRepository(t *testing.T) {
 
 	adapter := NewSlipStoreAdapter(store)
 	slip, err := adapter.LoadByCommit(context.Background(), "invalid", "sha")
+	assert.ErrorIs(t, err, slippy.ErrInvalidRepository)
+	assert.Nil(t, slip)
+}
+
+func TestSlipStoreAdapter_LoadByCommitExact_Success(t *testing.T) {
+	expected := &domain.Slip{CorrelationID: "live-456", Repository: "org/repo", CommitSHA: "sha123"}
+	store := &mockSlipStore{
+		loadLiveByCommitFn: func(_ context.Context, repo, sha string) (*slippy.Slip, error) {
+			assert.Equal(t, "org/repo", repo)
+			assert.Equal(t, "sha123", sha)
+			return expected, nil
+		},
+	}
+
+	adapter := NewSlipStoreAdapter(store)
+	slip, err := adapter.LoadByCommitExact(context.Background(), "org/repo", "sha123")
+	require.NoError(t, err)
+	assert.Equal(t, expected, slip)
+}
+
+func TestSlipStoreAdapter_LoadByCommitExact_NotFound(t *testing.T) {
+	store := &mockSlipStore{
+		loadLiveByCommitFn: func(_ context.Context, _, _ string) (*slippy.Slip, error) {
+			return nil, slippy.ErrSlipNotFound
+		},
+	}
+
+	adapter := NewSlipStoreAdapter(store)
+	slip, err := adapter.LoadByCommitExact(context.Background(), "org/repo", "missing-sha")
+	assert.ErrorIs(t, err, slippy.ErrSlipNotFound)
+	assert.Nil(t, slip)
+}
+
+func TestSlipStoreAdapter_LoadByCommitExact_InvalidRepository(t *testing.T) {
+	store := &mockSlipStore{
+		loadLiveByCommitFn: func(_ context.Context, _, _ string) (*slippy.Slip, error) {
+			return nil, slippy.ErrInvalidRepository
+		},
+	}
+
+	adapter := NewSlipStoreAdapter(store)
+	slip, err := adapter.LoadByCommitExact(context.Background(), "invalid", "sha")
 	assert.ErrorIs(t, err, slippy.ErrInvalidRepository)
 	assert.Nil(t, slip)
 }

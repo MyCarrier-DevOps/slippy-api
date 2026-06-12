@@ -30,6 +30,10 @@ func (m *buildInfoMockReader) LoadByCommit(_ context.Context, _, _ string) (*dom
 	return nil, errors.New("not implemented")
 }
 
+func (m *buildInfoMockReader) LoadByCommitExact(_ context.Context, _, _ string) (*domain.Slip, error) {
+	return nil, errors.New("not implemented")
+}
+
 func (m *buildInfoMockReader) FindByCommits(_ context.Context, _ string, _ []string) (*domain.Slip, string, error) {
 	return nil, "", errors.New("not implemented")
 }

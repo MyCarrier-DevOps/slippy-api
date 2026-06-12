@@ -22,10 +22,11 @@ import (
 // --- Mock SlipReader ---
 
 type mockReader struct {
-	loadFn             func(ctx context.Context, id string) (*domain.Slip, error)
-	loadByCommitFn     func(ctx context.Context, repo, sha string) (*domain.Slip, error)
-	findByCommitsFn    func(ctx context.Context, repo string, commits []string) (*domain.Slip, string, error)
-	findAllByCommitsFn func(ctx context.Context, repo string, commits []string) ([]domain.SlipWithCommit, error)
+	loadFn              func(ctx context.Context, id string) (*domain.Slip, error)
+	loadByCommitFn      func(ctx context.Context, repo, sha string) (*domain.Slip, error)
+	loadByCommitExactFn func(ctx context.Context, repo, sha string) (*domain.Slip, error)
+	findByCommitsFn     func(ctx context.Context, repo string, commits []string) (*domain.Slip, string, error)
+	findAllByCommitsFn  func(ctx context.Context, repo string, commits []string) ([]domain.SlipWithCommit, error)
 }
 
 func (m *mockReader) Load(ctx context.Context, id string) (*domain.Slip, error) {
@@ -33,6 +34,9 @@ func (m *mockReader) Load(ctx context.Context, id string) (*domain.Slip, error) 
 }
 func (m *mockReader) LoadByCommit(ctx context.Context, repo, sha string) (*domain.Slip, error) {
 	return m.loadByCommitFn(ctx, repo, sha)
+}
+func (m *mockReader) LoadByCommitExact(ctx context.Context, repo, sha string) (*domain.Slip, error) {
+	return m.loadByCommitExactFn(ctx, repo, sha)
 }
 func (m *mockReader) FindByCommits(ctx context.Context, repo string, commits []string) (*domain.Slip, string, error) {
 	return m.findByCommitsFn(ctx, repo, commits)
@@ -368,4 +372,53 @@ func TestNewSlipHandler(t *testing.T) {
 	mock := &mockReader{}
 	h := NewSlipHandler(mock)
 	assert.NotNil(t, h)
+}
+
+// TestGetSlipByCommit_RoutesToAncestryResolvingLoad guards R3 — the
+// ancestry-preservation invariant. The public GET /slips/by-commit/{owner}/{repo}/{sha}
+// endpoint MUST route to the ancestry-resolving LoadByCommit (which walks the
+// commit ancestry to find the closest matching slip) and MUST NOT route to
+// LoadByCommitExact (the exact-SHA lookup added for the dedup-lock-miss await
+// path). LoadByCommitExact bypasses ancestry resolution and would silently
+// regress the public lookup behavior — image-tag historical lookups and PR/CI
+// "find slip for this commit" workflows depend on the ancestry walk.
+//
+// If a future refactor swaps the handler to LoadByCommitExact, this test will
+// fail with a clear message pointing back to the invariant.
+func TestGetSlipByCommit_RoutesToAncestryResolvingLoad(t *testing.T) {
+	const sentinelCorrelationID = "ancestry-resolved-slip"
+	loadByCommitCalls := 0
+	loadByCommitExactCalls := 0
+	mock := &mockReader{
+		loadByCommitFn: func(_ context.Context, repo, sha string) (*domain.Slip, error) {
+			loadByCommitCalls++
+			assert.Equal(t, "org/repo", repo)
+			assert.Equal(t, "feedfacecafe", sha)
+			return &domain.Slip{
+				CorrelationID: sentinelCorrelationID,
+				Repository:    repo,
+				CommitSHA:     sha,
+			}, nil
+		},
+		loadByCommitExactFn: func(_ context.Context, _, _ string) (*domain.Slip, error) {
+			loadByCommitExactCalls++
+			return nil, errors.New("LoadByCommitExact MUST NOT be called from the public by-commit handler — guards R3")
+		},
+	}
+
+	handler := setupTestAPI(mock)
+	req := httptest.NewRequest(http.MethodGet, "/slips/by-commit/org/repo/feedfacecafe", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, 1, loadByCommitCalls,
+		"public GET /slips/by-commit handler MUST call LoadByCommit (ancestry-resolving) exactly once")
+	assert.Equal(t, 0, loadByCommitExactCalls,
+		"public GET /slips/by-commit handler MUST NOT call LoadByCommitExact — that path bypasses ancestry resolution and is reserved for the dedup-lock-miss await path in slip_writer.go")
+
+	var body domain.Slip
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&body))
+	assert.Equal(t, sentinelCorrelationID, body.CorrelationID,
+		"response must come from the ancestry-resolved load, not the exact-SHA path")
 }

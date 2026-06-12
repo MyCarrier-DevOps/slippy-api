@@ -19,11 +19,12 @@ const (
 	// DefaultLockTTL is how long an acquired dedup lock lives. It must exceed the
 	// worst-case CreateSlipForPush latency plus the ClickHouse async-insert
 	// visibility window so a near-simultaneous duplicate stays blocked until the
-	// first slip is durably visible to LoadByCommit.
+	// first slip is durably visible via the exact-SHA lookup (LoadByCommitExact).
 	DefaultLockTTL = 120 * time.Second
 
-	// DefaultLockWait is how long the lock-miss path polls LoadByCommit for the
-	// in-flight slip to become visible before giving up with a retryable error.
+	// DefaultLockWait is how long the lock-miss path polls LoadByCommitExact (the
+	// exact-SHA lookup, no ancestry resolution) for the in-flight slip to become
+	// visible before giving up with a retryable error.
 	DefaultLockWait = 10 * time.Second
 )
 
@@ -53,7 +54,8 @@ type Locker interface {
 // The key is repo:sha — NOT correlationID (two duplicate webhooks get distinct
 // correlation IDs but share repo+sha) and NOT X-GitHub-Delivery (GitHub assigns
 // a fresh delivery GUID per redelivery). repo:sha matches the identity used by
-// LoadByCommit, so it catches both GitHub redelivery and internal re-emit.
+// LoadByCommitExact (the exact-SHA lookup the await path polls), so it catches
+// both GitHub redelivery and internal re-emit.
 //
 // Both components are lowercased for consistency; duplicate requests carry
 // identical values, so normalization only guards against accidental case drift.

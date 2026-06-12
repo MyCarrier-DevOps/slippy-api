@@ -56,6 +56,15 @@ func (r *inMemorySlipReader) LoadByCommit(_ context.Context, repository, commitS
 	return nil, slippy.ErrSlipNotFound
 }
 
+func (r *inMemorySlipReader) LoadByCommitExact(_ context.Context, repository, commitSHA string) (*domain.Slip, error) {
+	for _, s := range r.slips {
+		if s.Repository == repository && s.CommitSHA == commitSHA && !s.Status.IsTerminal() {
+			return s, nil
+		}
+	}
+	return nil, slippy.ErrSlipNotFound
+}
+
 func (r *inMemorySlipReader) FindByCommits(
 	_ context.Context,
 	repository string,

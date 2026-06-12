@@ -71,11 +71,10 @@ func TestSlipWriterAdapter_ImplementsInterface(t *testing.T) {
 
 func TestSlipWriterAdapter_CreateSlipForPush_Success(t *testing.T) {
 	store := &mockSlipStore{
-		// LoadByCommit is called by CreateSlipForPush for retry detection.
-		// Returning not-found causes a fresh create.
-		loadByCommitFn: func(_ context.Context, _, _ string) (*slippy.Slip, error) {
-			return nil, slippy.ErrSlipNotFound
-		},
+		// CreateSlipForPush retry detection in goLibMyCarrier slippy v1.4.0+ uses
+		// LoadLiveByCommit (exact-SHA, terminal-status-filtered). The mock's
+		// default LoadLiveByCommit returns ErrSlipNotFound, which triggers the
+		// fresh-create path below. No explicit loadLiveByCommitFn needed.
 		createFn: func(_ context.Context, _ *slippy.Slip) error {
 			return nil
 		},
@@ -137,7 +136,12 @@ func TestSlipWriterAdapter_CreateSlipForPush_RetryDetection(t *testing.T) {
 		CommitSHA:     "deadbeef1234567890",
 	}
 	store := &mockSlipStore{
-		loadByCommitFn: func(_ context.Context, _, _ string) (*slippy.Slip, error) {
+		// goLibMyCarrier slippy.CreateSlipForPush retry-detection migrated to
+		// LoadLiveByCommit in v1.4.0-feature-82464-add-loadlivebycommit.2 — the
+		// retry-detection path is exact-SHA-by-intent and excludes superseded
+		// terminal statuses at the DB layer. This mock returns the existing slip
+		// from the live-by-commit lookup.
+		loadLiveByCommitFn: func(_ context.Context, _, _ string) (*slippy.Slip, error) {
 			return existingSlip, nil
 		},
 		updateStepFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus) error {
