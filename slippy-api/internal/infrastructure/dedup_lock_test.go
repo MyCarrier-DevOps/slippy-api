@@ -153,7 +153,8 @@ func (s *stubLocker) Release(ctx context.Context, key, token string) error {
 
 // stubReader is a minimal domain.SlipReader for the lock-miss poll path.
 type stubReader struct {
-	loadByCommitFn func(ctx context.Context, repo, sha string) (*slippy.Slip, error)
+	loadByCommitFn      func(ctx context.Context, repo, sha string) (*slippy.Slip, error)
+	loadByCommitExactFn func(ctx context.Context, repo, sha string) (*slippy.Slip, error)
 }
 
 func (r *stubReader) Load(_ context.Context, _ string) (*slippy.Slip, error) {
@@ -161,6 +162,13 @@ func (r *stubReader) Load(_ context.Context, _ string) (*slippy.Slip, error) {
 }
 func (r *stubReader) LoadByCommit(ctx context.Context, repo, sha string) (*slippy.Slip, error) {
 	return r.loadByCommitFn(ctx, repo, sha)
+}
+func (r *stubReader) LoadByCommitExact(ctx context.Context, repo, sha string) (*slippy.Slip, error) {
+	// No fall-through: every test that exercises LoadByCommitExact MUST set
+	// loadByCommitExactFn explicitly. Silently routing exact-API calls through
+	// loadByCommitFn would mask future regressions where the dedup-loser poll
+	// path is reverted to ancestry semantics (LoadByCommit).
+	return r.loadByCommitExactFn(ctx, repo, sha)
 }
 func (r *stubReader) FindByCommits(_ context.Context, _ string, _ []string) (*slippy.Slip, string, error) {
 	return nil, "", slippy.ErrSlipNotFound
@@ -245,7 +253,7 @@ func TestSlipWriterAdapter_Dedup_LockMiss_ReturnsExistingSlip(t *testing.T) {
 	}
 	existing := &slippy.Slip{CorrelationID: "winner-corr", Repository: "Org/Repo", CommitSHA: "DEAD"}
 	reader := &stubReader{
-		loadByCommitFn: func(_ context.Context, _, _ string) (*slippy.Slip, error) {
+		loadByCommitExactFn: func(_ context.Context, _, _ string) (*slippy.Slip, error) {
 			return existing, nil // immediately visible, non-terminal (zero status)
 		},
 	}
@@ -274,7 +282,7 @@ func TestSlipWriterAdapter_Dedup_LockMiss_TerminalExistingReturnsRetryable(t *te
 		Status:        slippy.SlipStatusCompleted, // terminal — must NOT be returned
 	}
 	reader := &stubReader{
-		loadByCommitFn: func(_ context.Context, _, _ string) (*slippy.Slip, error) {
+		loadByCommitExactFn: func(_ context.Context, _, _ string) (*slippy.Slip, error) {
 			return terminal, nil
 		},
 	}
@@ -295,7 +303,7 @@ func TestSlipWriterAdapter_Dedup_LockMiss_TimeoutReturnsRetryable(t *testing.T) 
 		},
 	}
 	reader := &stubReader{
-		loadByCommitFn: func(_ context.Context, _, _ string) (*slippy.Slip, error) {
+		loadByCommitExactFn: func(_ context.Context, _, _ string) (*slippy.Slip, error) {
 			return nil, slippy.ErrSlipNotFound // never becomes visible
 		},
 	}
@@ -308,6 +316,36 @@ func TestSlipWriterAdapter_Dedup_LockMiss_TimeoutReturnsRetryable(t *testing.T) 
 	// Downstream (handler mapWriteError) classifies this as 409 via errors.Is.
 	assert.True(t, errors.Is(err, domain.ErrCreationInProgress),
 		"lock-miss timeout error must wrap domain.ErrCreationInProgress")
+}
+
+// TestSlipWriterAdapter_AwaitExistingSlip_UsesExactNotAncestry guards the bite-site
+// fix for the dedup-loser stuck-slip bug (regression 129f5bc). The dedup-loser poll
+// MUST call LoadByCommitExact (exact-SHA semantics) so it does NOT return an unrelated
+// ancestor slip while the winner's commit row is still propagating through the async
+// insert window. If anyone reverts the writer to LoadByCommit, this test fires.
+func TestSlipWriterAdapter_AwaitExistingSlip_UsesExactNotAncestry(t *testing.T) {
+	locker := &stubLocker{
+		acquireFn: func(_ context.Context, _ string, _ time.Duration) (bool, string, error) {
+			return false, "", nil // duplicate in flight → poll path
+		},
+	}
+	winner := &slippy.Slip{CorrelationID: "winner-corr", Repository: "Org/Repo", CommitSHA: "DEAD"}
+	reader := &stubReader{
+		loadByCommitFn: func(_ context.Context, _, _ string) (*slippy.Slip, error) {
+			t.Fatal("awaitExistingSlip MUST NOT call LoadByCommit — ancestry resolution returns wrong-slip on miss; must use LoadByCommitExact")
+			return nil, nil
+		},
+		loadByCommitExactFn: func(_ context.Context, _, _ string) (*slippy.Slip, error) {
+			return winner, nil // exact match — non-terminal (zero status)
+		},
+	}
+	adapter := newWriterAdapterWithDeps(dedupTestStore(), locker, reader)
+
+	result, err := adapter.CreateSlipForPush(context.Background(), dedupPushOpts())
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "winner-corr", result.Slip.CorrelationID,
+		"dedup-loser poll must return the exact-SHA winner via LoadByCommitExact")
 }
 
 func TestSlipWriterAdapter_Dedup_LockMiss_NoReaderReturnsRetryable(t *testing.T) {

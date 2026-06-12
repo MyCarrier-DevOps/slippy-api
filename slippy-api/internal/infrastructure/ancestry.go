@@ -24,9 +24,13 @@ type SlipResolver interface {
 }
 
 // SlipResolverAdapter wraps the slippy library's ResolveSlip for ancestry-based
-// slip resolution. For commit-based lookups (LoadByCommit, FindByCommits,
-// FindAllByCommits), it first tries the direct reader, then falls back to the
-// library's commit ancestry walker when no slip is found.
+// slip resolution. FindByCommits and FindAllByCommits attempt a direct ClickHouse
+// reader lookup first and fall back to the library's commit-ancestry walker on miss.
+// LoadByCommit is resolver-first by design — it always walks ancestry — for callers
+// that want "the slip for THIS commit's lineage" (e.g. image-tag fallback, historical
+// lookup, rerun continuity). Callers needing exact-SHA semantics MUST use
+// LoadByCommitExact, which bypasses the resolver and returns ErrSlipNotFound when
+// no live slip exists for the exact SHA.
 type SlipResolverAdapter struct {
 	resolver SlipResolver
 	reader   domain.SlipReader
@@ -125,6 +129,43 @@ func (a *SlipResolverAdapter) LoadByCommit(
 		"requested_repository", repository, "commit_sha", commitSHA)
 	span.SetStatus(codes.Unset, "not found")
 	return nil, slippy.ErrSlipNotFound
+}
+
+// LoadByCommitExact bypasses the resolver-first ancestry walk and returns the LIVE
+// slip for the exact (repository, commitSHA) via the direct ClickHouse store. Returns
+// slippy.ErrSlipNotFound when no live slip exists. Use only for dedup-loser polling
+// and other in-flight paths that require exact-SHA semantics.
+func (a *SlipResolverAdapter) LoadByCommitExact(
+	ctx context.Context,
+	repository, commitSHA string,
+) (*domain.Slip, error) {
+	ctx, span := otel.Tracer(ancestryTracerName).Start(ctx, "ancestry.LoadByCommitExact",
+		trace.WithAttributes(
+			attribute.String("slip.repository", repository),
+			attribute.String("slip.commit_sha", commitSHA),
+		),
+	)
+	defer span.End()
+
+	slip, err := a.reader.LoadByCommitExact(ctx, repository, commitSHA)
+	if err != nil {
+		span.RecordError(err)
+		if errors.Is(err, slippy.ErrSlipNotFound) {
+			span.SetStatus(codes.Unset, "not found")
+		} else {
+			span.SetStatus(codes.Error, "load failed")
+			slog.ErrorContext(ctx, "ancestry: load-exact by commit failed",
+				"repository", repository, "commit_sha", commitSHA, "error", err)
+		}
+		return nil, err
+	}
+	span.SetAttributes(
+		attribute.String("slip.correlation_id", slip.CorrelationID),
+		attribute.String("slip.slip_repository", slip.Repository),
+		attribute.String("slip.status", string(slip.Status)),
+	)
+	span.SetStatus(codes.Ok, "")
+	return slip, nil
 }
 
 func (a *SlipResolverAdapter) FindByCommits(

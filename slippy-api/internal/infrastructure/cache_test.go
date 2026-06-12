@@ -15,10 +15,11 @@ import (
 // --- Mock SlipReader for testing ---
 
 type mockSlipReader struct {
-	loadFn             func(ctx context.Context, id string) (*domain.Slip, error)
-	loadByCommitFn     func(ctx context.Context, repo, sha string) (*domain.Slip, error)
-	findByCommitsFn    func(ctx context.Context, repo string, commits []string) (*domain.Slip, string, error)
-	findAllByCommitsFn func(ctx context.Context, repo string, commits []string) ([]domain.SlipWithCommit, error)
+	loadFn              func(ctx context.Context, id string) (*domain.Slip, error)
+	loadByCommitFn      func(ctx context.Context, repo, sha string) (*domain.Slip, error)
+	loadByCommitExactFn func(ctx context.Context, repo, sha string) (*domain.Slip, error)
+	findByCommitsFn     func(ctx context.Context, repo string, commits []string) (*domain.Slip, string, error)
+	findAllByCommitsFn  func(ctx context.Context, repo string, commits []string) ([]domain.SlipWithCommit, error)
 }
 
 func (m *mockSlipReader) Load(ctx context.Context, id string) (*domain.Slip, error) {
@@ -27,6 +28,10 @@ func (m *mockSlipReader) Load(ctx context.Context, id string) (*domain.Slip, err
 
 func (m *mockSlipReader) LoadByCommit(ctx context.Context, repo, sha string) (*domain.Slip, error) {
 	return m.loadByCommitFn(ctx, repo, sha)
+}
+
+func (m *mockSlipReader) LoadByCommitExact(ctx context.Context, repo, sha string) (*domain.Slip, error) {
+	return m.loadByCommitExactFn(ctx, repo, sha)
 }
 
 func (m *mockSlipReader) FindByCommits(
@@ -115,6 +120,35 @@ func TestCachedSlipReader_LoadByCommitDelegatesError(t *testing.T) {
 
 	cached := NewCachedSlipReader(mock, nil, 10*time.Minute)
 	slip, err := cached.LoadByCommit(context.Background(), "org/repo", "sha")
+	assert.Error(t, err)
+	assert.Nil(t, slip)
+}
+
+func TestCachedSlipReader_LoadByCommitExactDelegates(t *testing.T) {
+	expectedSlip := &domain.Slip{CorrelationID: "live-789", Repository: "org/repo"}
+	mock := &mockSlipReader{
+		loadByCommitExactFn: func(_ context.Context, repo, sha string) (*domain.Slip, error) {
+			assert.Equal(t, "org/repo", repo)
+			assert.Equal(t, "abc123", sha)
+			return expectedSlip, nil
+		},
+	}
+
+	cached := NewCachedSlipReader(mock, nil, 10*time.Minute)
+	slip, err := cached.LoadByCommitExact(context.Background(), "org/repo", "abc123")
+	require.NoError(t, err)
+	assert.Equal(t, expectedSlip, slip)
+}
+
+func TestCachedSlipReader_LoadByCommitExactDelegatesError(t *testing.T) {
+	mock := &mockSlipReader{
+		loadByCommitExactFn: func(_ context.Context, _, _ string) (*domain.Slip, error) {
+			return nil, errors.New("timeout")
+		},
+	}
+
+	cached := NewCachedSlipReader(mock, nil, 10*time.Minute)
+	slip, err := cached.LoadByCommitExact(context.Background(), "org/repo", "sha")
 	assert.Error(t, err)
 	assert.Nil(t, slip)
 }

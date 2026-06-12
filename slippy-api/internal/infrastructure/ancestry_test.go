@@ -16,10 +16,11 @@ import (
 // --- Mock SlipReader ---
 
 type mockReader struct {
-	loadFn             func(ctx context.Context, id string) (*domain.Slip, error)
-	loadByCommitFn     func(ctx context.Context, repo, sha string) (*domain.Slip, error)
-	findByCommitsFn    func(ctx context.Context, repo string, commits []string) (*domain.Slip, string, error)
-	findAllByCommitsFn func(ctx context.Context, repo string, commits []string) ([]domain.SlipWithCommit, error)
+	loadFn              func(ctx context.Context, id string) (*domain.Slip, error)
+	loadByCommitFn      func(ctx context.Context, repo, sha string) (*domain.Slip, error)
+	loadByCommitExactFn func(ctx context.Context, repo, sha string) (*domain.Slip, error)
+	findByCommitsFn     func(ctx context.Context, repo string, commits []string) (*domain.Slip, string, error)
+	findAllByCommitsFn  func(ctx context.Context, repo string, commits []string) ([]domain.SlipWithCommit, error)
 }
 
 func (m *mockReader) Load(ctx context.Context, id string) (*domain.Slip, error) {
@@ -28,6 +29,10 @@ func (m *mockReader) Load(ctx context.Context, id string) (*domain.Slip, error) 
 
 func (m *mockReader) LoadByCommit(ctx context.Context, repo, sha string) (*domain.Slip, error) {
 	return m.loadByCommitFn(ctx, repo, sha)
+}
+
+func (m *mockReader) LoadByCommitExact(ctx context.Context, repo, sha string) (*domain.Slip, error) {
+	return m.loadByCommitExactFn(ctx, repo, sha)
 }
 
 func (m *mockReader) FindByCommits(
@@ -158,6 +163,71 @@ func TestAdapter_LoadByCommit_InvalidRepositoryError(t *testing.T) {
 	adapter := NewSlipResolverAdapter(resolver, &mockReader{})
 	slip, err := adapter.LoadByCommit(context.Background(), "no-slash", "sha123")
 	assert.ErrorIs(t, err, slippy.ErrInvalidRepository)
+	assert.Nil(t, slip)
+}
+
+// --- LoadByCommitExact ---
+
+// TestSlipResolverAdapter_LoadByCommitExact_BypassesResolver asserts the adapter
+// delegates directly to reader.LoadByCommitExact and NEVER consults the resolver.
+// This is the core regression guard for the dedup-loser stuck-slip bug — anyone who
+// tries to "improve" the method by adding ancestry fallback will fail this test.
+func TestSlipResolverAdapter_LoadByCommitExact_BypassesResolver(t *testing.T) {
+	expected := &domain.Slip{CorrelationID: "live-slip", Repository: "org/repo"}
+	reader := &mockReader{
+		loadByCommitExactFn: func(_ context.Context, repo, sha string) (*domain.Slip, error) {
+			assert.Equal(t, "org/repo", repo)
+			assert.Equal(t, "sha123", sha)
+			return expected, nil
+		},
+	}
+	resolver := &mockSlipResolver{
+		resolveSlipFn: func(_ context.Context, _ slippy.ResolveOptions) (*slippy.ResolveResult, error) {
+			t.Fatal("resolver MUST NOT be called by LoadByCommitExact — exact-SHA semantics demand bypass")
+			return nil, nil
+		},
+	}
+
+	adapter := NewSlipResolverAdapter(resolver, reader)
+	slip, err := adapter.LoadByCommitExact(context.Background(), "org/repo", "sha123")
+	require.NoError(t, err)
+	assert.Equal(t, expected, slip)
+}
+
+// TestSlipResolverAdapter_LoadByCommitExact_ReturnsNotFoundOnEmpty asserts
+// ErrSlipNotFound propagates from the reader without falling back to ancestry.
+func TestSlipResolverAdapter_LoadByCommitExact_ReturnsNotFoundOnEmpty(t *testing.T) {
+	reader := &mockReader{
+		loadByCommitExactFn: func(_ context.Context, _, _ string) (*domain.Slip, error) {
+			return nil, slippy.ErrSlipNotFound
+		},
+	}
+	resolver := &mockSlipResolver{
+		resolveSlipFn: func(_ context.Context, _ slippy.ResolveOptions) (*slippy.ResolveResult, error) {
+			t.Fatal("resolver MUST NOT be called when exact lookup returns not-found")
+			return nil, nil
+		},
+	}
+
+	adapter := NewSlipResolverAdapter(resolver, reader)
+	slip, err := adapter.LoadByCommitExact(context.Background(), "org/repo", "sha123")
+	assert.ErrorIs(t, err, slippy.ErrSlipNotFound)
+	assert.Nil(t, slip)
+}
+
+// TestSlipResolverAdapter_LoadByCommitExact_StoreError asserts non-not-found
+// errors propagate unchanged.
+func TestSlipResolverAdapter_LoadByCommitExact_StoreError(t *testing.T) {
+	storeErr := errors.New("clickhouse timeout")
+	reader := &mockReader{
+		loadByCommitExactFn: func(_ context.Context, _, _ string) (*domain.Slip, error) {
+			return nil, storeErr
+		},
+	}
+
+	adapter := NewSlipResolverAdapter(&mockSlipResolver{}, reader)
+	slip, err := adapter.LoadByCommitExact(context.Background(), "org/repo", "sha123")
+	assert.ErrorIs(t, err, storeErr)
 	assert.Nil(t, slip)
 }
 

@@ -100,6 +100,25 @@ func (s *asyncInsertSlipStore) LoadByCommit(_ context.Context, repo, sha string)
 	return nil, slippy.ErrSlipNotFound
 }
 
+// LoadLiveByCommit mirrors LoadByCommit but excludes terminal-status slips, matching
+// the production goLibMyCarrier semantic. The visibility-lag behavior is preserved
+// so the dedup-loser poll exercises the same async-insert window.
+func (s *asyncInsertSlipStore) LoadLiveByCommit(_ context.Context, repo, sha string) (*slippy.Slip, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	visAt, ok := s.visibleAt[commitKey(repo, sha)]
+	if !ok || time.Now().Before(visAt) {
+		return nil, slippy.ErrSlipNotFound
+	}
+	for _, slip := range s.byCommit {
+		if slip.Repository == repo && slip.CommitSHA == sha && !slip.Status.IsTerminal() {
+			cp := *slip
+			return &cp, nil
+		}
+	}
+	return nil, slippy.ErrSlipNotFound
+}
+
 func (s *asyncInsertSlipStore) createCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -187,6 +206,9 @@ func (r storeReaderAdapter) Load(ctx context.Context, correlationID string) (*do
 }
 func (r storeReaderAdapter) LoadByCommit(ctx context.Context, repo, sha string) (*domain.Slip, error) {
 	return r.store.LoadByCommit(ctx, repo, sha)
+}
+func (r storeReaderAdapter) LoadByCommitExact(ctx context.Context, repo, sha string) (*domain.Slip, error) {
+	return r.store.LoadLiveByCommit(ctx, repo, sha)
 }
 func (r storeReaderAdapter) FindByCommits(
 	ctx context.Context, repo string, commits []string,

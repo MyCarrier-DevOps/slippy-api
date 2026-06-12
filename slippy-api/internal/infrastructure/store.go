@@ -72,6 +72,35 @@ func (a *SlipStoreAdapter) LoadByCommit(ctx context.Context, repository, commitS
 	return slip, nil
 }
 
+// LoadByCommitExact delegates to the underlying SlipStore.LoadLiveByCommit which
+// returns the most recent LIVE (non-terminal) slip for the exact (repository, commitSHA).
+// Returns slippy.ErrSlipNotFound when no live slip exists. Bypasses ancestry resolution.
+func (a *SlipStoreAdapter) LoadByCommitExact(ctx context.Context, repository, commitSHA string) (*domain.Slip, error) {
+	// Span name and db.operation are both "LoadLiveByCommit" — the actual SQL
+	// operation invoked on the underlying store. The adapter method is named
+	// LoadByCommitExact (the domain-side semantic: bypass ancestry resolution),
+	// but the span identifies the executed work, not the caller-facing name, so
+	// trace consumers correlate it directly with the goLibMyCarrier store-level
+	// LoadLiveByCommit instrumentation.
+	ctx, span := otel.Tracer(storeTracerName).Start(ctx, "clickhouse.LoadLiveByCommit",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("db.system", "clickhouse"),
+			attribute.String("db.operation", "LoadLiveByCommit"),
+			attribute.String("slip.repository", repository),
+			attribute.String("slip.commit_sha", commitSHA),
+		),
+	)
+	defer span.End()
+
+	slip, err := a.store.LoadLiveByCommit(ctx, repository, commitSHA)
+	if err != nil {
+		recordStoreError(span, err)
+		return nil, err
+	}
+	return slip, nil
+}
+
 func (a *SlipStoreAdapter) FindByCommits(
 	ctx context.Context,
 	repository string,

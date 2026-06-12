@@ -41,6 +41,12 @@ type SlipReader interface {
 	// LoadByCommit retrieves a slip by repository and commit SHA
 	LoadByCommit(ctx context.Context, repository, commitSHA string) (*Slip, error)
 
+	// LoadByCommitExact returns the LIVE slip for the EXACT commitSHA, bypassing
+	// ancestry resolution. Returns slippy.ErrSlipNotFound when no live slip exists for
+	// this exact commit. Use for in-flight dedup-loser polling. For ancestry or
+	// image-tag historical lookup, use LoadByCommit or FindByCommits.
+	LoadByCommitExact(ctx context.Context, repository, commitSHA string) (*Slip, error)
+
 	// FindByCommits finds the first matching slip for an ordered list of commits.
 	// Returns the slip and the matched commit SHA.
 	FindByCommits(ctx context.Context, repository string, commits []string) (*Slip, string, error)

@@ -3,6 +3,7 @@ package infrastructure
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -125,7 +126,8 @@ func (a *SlipWriterAdapter) CreateSlipForPush(
 	}
 
 	// Lock not acquired → a duplicate is in flight or was just created. Return the
-	// SAME slip (idempotent) by polling LoadByCommit until it becomes visible.
+	// SAME slip (idempotent) by polling LoadByCommitExact (exact-SHA lookup, no
+	// ancestry resolution) until the in-flight slip becomes visible.
 	span.AddEvent("dedup_duplicate_suppressed")
 	return a.awaitExistingSlip(ctx, span, key, opts)
 }
@@ -344,9 +346,11 @@ func (a *SlipWriterAdapter) awaitExistingSlip(
 	// visibility window.
 	backoff := 50 * time.Millisecond
 	const maxBackoff = time.Second
+	attempts := 0
 
 	for {
-		existing, err := a.reader.LoadByCommit(ctx, opts.Repository, opts.CommitSHA)
+		attempts++
+		existing, err := a.reader.LoadByCommitExact(ctx, opts.Repository, opts.CommitSHA)
 		// Deliberate choice: a TERMINAL existing slip for this (repo, sha) is NOT
 		// returned as an in-flight result. Returning a finished slip as if creation
 		// were still "in progress" would be misleading, and a genuinely new push for
@@ -381,7 +385,27 @@ func (a *SlipWriterAdapter) awaitExistingSlip(
 
 	// Deadline exceeded without a visible non-terminal slip. Do NOT create a second
 	// slip — return a retryable error so the duplicate is not materialized.
-	span.AddEvent("dedup_wait_timeout")
+	//
+	// Observability: WARN log on deadline-exhaust acts as the early-warning signal
+	// for a class-of-bug regression (e.g. winner crashing pre-insert, async-insert
+	// window blown past lockWait, or ancestry-resolution drift causing the await
+	// path to miss a slip that does exist). If this fires steadily, investigate
+	// before adjusting lockWait — increasing the wait masks the underlying issue.
+	deadlineMs := a.lockWait.Milliseconds()
+	span.AddEvent("dedup_wait_timeout",
+		trace.WithAttributes(
+			attribute.Int("dedup.attempts", attempts),
+			attribute.Int64("dedup.deadline_ms", deadlineMs),
+		),
+	)
+	slog.WarnContext(ctx, "dedup: awaitExistingSlip deadline exhausted",
+		"correlation_id", opts.CorrelationID,
+		"repository", opts.Repository,
+		"commit_sha", opts.CommitSHA,
+		"deadline_ms", deadlineMs,
+		"attempts", attempts,
+		"dedup_key", key,
+	)
 	return nil, fmt.Errorf("dedup: slip for %s creation in progress, retry: %w", key, domain.ErrCreationInProgress)
 }
 
