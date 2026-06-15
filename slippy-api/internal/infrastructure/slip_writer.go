@@ -481,9 +481,32 @@ func (a *SlipWriterAdapter) hydrateAndPersist(
 	// Strengthens I5: routing_slips.<step>_status == event-log-derived status.
 	// Does not affect I1–I4 (those are enforced by checkPipelineCompletion inside
 	// the library, which runs before this hydration path).
-	overlayPipelineStep(slip, stepName, status, writtenAt)
+	//
+	// R1 (ADO #82468): the terminal-wins guard inside overlayPipelineStep no
+	// longer relies on the (potentially stale) in-memory CompletedAt. Instead it
+	// consults the event log via store.LatestStepStatusFromEvents — guaranteed
+	// to reflect just-written truth because the preceding library write was
+	// synchronous under wait_for_async_insert=1 (asserted at startup; see
+	// clickhouse_assertions.go).
+	latestFn := func() (slippy.StepStatus, bool, error) {
+		return a.client.Store().LatestStepStatusFromEvents(ctx, correlationID, stepName)
+	}
+	applied := overlayPipelineStep(slip, stepName, status, writtenAt, latestFn)
 
-	if err := a.client.Store().Update(ctx, slip); err != nil {
+	// R2 Option D: when the overlay applied (caller's status is the authoritative
+	// truth for THIS step), pin the routing_slips.<step>_status column and the
+	// step_details.<step>.status JSON value to the caller-supplied status via
+	// StepStatusOverride. When the overlay was dropped (event log already
+	// terminal, caller wrote non-terminal), pass no override so Update falls back
+	// to slip.Steps[name].Status — which still reflects event-log truth from
+	// Load because overlay was skipped without mutation.
+	var overrides []slippy.StepStatusOverride
+	if applied {
+		overrides = []slippy.StepStatusOverride{
+			{ColumnName: slippy.StepStatusColumnName(stepName), Status: status},
+		}
+	}
+	if err := a.client.Store().Update(ctx, slip, overrides...); err != nil {
 		recordWriterError(span, err)
 		return fmt.Errorf("hydrateAndPersist: update failed: %w", err)
 	}
@@ -491,51 +514,89 @@ func (a *SlipWriterAdapter) hydrateAndPersist(
 	return nil
 }
 
+// latestStepStatusFn is the callback seam used by overlayPipelineStep to consult
+// the event log (slip_component_states) for the authoritative latest status of
+// the step being written. Returning (status, true, nil) signals an event row
+// exists; ("", false, nil) signals no events yet and the in-memory guard remains
+// in effect; (_, _, err) signals a query failure and triggers the fail-open
+// fallback to the in-memory guard.
+type latestStepStatusFn func() (slippy.StepStatus, bool, error)
+
 // overlayPipelineStep applies a just-written pipeline-step state to an in-memory
 // slip, acting as a read-your-own-writes safety net for ClickHouse async-insert
-// visibility lag.
+// visibility lag. Returns true when ApplyStatusTransition was called (the
+// caller's status WON), false when the overlay was dropped (event log already
+// holds a terminal status that must not be clobbered by a non-terminal write).
 //
 // Only pipeline-level steps (componentName == "") are handled. Aggregate steps
 // are handled inside goLibMyCarrier by overlayComponentState.
 //
-// Overlay rule: if the step exists in slip.Steps and the writtenAt timestamp is
-// strictly after the existing CompletedAt (or CompletedAt is nil), the new status
-// wins. This is the sentinel path from goLibMyCarrier's overlayComponentState
-// (clickhouse_store.go) applied to slippy.Step rather than ComponentStepData.
+// R1 terminal-wins guard (ADO #82468): the guard consults the event log via
+// latestStatus rather than the in-memory CompletedAt. This eliminates the
+// 436cc68c-style failure mode where Load returned a stale snapshot whose
+// CompletedAt did not yet reflect a just-written terminal event. The event log
+// row is durable under wait_for_async_insert=1 (asserted at startup), so the
+// SELECT is guaranteed to observe it.
 //
-// Note: ApplyStatusTransition sets CompletedAt only on the first terminal
-// transition (when CompletedAt is nil). On a re-run path (failed → running →
-// completed) where a prior CompletedAt exists, the Status is updated correctly
-// but CompletedAt retains the prior run's timestamp. This is intentional and
-// consistent with ComponentStepData.ApplyStatusTransition in goLibMyCarrier.
+// Fail-open policy: if latestStatus returns an error, fall through to the
+// existing in-memory guard. If latestStatus reports !found (no events for this
+// step yet), the overlay applies — this preserves first-event behaviour.
 //
-// Mirrors the sentinel-path logic of goLibMyCarrier's overlayComponentState
-// (clickhouse_store.go:2233-2241). Duplication is intentional:
-// overlayComponentState is an unexported function and cannot be called from
-// this module. Both functions must stay in sync.
-func overlayPipelineStep(slip *slippy.Slip, stepName string, status slippy.StepStatus, writtenAt time.Time) {
+// Overlay rule once the guard has cleared: writtenAt-vs-CompletedAt monotonicity
+// is preserved (the new status wins iff CompletedAt is nil or writtenAt is
+// strictly after it). ApplyStatusTransition sets CompletedAt only on the first
+// terminal transition.
+//
+// Mirrors the sentinel-path logic of goLibMyCarrier's overlayComponentState.
+// Duplication is intentional: overlayComponentState is an unexported function
+// and cannot be called from this module. Both functions must stay in sync.
+func overlayPipelineStep(
+	slip *slippy.Slip,
+	stepName string,
+	status slippy.StepStatus,
+	writtenAt time.Time,
+	latestStatus latestStepStatusFn,
+) (applied bool) {
 	if slip == nil {
-		return
+		return false
 	}
 	if slip.Steps == nil {
-		return
+		return false
 	}
 	step, ok := slip.Steps[stepName]
 	if !ok {
-		return
+		return false
 	}
-	// Never overwrite a terminal status with a non-terminal one. This handles the
-	// case where a StartStep arrives after a concurrent (or out-of-order re-trigger)
-	// terminal event has already completed and become visible to Load(). Without
-	// this guard, writtenAt = time.Now() would be after the past CompletedAt and
-	// the overlay would clobber terminal → running, violating I5 and I2.
+
+	// R1: consult the event log. Three branches:
+	//   err != nil → fail-open; fall through to in-memory CompletedAt guard.
+	//   !found     → no event rows yet → apply overlay (first-event).
+	//   found      → if event-log terminal AND caller non-terminal → DROP.
+	if latestStatus != nil {
+		eventStatus, found, err := latestStatus()
+		switch {
+		case err != nil:
+			// fail-open: rely on the in-memory CompletedAt guard below
+		case !found:
+			// no events yet — overlay applies as first transition
+		case eventStatus.IsTerminal() && !status.IsTerminal():
+			// the I5 fix: event log says terminal, caller is writing non-terminal.
+			// Drop the overlay so the caller-side R2 logic also skips the override.
+			return false
+		}
+	}
+
+	// Defensive in-memory guard (fail-open fallback when latestStatus errored or
+	// is nil, e.g. in older unit-test fixtures that have not been migrated yet).
 	if !status.IsTerminal() && step.CompletedAt != nil {
-		return
+		return false
 	}
 	if step.CompletedAt == nil || writtenAt.After(*step.CompletedAt) {
 		step.ApplyStatusTransition(status, writtenAt)
 		slip.Steps[stepName] = step
+		return true
 	}
+	return false
 }
 
 // recordWriterError records an error on a span, distinguishing client errors

@@ -309,7 +309,7 @@ func TestSlipWriterAdapter_SkipStep_PipelineStep_TriggersHydration(t *testing.T)
 		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
 			return hydrationSlip, nil
 		},
-		updateFn: func(_ context.Context, _ *slippy.Slip) error {
+		updateFn: func(_ context.Context, _ *slippy.Slip, _ ...slippy.StepStatusOverride) error {
 			updateCalled = true
 			return nil
 		},
@@ -396,7 +396,7 @@ func TestSlipWriterAdapter_StartStep_PipelineStep_TriggersHydration(t *testing.T
 			assert.Equal(t, "abc-123", id)
 			return hydrationSlip, nil
 		},
-		updateFn: func(_ context.Context, slip *slippy.Slip) error {
+		updateFn: func(_ context.Context, slip *slippy.Slip, _ ...slippy.StepStatusOverride) error {
 			updateCalled = true
 			assert.Equal(t, hydrationSlip, slip)
 			return nil
@@ -419,7 +419,7 @@ func TestSlipWriterAdapter_CompleteStep_PipelineStep_TriggersHydration(t *testin
 		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
 			return hydrationSlip, nil
 		},
-		updateFn: func(_ context.Context, _ *slippy.Slip) error {
+		updateFn: func(_ context.Context, _ *slippy.Slip, _ ...slippy.StepStatusOverride) error {
 			updateCalled = true
 			return nil
 		},
@@ -441,7 +441,7 @@ func TestSlipWriterAdapter_FailStep_PipelineStep_TriggersHydration(t *testing.T)
 		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
 			return hydrationSlip, nil
 		},
-		updateFn: func(_ context.Context, _ *slippy.Slip) error {
+		updateFn: func(_ context.Context, _ *slippy.Slip, _ ...slippy.StepStatusOverride) error {
 			updateCalled = true
 			return nil
 		},
@@ -462,7 +462,7 @@ func TestSlipWriterAdapter_StartStep_ComponentStep_SkipsHydration(t *testing.T) 
 			t.Fatal("Load should not be called for component steps")
 			return nil, nil
 		},
-		updateFn: func(_ context.Context, _ *slippy.Slip) error {
+		updateFn: func(_ context.Context, _ *slippy.Slip, _ ...slippy.StepStatusOverride) error {
 			t.Fatal("Update should not be called for component steps")
 			return nil
 		},
@@ -492,7 +492,7 @@ func TestSlipWriterAdapter_CompleteStep_AggregateStep_SkipsHydration(t *testing.
 				Status:        slippy.SlipStatusInProgress,
 			}, nil
 		},
-		updateFn: func(_ context.Context, _ *slippy.Slip) error {
+		updateFn: func(_ context.Context, _ *slippy.Slip, _ ...slippy.StepStatusOverride) error {
 			t.Fatal("Update should not be called: adapter must not double-hydrate aggregate steps")
 			return nil
 		},
@@ -579,7 +579,7 @@ func TestSlipWriterAdapter_HydrateAndPersist_UpdateError(t *testing.T) {
 		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
 			return &slippy.Slip{CorrelationID: "abc-123"}, nil
 		},
-		updateFn: func(_ context.Context, _ *slippy.Slip) error {
+		updateFn: func(_ context.Context, _ *slippy.Slip, _ ...slippy.StepStatusOverride) error {
 			return errors.New("update failed")
 		},
 	}
@@ -600,7 +600,7 @@ func TestSlipWriterAdapter_IsPipelineStep_NilPipelineConfig(t *testing.T) {
 		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
 			return &slippy.Slip{CorrelationID: "abc-123"}, nil
 		},
-		updateFn: func(_ context.Context, _ *slippy.Slip) error {
+		updateFn: func(_ context.Context, _ *slippy.Slip, _ ...slippy.StepStatusOverride) error {
 			return nil
 		},
 	}
@@ -628,7 +628,7 @@ func TestSlipWriterAdapter_CompleteStep_PipelineStep_DoesNotDoubleCheckCompletio
 			loadCalls++
 			return &slippy.Slip{CorrelationID: "abc-123", Status: slippy.SlipStatusInProgress}, nil
 		},
-		updateFn: func(_ context.Context, _ *slippy.Slip) error {
+		updateFn: func(_ context.Context, _ *slippy.Slip, _ ...slippy.StepStatusOverride) error {
 			return nil
 		},
 	}
@@ -659,7 +659,7 @@ func TestSlipWriterAdapter_FailStep_PipelineStep_DoesNotDoubleCheckCompletion(t 
 			loadCalls++
 			return &slippy.Slip{CorrelationID: "abc-123", Status: slippy.SlipStatusInProgress}, nil
 		},
-		updateFn: func(_ context.Context, _ *slippy.Slip) error {
+		updateFn: func(_ context.Context, _ *slippy.Slip, _ ...slippy.StepStatusOverride) error {
 			return nil
 		},
 	}
@@ -707,7 +707,7 @@ func TestSlipWriterAdapter_FailStep_ComponentStep_UpdatesSlipStatus(t *testing.T
 			capturedStatus = status
 			return nil
 		},
-		updateFn: func(_ context.Context, _ *slippy.Slip) error {
+		updateFn: func(_ context.Context, _ *slippy.Slip, _ ...slippy.StepStatusOverride) error {
 			updateCalled = true
 			return nil
 		},
@@ -749,7 +749,7 @@ func TestSlipWriterAdapter_CompleteStep_ComponentStep_CallsCheckPipelineCompleti
 			updateSlipStatusCalled = true
 			return nil
 		},
-		updateFn: func(_ context.Context, _ *slippy.Slip) error {
+		updateFn: func(_ context.Context, _ *slippy.Slip, _ ...slippy.StepStatusOverride) error {
 			updateCalled = true
 			return nil
 		},
@@ -779,7 +779,7 @@ func TestSlipWriterAdapter_ComponentStep_DoesNotCallStoreUpdate(t *testing.T) {
 			loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
 				return &slippy.Slip{CorrelationID: id, Status: slippy.SlipStatusInProgress}, nil
 			},
-			updateFn: func(_ context.Context, _ *slippy.Slip) error {
+			updateFn: func(_ context.Context, _ *slippy.Slip, _ ...slippy.StepStatusOverride) error {
 				updateCalled = true
 				return nil
 			},
@@ -825,7 +825,7 @@ func TestSlipWriterAdapter_CompleteStep_FromFailed_Recovery(t *testing.T) {
 			writtenStatus = status
 			return nil
 		},
-		updateFn: func(_ context.Context, _ *slippy.Slip) error {
+		updateFn: func(_ context.Context, _ *slippy.Slip, _ ...slippy.StepStatusOverride) error {
 			return nil
 		},
 	}
@@ -877,7 +877,7 @@ func TestHydrateAndPersist_AsyncInsertRace_CompleteStep(t *testing.T) {
 			copy.Steps = steps
 			return &copy, nil
 		},
-		updateFn: func(_ context.Context, s *slippy.Slip) error {
+		updateFn: func(_ context.Context, s *slippy.Slip, _ ...slippy.StepStatusOverride) error {
 			persistedSlip = s
 			return nil
 		},
@@ -929,7 +929,7 @@ func TestHydrateAndPersist_AsyncInsertRace_FailStep(t *testing.T) {
 			copy.Steps = steps
 			return &copy, nil
 		},
-		updateFn: func(_ context.Context, s *slippy.Slip) error {
+		updateFn: func(_ context.Context, s *slippy.Slip, _ ...slippy.StepStatusOverride) error {
 			persistedSlip = s
 			return nil
 		},
@@ -978,7 +978,7 @@ func TestHydrateAndPersist_OverlaySkipsNewerStatus(t *testing.T) {
 			copy.Steps = steps
 			return &copy, nil
 		},
-		updateFn: func(_ context.Context, s *slippy.Slip) error {
+		updateFn: func(_ context.Context, s *slippy.Slip, _ ...slippy.StepStatusOverride) error {
 			persistedSlip = s
 			return nil
 		},
@@ -999,11 +999,24 @@ func TestHydrateAndPersist_OverlaySkipsNewerStatus(t *testing.T) {
 	)
 }
 
+// noEventLog is the test-helper callback that simulates "no events yet" — the
+// R1 guard falls through to the in-memory CompletedAt check. Used by the
+// pre-R1 tests whose behaviour should be unchanged.
+func noEventLog() (slippy.StepStatus, bool, error) { return "", false, nil }
+
+// eventLogReturns builds a latestStepStatusFn that always returns the supplied
+// (status, true, nil). Used by R1 tests that want to drive the event-log guard
+// explicitly.
+func eventLogReturns(status slippy.StepStatus) latestStepStatusFn {
+	return func() (slippy.StepStatus, bool, error) { return status, true, nil }
+}
+
 // TestOverlayPipelineStep_NilSlip verifies that overlayPipelineStep is a no-op when
 // called with a nil slip (defensive guard, mirrors overlayComponentState nil check).
 func TestOverlayPipelineStep_NilSlip(t *testing.T) {
-	// Must not panic.
-	overlayPipelineStep(nil, "dev_tests", slippy.StepStatusCompleted, time.Now())
+	// Must not panic. Returns false (no overlay applied).
+	applied := overlayPipelineStep(nil, "dev_tests", slippy.StepStatusCompleted, time.Now(), noEventLog)
+	assert.False(t, applied)
 }
 
 // TestOverlayPipelineStep_MissingStep verifies that overlayPipelineStep is a no-op
@@ -1012,7 +1025,8 @@ func TestOverlayPipelineStep_MissingStep(t *testing.T) {
 	slip := &slippy.Slip{
 		Steps: map[string]slippy.Step{},
 	}
-	overlayPipelineStep(slip, "nonexistent_step", slippy.StepStatusCompleted, time.Now())
+	applied := overlayPipelineStep(slip, "nonexistent_step", slippy.StepStatusCompleted, time.Now(), noEventLog)
+	assert.False(t, applied)
 	// No panic, no entry added.
 	assert.Empty(t, slip.Steps)
 }
@@ -1026,7 +1040,8 @@ func TestOverlayPipelineStep_NilCompletedAt(t *testing.T) {
 		},
 	}
 	now := time.Now()
-	overlayPipelineStep(slip, "dev_tests", slippy.StepStatusCompleted, now)
+	applied := overlayPipelineStep(slip, "dev_tests", slippy.StepStatusCompleted, now, noEventLog)
+	assert.True(t, applied)
 	assert.Equal(t, slippy.StepStatusCompleted, slip.Steps["dev_tests"].Status)
 	require.NotNil(t, slip.Steps["dev_tests"].CompletedAt)
 }
@@ -1041,15 +1056,18 @@ func TestOverlayPipelineStep_OlderCompletedAt(t *testing.T) {
 		},
 	}
 	now := time.Now()
-	overlayPipelineStep(slip, "dev_tests", slippy.StepStatusCompleted, now)
+	applied := overlayPipelineStep(slip, "dev_tests", slippy.StepStatusCompleted, now, noEventLog)
+	assert.True(t, applied)
 	assert.Equal(t, slippy.StepStatusCompleted, slip.Steps["dev_tests"].Status)
 }
 
-// TestOverlayPipelineStep_RunningDoesNotClobberTerminal is the F1 unit regression test.
-// Verifies that a non-terminal (running) overlay is silently dropped when the step
-// already has a terminal status with a past CompletedAt. This is the exact scenario
-// from slip b058127d where a second StartStep at 17:01 arrived after CompleteStep at
-// 16:58, and the overlay clobbered "completed" with "running".
+// TestOverlayPipelineStep_RunningDoesNotClobberTerminal is the F1 unit regression test,
+// extended for R1 (ADO #82468). The R1 guard now consults the event log via the
+// latestStepStatusFn callback rather than the in-memory CompletedAt; the original
+// in-memory guard is retained as the fail-open fallback.
+//
+// This test drives the R1 guard explicitly: event log reports completed, caller
+// writes running, overlay MUST be dropped (applied == false), Steps map untouched.
 func TestOverlayPipelineStep_RunningDoesNotClobberTerminal(t *testing.T) {
 	past := time.Now().Add(-3 * time.Minute) // CompleteStep fired 3 min ago
 	slip := &slippy.Slip{
@@ -1057,13 +1075,17 @@ func TestOverlayPipelineStep_RunningDoesNotClobberTerminal(t *testing.T) {
 			"dev_tests": {Status: slippy.StepStatusCompleted, CompletedAt: &past},
 		},
 	}
-	// writtenAt is time.Now() — after past, so the old timestamp guard would have let this through.
-	overlayPipelineStep(slip, "dev_tests", slippy.StepStatusRunning, time.Now())
+	// R1: event log says completed. Caller writes running → overlay dropped.
+	applied := overlayPipelineStep(
+		slip, "dev_tests", slippy.StepStatusRunning, time.Now(),
+		eventLogReturns(slippy.StepStatusCompleted),
+	)
+	assert.False(t, applied, "applied must be false when R1 drops the overlay")
 	assert.Equal(
 		t,
 		slippy.StepStatusCompleted,
 		slip.Steps["dev_tests"].Status,
-		"running must not clobber completed: F1 guard regression",
+		"running must not clobber completed: F1 guard regression (now R1-backed)",
 	)
 	assert.Equal(
 		t,
@@ -1073,10 +1095,65 @@ func TestOverlayPipelineStep_RunningDoesNotClobberTerminal(t *testing.T) {
 	)
 }
 
+// TestOverlayPipelineStep_R1_EventLogTerminalBlocksNonTerminal verifies the R1
+// path even when the in-memory CompletedAt is nil (the 436cc68c failure mode:
+// Load returned a stale snapshot whose CompletedAt did not yet reflect the
+// just-written terminal event). The R1 guard alone must drop the overlay.
+func TestOverlayPipelineStep_R1_EventLogTerminalBlocksNonTerminal(t *testing.T) {
+	slip := &slippy.Slip{
+		Steps: map[string]slippy.Step{
+			// CompletedAt deliberately nil — the in-memory guard alone would NOT
+			// have blocked the overlay. R1 must do it.
+			"dev_tests": {Status: slippy.StepStatusRunning, CompletedAt: nil},
+		},
+	}
+	applied := overlayPipelineStep(
+		slip, "dev_tests", slippy.StepStatusRunning, time.Now(),
+		eventLogReturns(slippy.StepStatusCompleted),
+	)
+	assert.False(t, applied, "R1 must drop non-terminal overlay when event log is terminal")
+	assert.Equal(t, slippy.StepStatusRunning, slip.Steps["dev_tests"].Status,
+		"Steps map must be left untouched when R1 drops the overlay")
+}
+
+// TestOverlayPipelineStep_R1_EventLogQueryError_FailOpen verifies that an event-log
+// query error does not block the overlay — the in-memory guard remains in effect.
+func TestOverlayPipelineStep_R1_EventLogQueryError_FailOpen(t *testing.T) {
+	slip := &slippy.Slip{
+		Steps: map[string]slippy.Step{
+			"dev_tests": {Status: slippy.StepStatusRunning, CompletedAt: nil},
+		},
+	}
+	failingFn := func() (slippy.StepStatus, bool, error) {
+		return "", false, assert.AnError
+	}
+	applied := overlayPipelineStep(slip, "dev_tests", slippy.StepStatusCompleted, time.Now(), failingFn)
+	assert.True(t, applied, "fail-open: query error must not block a terminal overlay when the in-memory guard would allow it")
+	assert.Equal(t, slippy.StepStatusCompleted, slip.Steps["dev_tests"].Status)
+}
+
+// TestOverlayPipelineStep_R1_NoEventsYet_AppliesNormally verifies that the
+// !found return (no event row yet) falls through to the existing in-memory
+// path — preserves first-event behaviour.
+func TestOverlayPipelineStep_R1_NoEventsYet_AppliesNormally(t *testing.T) {
+	slip := &slippy.Slip{
+		Steps: map[string]slippy.Step{
+			"dev_tests": {Status: slippy.StepStatusRunning, CompletedAt: nil},
+		},
+	}
+	applied := overlayPipelineStep(slip, "dev_tests", slippy.StepStatusCompleted, time.Now(), noEventLog)
+	assert.True(t, applied, "no events yet must allow overlay (first-event path)")
+	assert.Equal(t, slippy.StepStatusCompleted, slip.Steps["dev_tests"].Status)
+}
+
 // TestHydrateAndPersist_StartStep_DoesNotClobberTerminalStatus is the F1 end-to-end
 // regression test via the real hydrateAndPersist path. Reproduces the production
 // scenario from slip b058127d where a second StartStep arrived 3 minutes after
 // CompleteStep, and the overlay clobbered "completed" with "running".
+//
+// R1 extension (ADO #82468): the regression is now driven by the event-log
+// guard via latestStepStatusFromEventsFn, not the in-memory CompletedAt. Also
+// verifies that R2 Option D drops the step override when R1 dropped the overlay.
 func TestHydrateAndPersist_StartStep_DoesNotClobberTerminalStatus(t *testing.T) {
 	const id = "b058127d-fe0a-497d-81e6-08edc7ea71b2"
 	const stepName = "push_parsed"
@@ -1094,6 +1171,7 @@ func TestHydrateAndPersist_StartStep_DoesNotClobberTerminalStatus(t *testing.T) 
 	}
 
 	var persistedSlip *slippy.Slip
+	var observedOverrides []slippy.StepStatusOverride
 	store := &mockSlipStore{
 		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
 			return nil
@@ -1108,15 +1186,23 @@ func TestHydrateAndPersist_StartStep_DoesNotClobberTerminalStatus(t *testing.T) 
 			cp.Steps = steps
 			return &cp, nil
 		},
-		updateFn: func(_ context.Context, s *slippy.Slip) error {
+		updateFn: func(_ context.Context, s *slippy.Slip, overrides ...slippy.StepStatusOverride) error {
 			persistedSlip = s
+			observedOverrides = append([]slippy.StepStatusOverride(nil), overrides...)
 			return nil
+		},
+		// R1: event log says completed. R1 must drop the running overlay.
+		latestStepStatusFromEventsFn: func(_ context.Context, _, step string) (slippy.StepStatus, bool, error) {
+			if step == stepName {
+				return slippy.StepStatusCompleted, true, nil
+			}
+			return "", false, nil
 		},
 	}
 	adapter := newTestWriterAdapter(store)
 
 	// StartStep on a pipeline step (componentName == "") triggers hydrateAndPersist
-	// with StepStatusRunning. The F1 guard must prevent the running overlay from
+	// with StepStatusRunning. The R1 guard must prevent the running overlay from
 	// clobbering the terminal completed status already visible in Load.
 	err := adapter.StartStep(context.Background(), id, stepName, "")
 	require.NoError(t, err)
@@ -1126,6 +1212,11 @@ func TestHydrateAndPersist_StartStep_DoesNotClobberTerminalStatus(t *testing.T) 
 		t,
 		slippy.StepStatusCompleted,
 		persistedSlip.Steps[stepName].Status,
-		"StartStep must not clobber terminal completed status: F1 regression (slip b058127d)",
+		"StartStep must not clobber terminal completed status: F1/R1 regression (slip b058127d)",
 	)
+	// R2 Option D: when R1 drops the overlay, hydrateAndPersist must NOT pin an
+	// override on Update — otherwise the override would clobber the
+	// routing_slips column literal back to running.
+	assert.Empty(t, observedOverrides,
+		"hydrateAndPersist must pass NO override when R1 dropped the overlay (Option D conditional pin)")
 }

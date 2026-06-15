@@ -16,16 +16,16 @@ import (
 // --- mockSlipStore implements slippy.SlipStore for testing the adapter ---
 
 type mockSlipStore struct {
-	loadFn              func(ctx context.Context, id string) (*slippy.Slip, error)
-	loadByCommitFn      func(ctx context.Context, repo, sha string) (*slippy.Slip, error)
-	loadLiveByCommitFn  func(ctx context.Context, repo, sha string) (*slippy.Slip, error)
-	findByCommitsFn     func(ctx context.Context, repo string, commits []string) (*slippy.Slip, string, error)
-	findAllByCommitsFn  func(ctx context.Context, repo string, commits []string) ([]slippy.SlipWithCommit, error)
-	closeFn             func() error
+	loadFn             func(ctx context.Context, id string) (*slippy.Slip, error)
+	loadByCommitFn     func(ctx context.Context, repo, sha string) (*slippy.Slip, error)
+	loadLiveByCommitFn func(ctx context.Context, repo, sha string) (*slippy.Slip, error)
+	findByCommitsFn    func(ctx context.Context, repo string, commits []string) (*slippy.Slip, string, error)
+	findAllByCommitsFn func(ctx context.Context, repo string, commits []string) ([]slippy.SlipWithCommit, error)
+	closeFn            func() error
 
 	// Write methods (unused by adapter, but required by the interface)
 	createFn                func(ctx context.Context, slip *slippy.Slip) error
-	updateFn                func(ctx context.Context, slip *slippy.Slip) error
+	updateFn                func(ctx context.Context, slip *slippy.Slip, overrides ...slippy.StepStatusOverride) error
 	updateStepFn            func(ctx context.Context, id, step, comp string, status slippy.StepStatus) error
 	updateStepWithHistoryFn func(ctx context.Context, id, step, comp string, status slippy.StepStatus, entry slippy.StateHistoryEntry) error
 	updateComponentFn       func(ctx context.Context, id, comp, stepType string, status slippy.StepStatus) error
@@ -33,6 +33,14 @@ type mockSlipStore struct {
 	appendHistoryFn         func(ctx context.Context, id string, entry slippy.StateHistoryEntry) error
 	setComponentImageTagFn  func(ctx context.Context, id, step, comp, tag string) error
 	pingFn                  func(ctx context.Context) error
+
+	// R1 (ADO #82468) — event-log lookup seam. Default ("", false, nil) means
+	// "no events yet" → caller treats as non-blocking (existing behaviour
+	// preserved). Tests covering the R1 guard set this fn explicitly.
+	latestStepStatusFromEventsFn func(ctx context.Context, correlationID, step string) (slippy.StepStatus, bool, error)
+
+	// Captures overrides passed to Update for assertion in R2 tests. Append-only.
+	updateOverridesCalls [][]slippy.StepStatusOverride
 }
 
 func (m *mockSlipStore) Load(ctx context.Context, id string) (*slippy.Slip, error) {
@@ -83,11 +91,26 @@ func (m *mockSlipStore) Create(ctx context.Context, slip *slippy.Slip) error {
 	return nil
 }
 
-func (m *mockSlipStore) Update(ctx context.Context, slip *slippy.Slip) error {
+func (m *mockSlipStore) Update(ctx context.Context, slip *slippy.Slip, overrides ...slippy.StepStatusOverride) error {
+	// Snapshot the variadic for later assertion (copy to defend against caller reuse).
+	cp := make([]slippy.StepStatusOverride, len(overrides))
+	copy(cp, overrides)
+	m.updateOverridesCalls = append(m.updateOverridesCalls, cp)
 	if m.updateFn != nil {
-		return m.updateFn(ctx, slip)
+		return m.updateFn(ctx, slip, overrides...)
 	}
 	return nil
+}
+
+// LatestStepStatusFromEvents mirrors slippy.SlipStore. Default (no fn set) returns
+// ("", false, nil) — semantically "no event row yet, do not block".
+func (m *mockSlipStore) LatestStepStatusFromEvents(
+	ctx context.Context, correlationID, step string,
+) (slippy.StepStatus, bool, error) {
+	if m.latestStepStatusFromEventsFn != nil {
+		return m.latestStepStatusFromEventsFn(ctx, correlationID, step)
+	}
+	return "", false, nil
 }
 
 func (m *mockSlipStore) UpdateStep(ctx context.Context, id, step, comp string, status slippy.StepStatus) error {
