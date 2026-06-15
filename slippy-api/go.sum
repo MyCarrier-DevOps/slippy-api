@@ -17,8 +17,6 @@ github.com/MyCarrier-DevOps/goLibMyCarrier/github v1.3.89 h1:E8Vab/oPcqTWfGr93MZ
 github.com/MyCarrier-DevOps/goLibMyCarrier/github v1.3.89/go.mod h1:+g7ImJNr0ppGPJr+UeG48dONE+XLjoGr9nGbdTVmafM=
 github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.89 h1:OaPyc7y9/+aiUo+hcWDd6oJxqn72d/E2sewkItpH5BQ=
 github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.89/go.mod h1:8ZFrEONoNfgaoY8TnAbq7ZeYDjJcW6XFk5XzwYhzdhs=
-github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.90 h1:0gJYfvw6N1bq0ZdkL8vz57UnIt5XAk2ydW8HZv2csN0=
-github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.90/go.mod h1:LwXs/3v1gIeTmS0DokuibpnauyioZsEpJIIl++PE1dA=
 github.com/ProtonMail/go-crypto v1.4.1 h1:9RfcZHqEQUvP8RzecWEUafnZVtEvrBVL9BiF67IQOfM=
 github.com/ProtonMail/go-crypto v1.4.1/go.mod h1:e1OaTyu5SYVrO9gKOEhTc+5UcXtTUa+P3uLudwcgPqo=
 github.com/alicebob/miniredis/v2 v2.38.0 h1:nZAzCR+Lj+Vxk4ZXzm2NuKq2O33RXj1XxJ2e2uP9jiw=
