@@ -227,6 +227,19 @@ func run() error {
 	}()
 	log.Printf("clickhouse store connected")
 
+	// Startup gate: async-insert settings must be enabled. The I5 race fix
+	// (ADO #82468) requires wait_for_async_insert=1 so the event-log row
+	// written by appendHistoryWithOverrides is visible to the subsequent
+	// LatestStepStatusFromEvents SELECT. Fail fast if absent — silent
+	// continuation would silently re-introduce the 436cc68c regression.
+	assertCtx, assertCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := infrastructure.AssertAsyncInsertEnabled(assertCtx, store.Session()); err != nil {
+		assertCancel()
+		return fmt.Errorf("clickhouse async-insert assertion: %w", err)
+	}
+	assertCancel()
+	log.Printf("clickhouse async-insert assertion passed (async_insert=1, wait_for_async_insert=1)")
+
 	// Adapt the read+write store to our read-only interface.
 	adapter := infrastructure.NewSlipStoreAdapter(store)
 
