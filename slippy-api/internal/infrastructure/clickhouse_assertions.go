@@ -56,15 +56,22 @@ func AssertAsyncInsertEnabled(ctx context.Context, session ch.ClickhouseSessionI
 	if err != nil {
 		return fmt.Errorf("AssertAsyncInsertEnabled: query system.settings: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
 
 	observed := make(map[string]string, len(expectedAsyncInsertSettings))
+	var scanErr error
 	for rows.Next() {
 		var name, value string
-		if scanErr := rows.Scan(&name, &value); scanErr != nil {
-			return fmt.Errorf("AssertAsyncInsertEnabled: scan system.settings row: %w", scanErr)
+		if scanErr = rows.Scan(&name, &value); scanErr != nil {
+			scanErr = fmt.Errorf("AssertAsyncInsertEnabled: scan system.settings row: %w", scanErr)
+			break
 		}
 		observed[name] = value
+	}
+	if closeErr := rows.Close(); scanErr == nil && closeErr != nil {
+		return fmt.Errorf("AssertAsyncInsertEnabled: close rows: %w", closeErr)
+	}
+	if scanErr != nil {
+		return scanErr
 	}
 	if rowsErr := rows.Err(); rowsErr != nil {
 		return fmt.Errorf("AssertAsyncInsertEnabled: iterate system.settings rows: %w", rowsErr)
