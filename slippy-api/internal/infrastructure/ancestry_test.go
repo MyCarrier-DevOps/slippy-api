@@ -166,6 +166,197 @@ func TestAdapter_LoadByCommit_InvalidRepositoryError(t *testing.T) {
 	assert.Nil(t, slip)
 }
 
+// --- LoadByCommit exact-first (full-SHA) behavior ---
+
+// fullSHA is a valid 40-hex commit SHA used by the exact-first tests.
+const fullSHA = "f615c4c0000000000000000000000000deadbeef"
+
+// TestAdapter_LoadByCommit_FullSHA_ExactHit is the regression guard for the
+// 404 flap: a GET by an explicit full 40-hex SHA for a live slip MUST resolve
+// via the direct exact-SHA read and MUST NOT touch the GitHub ancestry resolver.
+func TestAdapter_LoadByCommit_FullSHA_ExactHit(t *testing.T) {
+	expected := &domain.Slip{CorrelationID: "live-slip", Repository: "org/repo"}
+	reader := &mockReader{
+		loadByCommitExactFn: func(_ context.Context, repo, sha string) (*domain.Slip, error) {
+			assert.Equal(t, "org/repo", repo)
+			assert.Equal(t, fullSHA, sha)
+			return expected, nil
+		},
+	}
+	resolver := &mockSlipResolver{
+		resolveSlipFn: func(_ context.Context, _ slippy.ResolveOptions) (*slippy.ResolveResult, error) {
+			t.Fatal("resolver MUST NOT be called when an exact full-SHA slip exists — guards the 404 flap")
+			return nil, nil
+		},
+	}
+
+	adapter := NewSlipResolverAdapter(resolver, reader)
+	slip, err := adapter.LoadByCommit(context.Background(), "org/repo", fullSHA)
+	require.NoError(t, err)
+	assert.Equal(t, expected, slip)
+}
+
+// TestAdapter_LoadByCommit_FullSHA_ExactMissFallsBackToAncestry asserts that a
+// full SHA with no exact live slip falls back to the ancestry walk and returns
+// the ancestor's slip.
+//
+// NOTE: reader.LoadByCommitExact maps to LoadLiveByCommit, which filters out
+// slips whose status is terminal (NOT IN ('abandoned','promoted','compensated')).
+// So an ErrSlipNotFound here is NOT only "no row at all" — it ALSO covers the
+// case where a row exists for the exact SHA but its status is terminal and was
+// excluded by the live filter. In both cases LoadByCommit must fall back to the
+// ancestry resolver (this test), never short-circuit to a wrong/empty result.
+// See TestAdapter_LoadByCommit_FullSHA_TerminalStatusExactMiss_FallsBackToAncestry
+// for the same path asserted explicitly against the terminal-status semantics.
+func TestAdapter_LoadByCommit_FullSHA_ExactMissFallsBackToAncestry(t *testing.T) {
+	expected := &domain.Slip{CorrelationID: "ancestor-slip", Repository: "org/repo"}
+	exactCalls := 0
+	reader := &mockReader{
+		loadByCommitExactFn: func(_ context.Context, _, _ string) (*domain.Slip, error) {
+			exactCalls++
+			return nil, slippy.ErrSlipNotFound
+		},
+	}
+	resolver := &mockSlipResolver{
+		resolveSlipFn: func(_ context.Context, opts slippy.ResolveOptions) (*slippy.ResolveResult, error) {
+			assert.Equal(t, "org/repo", opts.Repository)
+			assert.Equal(t, fullSHA, opts.Ref)
+			return &slippy.ResolveResult{
+				Slip:          expected,
+				ResolvedBy:    "ancestry",
+				MatchedCommit: "parent-sha",
+			}, nil
+		},
+	}
+
+	adapter := NewSlipResolverAdapter(resolver, reader)
+	slip, err := adapter.LoadByCommit(context.Background(), "org/repo", fullSHA)
+	require.NoError(t, err)
+	assert.Equal(t, expected, slip)
+	assert.Equal(t, 1, exactCalls, "exact read must be attempted exactly once before ancestry fallback")
+}
+
+// TestAdapter_LoadByCommit_FullSHA_TerminalStatusExactMiss_FallsBackToAncestry
+// pins the no-regression claim for the exact-SHA-first change: when the exact
+// SHA belongs to a slip whose status is TERMINAL (abandoned/promoted/compensated),
+// LoadLiveByCommit (behind reader.LoadByCommitExact) filters it out and returns
+// slippy.ErrSlipNotFound. In that case LoadByCommit MUST fall back to the ancestry
+// resolver and return the resolver's result — a terminal-status exact slip must
+// NOT short-circuit LoadByCommit to nil / "not found".
+//
+// This guards the failure mode where a promoted/abandoned slip on the exact SHA
+// would otherwise mask the live lineage slip the caller actually wants.
+func TestAdapter_LoadByCommit_FullSHA_TerminalStatusExactMiss_FallsBackToAncestry(t *testing.T) {
+	// The live lineage slip the ancestry walk is expected to surface once the
+	// terminal-status exact slip is filtered out by LoadLiveByCommit.
+	expected := &domain.Slip{CorrelationID: "live-lineage-slip", Repository: "org/repo"}
+
+	exactCalls := 0
+	resolverCalls := 0
+
+	reader := &mockReader{
+		loadByCommitExactFn: func(_ context.Context, repo, sha string) (*domain.Slip, error) {
+			exactCalls++
+			assert.Equal(t, "org/repo", repo)
+			assert.Equal(t, fullSHA, sha)
+			// Simulate LoadLiveByCommit excluding a slip whose status is terminal
+			// (e.g. promoted/abandoned/compensated): the live-status filter yields
+			// zero rows, which collapses to ErrSlipNotFound.
+			return nil, slippy.ErrSlipNotFound
+		},
+	}
+	resolver := &mockSlipResolver{
+		resolveSlipFn: func(_ context.Context, opts slippy.ResolveOptions) (*slippy.ResolveResult, error) {
+			resolverCalls++
+			assert.Equal(t, "org/repo", opts.Repository)
+			assert.Equal(t, fullSHA, opts.Ref)
+			return &slippy.ResolveResult{
+				Slip:          expected,
+				ResolvedBy:    "ancestry",
+				MatchedCommit: "parent-sha",
+			}, nil
+		},
+	}
+
+	adapter := NewSlipResolverAdapter(resolver, reader)
+	slip, err := adapter.LoadByCommit(context.Background(), "org/repo", fullSHA)
+
+	require.NoError(t, err)
+	assert.Equal(t, expected, slip, "must return the ancestry resolver's live-lineage slip, not the filtered terminal slip")
+	assert.Equal(t, 1, exactCalls, "exact read must be attempted exactly once before ancestry fallback")
+	assert.Equal(t, 1, resolverCalls, "ancestry resolver MUST be invoked when the exact slip is terminal-status-filtered")
+}
+
+// TestAdapter_LoadByCommit_BranchRef_SkipsExact asserts a non-full-SHA ref (a
+// branch name) goes straight to ancestry and never attempts the exact read.
+func TestAdapter_LoadByCommit_BranchRef_SkipsExact(t *testing.T) {
+	expected := &domain.Slip{CorrelationID: "branch-slip", Repository: "org/repo"}
+	reader := &mockReader{
+		loadByCommitExactFn: func(_ context.Context, _, _ string) (*domain.Slip, error) {
+			t.Fatal("exact read MUST NOT be attempted for a non-full-SHA branch ref")
+			return nil, nil
+		},
+	}
+	resolver := &mockSlipResolver{
+		resolveSlipFn: func(_ context.Context, opts slippy.ResolveOptions) (*slippy.ResolveResult, error) {
+			assert.Equal(t, "integration", opts.Ref)
+			return &slippy.ResolveResult{Slip: expected, ResolvedBy: "ancestry", MatchedCommit: "p"}, nil
+		},
+	}
+
+	adapter := NewSlipResolverAdapter(resolver, reader)
+	slip, err := adapter.LoadByCommit(context.Background(), "org/repo", "integration")
+	require.NoError(t, err)
+	assert.Equal(t, expected, slip)
+}
+
+// TestAdapter_LoadByCommit_FullSHA_ExactStoreErrorPropagates asserts that a
+// non-not-found error from the exact read (e.g. ClickHouse down) is propagated
+// and NOT masked as a not-found / 404, and that ancestry is not consulted.
+func TestAdapter_LoadByCommit_FullSHA_ExactStoreErrorPropagates(t *testing.T) {
+	storeErr := errors.New("clickhouse timeout")
+	reader := &mockReader{
+		loadByCommitExactFn: func(_ context.Context, _, _ string) (*domain.Slip, error) {
+			return nil, storeErr
+		},
+	}
+	resolver := &mockSlipResolver{
+		resolveSlipFn: func(_ context.Context, _ slippy.ResolveOptions) (*slippy.ResolveResult, error) {
+			t.Fatal("resolver MUST NOT be called when the exact read returns an infrastructure error")
+			return nil, nil
+		},
+	}
+
+	adapter := NewSlipResolverAdapter(resolver, reader)
+	slip, err := adapter.LoadByCommit(context.Background(), "org/repo", fullSHA)
+	assert.ErrorIs(t, err, storeErr)
+	assert.NotErrorIs(t, err, slippy.ErrSlipNotFound)
+	assert.Nil(t, slip)
+}
+
+// TestIsFullCommitSHA covers the SHA-classification helper.
+func TestIsFullCommitSHA(t *testing.T) {
+	cases := []struct {
+		name string
+		ref  string
+		want bool
+	}{
+		{"full lowercase hex", "f615c4c0000000000000000000000000deadbeef", true},
+		{"full uppercase hex", "F615C4C0000000000000000000000000DEADBEEF", true},
+		{"branch name", "integration", false},
+		{"short sha", "f615c4c", false},
+		{"empty", "", false},
+		{"41 chars", "f615c4c0000000000000000000000000deadbeef0", false},
+		{"39 chars", "f615c4c0000000000000000000000000deadbee", false},
+		{"non-hex char at 40 len", "g615c4c0000000000000000000000000deadbeef", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, isFullCommitSHA(tc.ref))
+		})
+	}
+}
+
 // --- LoadByCommitExact ---
 
 // TestSlipResolverAdapter_LoadByCommitExact_BypassesResolver asserts the adapter
