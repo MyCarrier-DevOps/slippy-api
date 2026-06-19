@@ -1220,3 +1220,306 @@ func TestHydrateAndPersist_StartStep_DoesNotClobberTerminalStatus(t *testing.T) 
 	assert.Empty(t, observedOverrides,
 		"hydrateAndPersist must pass NO override when R1 dropped the overlay (Option D conditional pin)")
 }
+
+// --- Option 1 sentinel propagation tests (plan v3 §C.8) ---
+//
+// These tests assert the adapter propagates slippy.ErrTerminalAlreadyExists
+// unwrapped enough that errors.Is at the handler boundary succeeds. The
+// library wraps the sentinel in *slippy.StepError; the adapter must NOT
+// double-wrap or swallow it.
+
+// TestSlipWriterAdapter_StartStep_ErrTerminalAlreadyExists_PropagatesSentinel
+// verifies the gate sentinel survives the adapter layer for StartStep.
+func TestSlipWriterAdapter_StartStep_ErrTerminalAlreadyExists_PropagatesSentinel(t *testing.T) {
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			return slippy.ErrTerminalAlreadyExists
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	err := adapter.StartStep(context.Background(), "abc-123", "push_parsed", "")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, slippy.ErrTerminalAlreadyExists),
+		"adapter MUST propagate ErrTerminalAlreadyExists so the handler can map to 409 (plan v3 §C.1)")
+}
+
+// TestSlipWriterAdapter_CompleteStep_ErrTerminalAlreadyExists_PropagatesSentinel
+// verifies the gate sentinel survives for CompleteStep on a pipeline step.
+func TestSlipWriterAdapter_CompleteStep_ErrTerminalAlreadyExists_PropagatesSentinel(t *testing.T) {
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			return slippy.ErrTerminalAlreadyExists
+		},
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			return &slippy.Slip{CorrelationID: "abc-123", Status: slippy.SlipStatusInProgress}, nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	err := adapter.CompleteStep(context.Background(), "abc-123", "push_parsed", "")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, slippy.ErrTerminalAlreadyExists),
+		"adapter MUST propagate ErrTerminalAlreadyExists for CompleteStep")
+}
+
+// TestSlipWriterAdapter_FailStep_ErrTerminalAlreadyExists_PropagatesSentinel
+// verifies the gate sentinel survives for FailStep on a pipeline step.
+func TestSlipWriterAdapter_FailStep_ErrTerminalAlreadyExists_PropagatesSentinel(t *testing.T) {
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			return slippy.ErrTerminalAlreadyExists
+		},
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			return &slippy.Slip{CorrelationID: "abc-123", Status: slippy.SlipStatusInProgress}, nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	err := adapter.FailStep(context.Background(), "abc-123", "push_parsed", "", "reason")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, slippy.ErrTerminalAlreadyExists),
+		"adapter MUST propagate ErrTerminalAlreadyExists for FailStep")
+}
+
+// TestSlipWriterAdapter_SkipStep_ErrTerminalAlreadyExists_PropagatesSentinel
+// verifies the gate sentinel survives for SkipStep on a pipeline step.
+func TestSlipWriterAdapter_SkipStep_ErrTerminalAlreadyExists_PropagatesSentinel(t *testing.T) {
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			return slippy.ErrTerminalAlreadyExists
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	err := adapter.SkipStep(context.Background(), "abc-123", "push_parsed", "", "reason")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, slippy.ErrTerminalAlreadyExists),
+		"adapter MUST propagate ErrTerminalAlreadyExists for SkipStep")
+}
+
+// --- Per-correlationID lock unit tests (plan v3 §M) ---
+
+// mockLocker is a controllable Locker for unit-testing withCorrIDLock.
+type mockLocker struct {
+	tryAcquireFn func(ctx context.Context, key string, ttl time.Duration) (bool, string, error)
+	releaseFn    func(ctx context.Context, key, token string) error
+	releaseCalls int
+}
+
+func (m *mockLocker) TryAcquire(ctx context.Context, key string, ttl time.Duration) (bool, string, error) {
+	if m.tryAcquireFn != nil {
+		return m.tryAcquireFn(ctx, key, ttl)
+	}
+	return true, "tok", nil
+}
+
+func (m *mockLocker) Release(ctx context.Context, key, token string) error {
+	m.releaseCalls++
+	if m.releaseFn != nil {
+		return m.releaseFn(ctx, key, token)
+	}
+	return nil
+}
+
+// withLockEnabledAdapter constructs a SlipWriterAdapter with SLIPPY_I5_LOCK_ENABLED
+// set to true for the test scope and the supplied locker injected. Pattern lets
+// each test focus on lock semantics without rewiring constructors.
+func withLockEnabledAdapter(t *testing.T, store slippy.SlipStore, locker Locker) *SlipWriterAdapter {
+	t.Helper()
+	t.Setenv(slippyI5LockEnabledEnv, "true")
+	pipelineCfg, err := slippy.ParsePipelineConfig([]byte(testPipelineConfigJSON))
+	require.NoError(t, err)
+	client := slippy.NewClientWithDependencies(store, &mockGitHubAPI{}, slippy.Config{
+		AncestryDepth:  5,
+		PipelineConfig: pipelineCfg,
+	})
+	return NewSlipWriterAdapter(client, locker, nil)
+}
+
+// validTestUUID is a valid UUID string used by lock tests where the corrID
+// must parse for CorrIDLockKey to return a non-empty key.
+const validTestUUID = "11111111-2222-3333-4444-555555555555"
+
+// TestCorrIDLock_StartStep_LockMiss_Returns409 verifies that acquired=false
+// returns ErrCorrIDWriteInProgress without calling the underlying client.
+func TestCorrIDLock_StartStep_LockMiss_Returns409(t *testing.T) {
+	var clientCalled bool
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			clientCalled = true
+			return nil
+		},
+	}
+	locker := &mockLocker{
+		tryAcquireFn: func(_ context.Context, _ string, _ time.Duration) (bool, string, error) {
+			return false, "", nil
+		},
+	}
+	adapter := withLockEnabledAdapter(t, store, locker)
+
+	err := adapter.StartStep(context.Background(), validTestUUID, "push_parsed", "")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, domain.ErrCorrIDWriteInProgress),
+		"lock miss MUST return ErrCorrIDWriteInProgress (mapped to 409)")
+	assert.False(t, clientCalled, "underlying client MUST NOT run when lock acquire failed")
+}
+
+// TestCorrIDLock_PromoteSlip_LockMiss_Returns409 covers Mod 2 — PromoteSlip
+// adapter wrapping.
+func TestCorrIDLock_PromoteSlip_LockMiss_Returns409(t *testing.T) {
+	var clientCalled bool
+	store := &mockSlipStore{
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			clientCalled = true
+			return &slippy.Slip{}, nil
+		},
+	}
+	locker := &mockLocker{
+		tryAcquireFn: func(_ context.Context, _ string, _ time.Duration) (bool, string, error) {
+			return false, "", nil
+		},
+	}
+	adapter := withLockEnabledAdapter(t, store, locker)
+
+	err := adapter.PromoteSlip(context.Background(), validTestUUID, "newCorrID")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, domain.ErrCorrIDWriteInProgress),
+		"PromoteSlip lock miss MUST return ErrCorrIDWriteInProgress")
+	assert.False(t, clientCalled, "PromoteSlip client MUST NOT run when lock acquire failed")
+}
+
+// TestCorrIDLock_AbandonSlip_LockMiss_Returns409 covers Mod 2 — AbandonSlip
+// adapter wrapping.
+func TestCorrIDLock_AbandonSlip_LockMiss_Returns409(t *testing.T) {
+	var clientCalled bool
+	store := &mockSlipStore{
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			clientCalled = true
+			return &slippy.Slip{}, nil
+		},
+	}
+	locker := &mockLocker{
+		tryAcquireFn: func(_ context.Context, _ string, _ time.Duration) (bool, string, error) {
+			return false, "", nil
+		},
+	}
+	adapter := withLockEnabledAdapter(t, store, locker)
+
+	err := adapter.AbandonSlip(context.Background(), validTestUUID, "newCorrID")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, domain.ErrCorrIDWriteInProgress),
+		"AbandonSlip lock miss MUST return ErrCorrIDWriteInProgress")
+	assert.False(t, clientCalled, "AbandonSlip client MUST NOT run when lock acquire failed")
+}
+
+// TestCorrIDLock_InvalidCorrID_ReturnsErrInvalidCorrelationID verifies the
+// in-adapter defense-in-depth UUID check rejects malformed corrIDs even
+// when the handler middleware were absent.
+func TestCorrIDLock_InvalidCorrID_ReturnsErrInvalidCorrelationID(t *testing.T) {
+	store := &mockSlipStore{}
+	locker := &mockLocker{}
+	adapter := withLockEnabledAdapter(t, store, locker)
+
+	err := adapter.StartStep(context.Background(), "not-a-uuid", "push_parsed", "")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, domain.ErrInvalidCorrelationID),
+		"non-UUID corrID MUST return domain.ErrInvalidCorrelationID")
+}
+
+// TestCorrIDLock_TryAcquireError_FailsOpen verifies that a Redis transport
+// failure falls open — the client runs UNLOCKED rather than blocking the
+// write. Matches the dedup_lock fail-open contract.
+func TestCorrIDLock_TryAcquireError_FailsOpen(t *testing.T) {
+	var clientCalled bool
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			clientCalled = true
+			return nil
+		},
+	}
+	locker := &mockLocker{
+		tryAcquireFn: func(_ context.Context, _ string, _ time.Duration) (bool, string, error) {
+			return false, "", errors.New("redis: connection refused")
+		},
+	}
+	adapter := withLockEnabledAdapter(t, store, locker)
+
+	err := adapter.StartStep(context.Background(), validTestUUID, "push_parsed", "")
+	require.NoError(t, err, "TryAcquire error MUST fall open (client runs unlocked)")
+	assert.True(t, clientCalled, "client MUST run despite locker outage")
+}
+
+// TestCorrIDLock_NilLocker_BehavesAsBefore verifies the nil-locker path is
+// identical to the pre-lock baseline — same as the dedup_lock contract.
+func TestCorrIDLock_NilLocker_BehavesAsBefore(t *testing.T) {
+	t.Setenv(slippyI5LockEnabledEnv, "true")
+	var clientCalled bool
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			clientCalled = true
+			return nil
+		},
+	}
+	pipelineCfg, err := slippy.ParsePipelineConfig([]byte(testPipelineConfigJSON))
+	require.NoError(t, err)
+	client := slippy.NewClientWithDependencies(store, &mockGitHubAPI{}, slippy.Config{
+		AncestryDepth:  5,
+		PipelineConfig: pipelineCfg,
+	})
+	adapter := NewSlipWriterAdapter(client, nil, nil) // nil locker
+
+	// Even with the env flag on, nil locker skips the lock path entirely.
+	err = adapter.StartStep(context.Background(), validTestUUID, "push_parsed", "")
+	require.NoError(t, err)
+	assert.True(t, clientCalled, "nil locker MUST behave exactly as the pre-lock baseline")
+}
+
+// TestCorrIDLock_FlagOff_DoesNotAcquire verifies that the env flag default
+// (SLIPPY_I5_LOCK_ENABLED unset → off) skips the lock path entirely.
+func TestCorrIDLock_FlagOff_DoesNotAcquire(t *testing.T) {
+	// Explicitly unset to defeat any ambient env.
+	t.Setenv(slippyI5LockEnabledEnv, "")
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			return nil
+		},
+	}
+	locker := &mockLocker{
+		tryAcquireFn: func(_ context.Context, _ string, _ time.Duration) (bool, string, error) {
+			t.Fatal("TryAcquire MUST NOT be called when SLIPPY_I5_LOCK_ENABLED is off")
+			return false, "", nil
+		},
+	}
+	pipelineCfg, err := slippy.ParsePipelineConfig([]byte(testPipelineConfigJSON))
+	require.NoError(t, err)
+	client := slippy.NewClientWithDependencies(store, &mockGitHubAPI{}, slippy.Config{
+		AncestryDepth:  5,
+		PipelineConfig: pipelineCfg,
+	})
+	adapter := NewSlipWriterAdapter(client, locker, nil)
+
+	err = adapter.StartStep(context.Background(), validTestUUID, "push_parsed", "")
+	require.NoError(t, err)
+}
+
+// TestCorrIDLockKey_ValidUUID returns deterministic lowercase key.
+func TestCorrIDLockKey_ValidUUID(t *testing.T) {
+	got := CorrIDLockKey("AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")
+	assert.Equal(t, "sliplock:cid:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", got)
+}
+
+// TestCorrIDLockKey_InvalidUUID returns empty so caller knows to reject.
+func TestCorrIDLockKey_InvalidUUID(t *testing.T) {
+	cases := []string{
+		"",
+		"abc-123",
+		"not-a-uuid-at-all",
+		"../../../etc/passwd",
+		"' OR 1=1; --",
+	}
+	for _, c := range cases {
+		got := CorrIDLockKey(c)
+		assert.Empty(t, got, "input %q must return empty key", c)
+	}
+}
