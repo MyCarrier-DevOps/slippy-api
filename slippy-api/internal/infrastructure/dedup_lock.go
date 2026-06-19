@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -26,7 +27,51 @@ const (
 	// exact-SHA lookup, no ancestry resolution) for the in-flight slip to become
 	// visible before giving up with a retryable error.
 	DefaultLockWait = 10 * time.Second
+
+	// corrIDLockKeyPrefix namespaces per-correlationID write locks. Distinct from
+	// the repo:sha dedup prefix (sliplock: with two-segment key) by adding a
+	// "cid:" segment so the two key spaces cannot collide even if a future
+	// caller passes a string that happens to look like a repo name.
+	corrIDLockKeyPrefix = "sliplock:cid:"
+
+	// DefaultCorrIDLockTTL bounds the blast radius of a ghost lock — if a writer
+	// crashes mid-mutation without releasing, the lock expires after this
+	// interval and the next caller can proceed.
+	//
+	// PROVISIONAL: 2 s is sized at ~10× the presumed p99 of the full mutation
+	// path (Load + library write + hydrateAndPersist Update). Plan v3 §F.3
+	// REQUIRES empirical p99 measurement (HyperDX replay or staging Prometheus
+	// scrape) before SLIPPY_I5_LOCK_ENABLED=true ships to production. If p99
+	// exceeds 500 ms the rollout MUST halt — the TTL window is incompatible
+	// with a Redis-lock approach and the design must be revisited (see plan
+	// v3 §F.3 decision gate).
+	DefaultCorrIDLockTTL = 2 * time.Second
+
+	// DefaultCorrIDLockWait is retained for symmetry with the dedup pattern.
+	// The corr-id lock path does NOT poll on miss — TryAcquire returns
+	// ErrCorrIDWriteInProgress immediately so the caller (Slippy CLI) can
+	// implement bounded retry-with-jitter at the right layer (plan v3 §M.7).
+	DefaultCorrIDLockWait = 10 * time.Second
 )
+
+// CorrIDLockKey returns the Redis key for a per-correlationID write lock.
+//
+// Returns the empty string if correlationID does not parse as a UUID — callers
+// MUST treat that as ErrInvalidCorrelationID. UUID validation here is defense
+// in depth on top of the handler-boundary check (plan v3 §M.1.2, Mod 5):
+// rejecting malformed inputs at both layers prevents log/key-injection and
+// guards against future code paths that might bypass the handler validator.
+//
+// The key shape is "sliplock:cid:<lowercase-uuid>". Lowercasing is paranoid —
+// uuid.Parse normalizes case — but keeps the keyspace deterministic if a
+// future caller passes the raw string back through unmangled.
+func CorrIDLockKey(correlationID string) string {
+	id, err := uuid.Parse(correlationID)
+	if err != nil {
+		return ""
+	}
+	return corrIDLockKeyPrefix + strings.ToLower(id.String())
+}
 
 // casDelScript releases a lock only when the stored value still matches the
 // caller's token (compare-and-delete). This prevents a process from releasing a
