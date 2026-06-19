@@ -659,6 +659,20 @@ func TestMapWriteError(t *testing.T) {
 			fmt.Errorf("dedup: slip for repo:sha creation in progress, retry: %w", domain.ErrCreationInProgress),
 			http.StatusConflict,
 		},
+		// I5 Option 1 — terminal monotonicity gate refused the transition.
+		// Plan v3 §C.1: must be 409, not 422 (the default StepError path).
+		{"terminal already exists (sentinel)", slippy.ErrTerminalAlreadyExists, http.StatusConflict},
+		// Plan v3 §C.1: the library wraps the sentinel in a *slippy.StepError.
+		// The 409 mapping must precede the As(*StepError) → 422 branch.
+		{
+			"terminal already exists (wrapped in StepError, as the library returns it)",
+			slippy.NewStepError("update", "id", "step", "comp", slippy.ErrTerminalAlreadyExists),
+			http.StatusConflict,
+		},
+		// I5 Option 1 — per-correlationID lock contention.
+		{"corrID write in progress (sentinel)", domain.ErrCorrIDWriteInProgress, http.StatusConflict},
+		// Domain-level invalid corrID format (handler boundary validator).
+		{"invalid corrID format (sentinel)", domain.ErrInvalidCorrelationID, http.StatusBadRequest},
 		{"generic error", errors.New("something broke"), http.StatusInternalServerError},
 	}
 	for _, tt := range tests {
@@ -669,6 +683,51 @@ func TestMapWriteError(t *testing.T) {
 			assert.Equal(t, tt.wantStatus, he.GetStatus())
 		})
 	}
+}
+
+// TestMapWriteError_TerminalAlreadyExists_Returns409 is an explicit ordering
+// test (plan v3 §C.1): the library returns ErrTerminalAlreadyExists wrapped
+// in a *slippy.StepError. A naive errors.As(*StepError) branch would map
+// the wrapped form to 422 Unprocessable Entity instead of 409 Conflict.
+// The 409 branch MUST precede the As(*StepError) branch in mapWriteError.
+func TestMapWriteError_TerminalAlreadyExists_Returns409(t *testing.T) {
+	// Bare sentinel.
+	got1 := mapWriteError(slippy.ErrTerminalAlreadyExists)
+	var he1 huma.StatusError
+	require.ErrorAs(t, got1, &he1)
+	assert.Equal(t, http.StatusConflict, he1.GetStatus(),
+		"bare ErrTerminalAlreadyExists MUST map to 409 (plan v3 §C.1)")
+
+	// Wrapped in *slippy.StepError as the library actually returns it.
+	wrapped := slippy.NewStepError(
+		"update", "abc-123", "push_parsed", "",
+		slippy.ErrTerminalAlreadyExists,
+	)
+	got2 := mapWriteError(wrapped)
+	var he2 huma.StatusError
+	require.ErrorAs(t, got2, &he2)
+	assert.Equal(t, http.StatusConflict, he2.GetStatus(),
+		"StepError-wrapped ErrTerminalAlreadyExists MUST map to 409, NOT 422")
+}
+
+// TestMapWriteError_CorrIDWriteInProgress_Returns409 verifies the per-corrID
+// lock miss surfaces as 409 (plan v3 §C.1, §M.7). Bare and StepError-wrapped
+// variants are both checked even though the adapter currently returns the
+// bare form — future caller layers may wrap.
+func TestMapWriteError_CorrIDWriteInProgress_Returns409(t *testing.T) {
+	got1 := mapWriteError(domain.ErrCorrIDWriteInProgress)
+	var he1 huma.StatusError
+	require.ErrorAs(t, got1, &he1)
+	assert.Equal(t, http.StatusConflict, he1.GetStatus(),
+		"ErrCorrIDWriteInProgress MUST map to 409")
+
+	// Wrapped form for defense in depth.
+	wrapped := fmt.Errorf("adapter: %w", domain.ErrCorrIDWriteInProgress)
+	got2 := mapWriteError(wrapped)
+	var he2 huma.StatusError
+	require.ErrorAs(t, got2, &he2)
+	assert.Equal(t, http.StatusConflict, he2.GetStatus(),
+		"wrapped ErrCorrIDWriteInProgress MUST map to 409")
 }
 
 // TestCompleteStep_AllowsRecoveryFromFailed verifies that the handler accepts a

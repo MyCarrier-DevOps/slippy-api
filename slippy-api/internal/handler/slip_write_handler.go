@@ -527,12 +527,20 @@ func (h *SlipWriteHandler) abandonSlip(ctx context.Context, input *AbandonSlipIn
 // --- Error Mapping -------------------------------------------------------
 
 // mapWriteError converts domain/store errors to huma status errors for write ops.
+//
+// Sentinel ordering: ErrTerminalAlreadyExists and ErrCorrIDWriteInProgress are
+// checked BEFORE the default errors.As(*slippy.StepError) branch (plan v3
+// §C.1) so the two I5-specific 409 mappings take precedence — both sentinels
+// are wrapped in a *slippy.StepError by the library and a naive As-only
+// branch would mis-map them to 422 Unprocessable Entity.
 func mapWriteError(err error) error {
 	switch {
 	case errors.Is(err, slippy.ErrSlipNotFound):
 		return huma.NewError(http.StatusNotFound, "slip not found")
 	case errors.Is(err, slippy.ErrInvalidCorrelationID):
 		return huma.NewError(http.StatusBadRequest, "invalid correlation ID")
+	case errors.Is(err, domain.ErrInvalidCorrelationID):
+		return huma.NewError(http.StatusBadRequest, "invalid correlation_id format")
 	case errors.Is(err, slippy.ErrInvalidRepository):
 		return huma.NewError(http.StatusBadRequest, "invalid repository")
 	case errors.Is(err, slippy.ErrInvalidConfiguration):
@@ -541,6 +549,25 @@ func mapWriteError(err error) error {
 		return huma.NewError(
 			http.StatusConflict,
 			"slip creation already in progress for this commit; duplicate suppressed",
+		)
+	case errors.Is(err, slippy.ErrTerminalAlreadyExists):
+		// Option 1 INSERT-time gate refused the transition (plan v3 §B.2, §C.1).
+		// 409 signals an idempotent retry by the caller is the right action —
+		// the prior terminal status is the durable truth and a same-or-newer
+		// terminal write would have been allowed by the §D matrix.
+		return huma.NewError(
+			http.StatusConflict,
+			"step already in terminal state; transition rejected (I5 invariant)",
+		)
+	case errors.Is(err, domain.ErrCorrIDWriteInProgress):
+		// Per-correlationID lock miss (plan v3 §M.1, §C.1). 409 is the chosen
+		// status code (plan v3 §M.7 option (a)) — Slippy CLI PR 3 will add
+		// bounded retry-with-jitter on 409 so legitimate contention does not
+		// surface as workflow failure. Until PR 3 lands, SLIPPY_I5_LOCK_ENABLED
+		// MUST stay false (plan v3 §G.1).
+		return huma.NewError(
+			http.StatusConflict,
+			"write to slip in progress; retry with backoff",
 		)
 	default:
 		if strings.Contains(err.Error(), "invalid push options") {
