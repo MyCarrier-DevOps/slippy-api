@@ -659,6 +659,18 @@ func TestMapWriteError(t *testing.T) {
 			fmt.Errorf("dedup: slip for repo:sha creation in progress, retry: %w", domain.ErrCreationInProgress),
 			http.StatusConflict,
 		},
+		{"context canceled", context.Canceled, http.StatusGatewayTimeout},
+		{"deadline exceeded", context.DeadlineExceeded, http.StatusGatewayTimeout},
+		{
+			"context canceled wrapped in StepError",
+			slippy.NewStepError("update", "id", "step", "", context.Canceled),
+			http.StatusGatewayTimeout,
+		},
+		{
+			"deadline exceeded wrapped in StepError",
+			slippy.NewStepError("update", "id", "step", "", context.DeadlineExceeded),
+			http.StatusGatewayTimeout,
+		},
 		{"generic error", errors.New("something broke"), http.StatusInternalServerError},
 	}
 	for _, tt := range tests {

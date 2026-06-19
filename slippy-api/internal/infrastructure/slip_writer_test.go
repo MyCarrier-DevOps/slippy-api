@@ -233,6 +233,79 @@ func TestSlipWriterAdapter_CompleteStep_Error(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// TestSlipWriterAdapter_CompleteStep_SurvivesRequestCancellation verifies that
+// a request-context cancellation does NOT abort the ClickHouse write. The
+// writer derives a context.WithoutCancel-based write ctx so the durable
+// `slip_component_states` row lands even if the HTTP client disconnects or an
+// LB resets the upstream connection mid-flight.
+func TestSlipWriterAdapter_CompleteStep_SurvivesRequestCancellation(t *testing.T) {
+	var seenCtxErr error
+	var called bool
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(ctx context.Context, _, _, _ string, status slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			called = true
+			seenCtxErr = ctx.Err()
+			assert.Equal(t, slippy.StepStatusCompleted, status)
+			return nil
+		},
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			return &slippy.Slip{CorrelationID: "abc-123", Status: slippy.SlipStatusInProgress}, nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	reqCtx, cancel := context.WithCancel(context.Background())
+	cancel() // simulate client/LB cancellation BEFORE the write starts
+
+	err := adapter.CompleteStep(reqCtx, "abc-123", "builds_completed", "api")
+	require.NoError(t, err)
+	assert.True(t, called, "write must be attempted despite cancelled request ctx")
+	assert.NoError(t, seenCtxErr, "store must receive a live, non-cancelled ctx")
+}
+
+// TestSlipWriterAdapter_StartStep_SurvivesRequestCancellation mirrors the above
+// for StartStep — the most common rerun-after-failure path.
+func TestSlipWriterAdapter_StartStep_SurvivesRequestCancellation(t *testing.T) {
+	var seenCtxErr error
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(ctx context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			seenCtxErr = ctx.Err()
+			return nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	reqCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := adapter.StartStep(reqCtx, "abc-123", "builds_completed", "api")
+	require.NoError(t, err)
+	assert.NoError(t, seenCtxErr, "store must receive a live, non-cancelled ctx")
+}
+
+// TestSlipWriterAdapter_FailStep_SurvivesRequestCancellation mirrors the above
+// for FailStep.
+func TestSlipWriterAdapter_FailStep_SurvivesRequestCancellation(t *testing.T) {
+	var seenCtxErr error
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(ctx context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			seenCtxErr = ctx.Err()
+			return nil
+		},
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			return &slippy.Slip{CorrelationID: "abc-123", Status: slippy.SlipStatusInProgress}, nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	reqCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := adapter.FailStep(reqCtx, "abc-123", "builds_completed", "api", "reason")
+	require.NoError(t, err)
+	assert.NoError(t, seenCtxErr, "store must receive a live, non-cancelled ctx")
+}
+
 // --- FailStep ---
 
 func TestSlipWriterAdapter_FailStep_Success(t *testing.T) {

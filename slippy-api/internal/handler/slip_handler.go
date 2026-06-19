@@ -275,6 +275,8 @@ func mapError(err error) error {
 		return huma.NewError(http.StatusBadRequest, "invalid correlation ID")
 	case errors.Is(err, slippy.ErrInvalidRepository):
 		return huma.NewError(http.StatusBadRequest, "invalid repository")
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return huma.NewError(http.StatusGatewayTimeout, "upstream timeout")
 	default:
 		return huma.NewError(http.StatusInternalServerError, "internal error")
 	}
