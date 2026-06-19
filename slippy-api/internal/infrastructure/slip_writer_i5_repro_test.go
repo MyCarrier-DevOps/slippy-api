@@ -525,10 +525,32 @@ func TestSlipWriter_I5_ThreeWayConcurrent_PerCorrIDLock(t *testing.T) {
 // ErrTerminalAlreadyExists, executor.go:393 would populate resetFailures, and
 // the slip would stay Failed despite the operator's recovery action.
 //
-// The integration covers the slippy-api end of the chain:
-// adapter.CompleteStep on the recovering step triggers checkPipelineCompletion
-// inside the library which fires the cascade-reset. The assertion checks the
-// downstream step transitioned to pending AND no resetFailures landed.
+// Test driver:
+//
+//  1. CreateSlipForPush bootstraps the slip (all steps pending).
+//  2. FailStep(unit_tests) drives unit_tests → failed; the library's
+//     checkPipelineCompletion sees the primary failure and moves slip.status
+//     to Failed.
+//  3. Seed deploy_dev → aborted DIRECTLY via store.UpdateStepWithStatus.
+//     This bypasses the library client (and its checkPipelineCompletion side
+//     effect) but goes through enforceTerminalMonotonicity — pending → aborted
+//     is permitted because the prior is non-terminal. The seeded row is the
+//     cascade-aborted state the executor.go:316 categoriser will later see.
+//  4. CompleteStep(unit_tests) — recovery transition failed → completed.
+//     isRecoveryAllowed Rule 2 permits this; then the library re-runs
+//     checkPipelineCompletion which:
+//     a. Sees primaryFailures=[] (unit_tests is now completed).
+//     b. Sees cascadeFailures=[deploy_dev] (aborted).
+//     c. Sees slip.Status == Failed (set in step 2).
+//     d. Runs the executor.go:376 cascadeFailures loop: writes
+//        deploy_dev=pending via UpdateStepWithStatus. isRecoveryAllowed
+//        Rule 1 (aborted → pending) MUST permit this.
+//     e. Moves slip.status back to InProgress.
+//
+// STRICT EQUAL assertion: deploy_dev_status == "pending" (NOT NotEqual). A
+// failing isRecoveryAllowed gate would either (a) leave deploy_dev=aborted
+// (cascade-reset blocked) or (b) propagate ErrTerminalAlreadyExists into the
+// CompleteStep call. Both modes are caught here.
 func TestSlipWriter_I5_CascadeResetAbortedToPending_E2E(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping I5 cascade-reset integration test in short mode")
@@ -537,9 +559,9 @@ func TestSlipWriter_I5_CascadeResetAbortedToPending_E2E(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	// Use a pipeline with a primary step + a cascading step that depends on it
-	// via prerequisites — this is the shape the executor cascade-reset path
-	// expects (executor.go:377).
+	// Pipeline shape: a primary step (unit_tests) and a downstream cascade
+	// target (deploy_dev). push_parsed is included to keep the schema
+	// realistic — it is the standard slip bootstrap step.
 	pipelineJSON := `{
 		"name": "slippy-api-i5-cascade",
 		"steps": [
@@ -571,27 +593,111 @@ func TestSlipWriter_I5_CascadeResetAbortedToPending_E2E(t *testing.T) {
 	})
 	require.NoError(t, err, "CreateSlipForPush")
 
-	// Drive unit_tests to failed; cascade-reset will mark deploy_dev as aborted
-	// via the library's failure-propagation path.
+	// Step 2: drive unit_tests → failed. This triggers the library's
+	// checkPipelineCompletion which sets slip.status = Failed.
 	require.NoError(t, adapter.StartStep(ctx, corrID, "unit_tests", ""), "StartStep unit_tests")
 	require.NoError(t, adapter.FailStep(ctx, corrID, "unit_tests", "", "first run failed"),
 		"FailStep unit_tests")
 
-	// Operator recovery — CompleteStep on the (still-failed) unit_tests. The
-	// library executes cascade-reset to revert deploy_dev from aborted → pending.
-	// The gate must permit this via isRecoveryAllowed.
-	require.NoError(t, adapter.CompleteStep(ctx, corrID, "unit_tests", ""),
-		"CompleteStep unit_tests recovery — cascade-reset must succeed")
+	// CH host-clock granularity on testcontainers (macOS Docker) often only
+	// resolves DateTime64 to whole seconds — see the parallel pattern in
+	// TestSlipWriter_I5_StaleStartAfterComplete_DoesNotClobber at slip_writer_i5_repro_test.go:386.
+	// Without a wallclock-second crossing, the seed-aborted event in step 3
+	// AND the recovery-completed event in step 4 can both share the failed
+	// event's timestamp, and the argMax tiebreak (sortkey = ts*100 + status_int)
+	// causes failed (5) to beat completed (4). Cross the boundary now so every
+	// subsequent INSERT lands strictly after the failed event.
+	crossSecondBoundary(t)
 
-	// Verify deploy_dev status reflects the cascade-reset, NOT lingering aborted.
-	// If the gate misconfigured (cascade-reset rejected), deploy_dev stays
-	// aborted and routing_slips.status stays Failed — caught here.
-	col, _ := readStepStatusGeneric(t, ctx, setup.conn, setup.dbName, corrID, "deploy_dev_status")
-	// Acceptable post-state: pending (cascade-reset landed) OR running (next
-	// scheduler tick already moved it forward). aborted means cascade-reset
-	// was REJECTED — bug.
-	require.NotEqual(t, string(slippy.StepStatusAborted), col,
-		"cascade-reset failed: deploy_dev still aborted after unit_tests recovery — Option 1 isRecoveryAllowed regression")
+	// Step 3: seed deploy_dev → aborted directly via the store. This emulates
+	// the cascade-abort that an upstream scheduler would have written when
+	// unit_tests failed. The transition pending → aborted is permitted by
+	// the gate (prior is non-terminal). We use the store directly (NOT the
+	// adapter / client) to avoid the library's checkPipelineCompletion
+	// re-running and potentially short-circuiting the test state. Note:
+	// SlipStore.UpdateStep (not UpdateStepWithStatus, which is a Client method)
+	// is the lowest-level entry point that still goes through the gate.
+	require.NoError(t,
+		setup.store.UpdateStep(ctx, corrID, "deploy_dev", "",
+			slippy.StepStatusAborted),
+		"seed deploy_dev=aborted")
+
+	// Second wallclock boundary — see comment above. The cascade-reset INSERT
+	// in step 4 writes deploy_dev=pending; it must land in a strictly later
+	// wallclock-second than this aborted event for argMax(status, sortkey) to
+	// resolve to pending.
+	crossSecondBoundary(t)
+
+	// Sanity: pre-recovery state is what we expect, read from the event log
+	// (slip_component_states) because store.UpdateStep does NOT write back to
+	// the routing_slips aggregate column for pure pipeline steps — only the
+	// event log row is persisted. routing_slips.deploy_dev_status will catch
+	// up on the next aggregate-touching write (the cascade-reset itself).
+	preEventStatus, preFound, preErr := setup.store.LatestStepStatusFromEvents(ctx, corrID, "deploy_dev")
+	require.NoError(t, preErr, "LatestStepStatusFromEvents pre-recovery")
+	require.True(t, preFound, "precondition: deploy_dev event log row MUST exist after seed")
+	require.Equal(t, slippy.StepStatusAborted, preEventStatus,
+		"precondition: deploy_dev event log MUST show aborted before recovery; got %q", preEventStatus)
+
+	// Confirm slip.Status is Failed before recovery. The FailStep(unit_tests)
+	// in step 2 drives checkPipelineCompletion to set slip.Status = Failed
+	// (executor.go:339). Without that precondition, the post-recovery
+	// checkPipelineCompletion would skip the cascade-reset branch (it guards
+	// on slip.Status == Failed) and the assertion below would fail spuriously.
+	preSlip, preLoadErr := setup.store.Load(ctx, corrID)
+	require.NoError(t, preLoadErr, "Load pre-recovery slip")
+	require.Equal(t, slippy.SlipStatusFailed, preSlip.Status,
+		"precondition: slip.Status MUST be failed before recovery; got %q (steps=%v)",
+		preSlip.Status, stepStatusMap(preSlip))
+
+	// Step 4: operator recovery — CompleteStep(unit_tests). This is the
+	// failed → completed transition that isRecoveryAllowed Rule 2 permits.
+	// AFTER the write, checkPipelineCompletion runs and triggers the
+	// cascadeFailures loop (executor.go:376) which writes deploy_dev=pending
+	// via UpdateStepWithStatus (gated by isRecoveryAllowed Rule 1).
+	//
+	// CRITICAL: this call MUST succeed without ErrTerminalAlreadyExists. A
+	// gate that erroneously refused failed → completed would surface here.
+	err = adapter.CompleteStep(ctx, corrID, "unit_tests", "")
+	require.NoError(t, err,
+		"CompleteStep(unit_tests) recovery MUST succeed — isRecoveryAllowed "+
+			"Rule 2 (failed → completed) regression")
+	require.False(t, errors.Is(err, slippy.ErrTerminalAlreadyExists),
+		"recovery path MUST NOT emit ErrTerminalAlreadyExists; got %v", err)
+
+	// Confirm the event log reflects cascade-reset. The post-recovery latest
+	// event for deploy_dev must be pending; for unit_tests it must be
+	// completed. argMax over (timestamp, status_int) decides — both INSERTs
+	// land in a wallclock-second strictly after their predecessors (see the
+	// crossSecondBoundary calls above), so the tiebreak on status ordinal
+	// never fires.
+	postEventStatus, postFound, postErr := setup.store.LatestStepStatusFromEvents(ctx, corrID, "deploy_dev")
+	require.NoError(t, postErr, "LatestStepStatusFromEvents deploy_dev post-recovery")
+	require.True(t, postFound, "deploy_dev event log must still exist")
+	require.Equal(t, slippy.StepStatusPending, postEventStatus,
+		"event log: deploy_dev latest MUST be pending after cascade-reset; got %q", postEventStatus)
+
+	utEventStatus, utFound, utErr := setup.store.LatestStepStatusFromEvents(ctx, corrID, "unit_tests")
+	require.NoError(t, utErr, "LatestStepStatusFromEvents unit_tests post-recovery")
+	require.True(t, utFound, "unit_tests event log must exist")
+	require.Equal(t, slippy.StepStatusCompleted, utEventStatus,
+		"event log: unit_tests latest MUST be completed after recovery; got %q", utEventStatus)
+
+	// Strict assertion: cascade-reset landed and routing_slips.deploy_dev_status
+	// is now pending. Anything else means the executor.go:376 cascadeFailures
+	// loop either did not run (recovery short-circuited) or its
+	// UpdateStepWithStatus call was refused by the gate (isRecoveryAllowed
+	// Rule 1 regression).
+	col, jsonStatus := readStepStatusGeneric(t, ctx, setup.conn, setup.dbName, corrID, "deploy_dev_status")
+	assert.Equal(t, string(slippy.StepStatusPending), col,
+		"cascade-reset: deploy_dev_status MUST be pending after unit_tests "+
+			"recovery (got %q) — isRecoveryAllowed Rule 1 (aborted → pending) regression",
+		col)
+	// step_details JSON parity is the I5 invariant — column and JSON must agree.
+	// We do not assert the exact JSON value here (cascade-reset writes the column
+	// override but the step_details map may lag); the column is the load-bearing
+	// signal for the cascade-reset contract. Captured for diagnostic only.
+	_ = jsonStatus
 }
 
 // --- helpers for the new integration tests ---
@@ -704,6 +810,32 @@ func startI5ContainerWithPipeline(ctx context.Context, t *testing.T, pipelineJSO
 		store:     store,
 		dbName:    dbName,
 	}
+}
+
+// crossSecondBoundary sleeps until the next wallclock second + a small margin.
+// Used by integration tests that need successive INSERTs to land in strictly
+// distinct DateTime64 buckets — on macOS Docker the testcontainers ClickHouse
+// image often resolves DateTime64(6) to whole seconds, collapsing the argMax
+// tiebreak onto the status enum ordinal. See the parallel use in
+// TestSlipWriter_I5_StaleStartAfterComplete_DoesNotClobber.
+func crossSecondBoundary(t *testing.T) {
+	t.Helper()
+	now := time.Now()
+	nextSecond := now.Truncate(time.Second).Add(time.Second + 100*time.Millisecond)
+	time.Sleep(time.Until(nextSecond))
+}
+
+// stepStatusMap flattens slip.Steps into a {name: status} map for diagnostic
+// t.Logf output. Intentionally cheap — used only on failed-path debugging.
+func stepStatusMap(slip *slippy.Slip) map[string]string {
+	if slip == nil {
+		return nil
+	}
+	out := make(map[string]string, len(slip.Steps))
+	for name, step := range slip.Steps {
+		out[name] = string(step.Status)
+	}
+	return out
 }
 
 // readStepStatusGeneric reads a single *_status column from the latest sign=+1

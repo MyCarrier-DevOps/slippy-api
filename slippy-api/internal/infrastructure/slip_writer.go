@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -30,12 +31,30 @@ const slippyI5LockEnabledEnv = "SLIPPY_I5_LOCK_ENABLED"
 // every call) so flipping the env var at runtime has no effect — operators
 // must restart the pod after toggling. This is intentional: a mid-flight
 // flip mixed with already-acquired locks would create a confused state.
+//
+// Parsing uses strconv.ParseBool so the accepted truthy/falsy set is the
+// canonical Go convention (1/t/T/TRUE/true/True/0/f/F/FALSE/false/False).
+// Any other value (including empty) is treated as OFF — the plan v3 §G.1
+// default — and produces a parse error that the startup log surfaces for
+// SRE visibility.
+//
+// A single slog.Info line is emitted PER CALL — i.e. once per adapter
+// construction (NewSlipWriterAdapter). This is the §M.7 rollout sign-off
+// signal: operators grep pod logs for "slippy-api per-correlationID lock"
+// to confirm what state every pod actually came up with, independent of
+// any subsequent flag flips. Repeated lines under repeated construction
+// (unit tests, multi-adapter wiring) are accepted noise — the alternative
+// (sync.Once at package scope) would mask config drift across pods.
 func corrIDLockEnabled() bool {
-	switch os.Getenv(slippyI5LockEnabledEnv) {
-	case "1", "true", "TRUE", "True":
-		return true
-	}
-	return false
+	raw := os.Getenv(slippyI5LockEnabledEnv)
+	v, err := strconv.ParseBool(raw)
+	on := err == nil && v
+	slog.Info("slippy-api per-correlationID lock",
+		"enabled", on,
+		"raw_env", raw,
+		"env_var", slippyI5LockEnabledEnv,
+	)
+	return on
 }
 
 // writerTracerName is the instrumentation scope for write operations.
