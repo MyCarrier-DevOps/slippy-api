@@ -8,7 +8,7 @@ require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.45.0
 	github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse v1.3.89
 	github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.89
-	github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.90
+	github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.4.0-feature-82468-i5-option-d.3
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/danielgtaylor/huma/v2 v2.37.3
 	github.com/google/uuid v1.6.0
@@ -133,5 +133,3 @@ require (
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/MyCarrier-DevOps/goLibMyCarrier/slippy => /Volumes/repos/mycarrier/.worktrees/golib-i5-r2/slippy
