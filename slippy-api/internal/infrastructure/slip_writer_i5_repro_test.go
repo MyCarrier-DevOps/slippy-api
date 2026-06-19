@@ -544,8 +544,8 @@ func TestSlipWriter_I5_CascadeResetAbortedToPending_E2E(t *testing.T) {
 		"name": "slippy-api-i5-cascade",
 		"steps": [
 			{"name": "push_parsed"},
-			{"name": "unit_tests"},
-			{"name": "deploy_dev", "prerequisites": [{"step": "unit_tests"}]}
+			{"name": "unit_tests", "prerequisites": ["push_parsed"]},
+			{"name": "deploy_dev", "prerequisites": ["unit_tests"]}
 		]
 	}`
 
