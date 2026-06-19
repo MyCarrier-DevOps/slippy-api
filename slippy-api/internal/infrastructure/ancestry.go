@@ -92,8 +92,50 @@ func (a *SlipResolverAdapter) LoadByCommit(
 	)
 	defer span.End()
 
+	// Exact-first for full commit SHAs: when the ref is an unambiguous 40-hex
+	// commit SHA, attempt a direct ClickHouse exact-SHA read BEFORE walking
+	// GitHub commit-ancestry. This avoids 404 flapping when the resolver's
+	// GitHub GraphQL ancestry walk transiently errors / rate-limits / returns
+	// an empty commit list under CI burst (those collapse into ErrSlipNotFound).
+	// On exact miss we fall back to the ancestry walk (unchanged); on exact
+	// infrastructure errors (e.g. ClickHouse down) we propagate so the handler
+	// yields 5xx rather than masking a live slip as a 404. Non-full-SHA refs
+	// (branch names, short SHAs) skip the exact attempt and go straight to
+	// ancestry, exactly as before.
+	if isFullCommitSHA(commitSHA) {
+		span.SetAttributes(attribute.Bool("slip.exact_attempted", true))
+		exactSlip, exactErr := a.reader.LoadByCommitExact(ctx, repository, commitSHA)
+		if exactErr == nil {
+			slog.InfoContext(ctx, "ancestry: resolved slip via exact-SHA read",
+				"requested_repository", repository,
+				"slip_repository", exactSlip.Repository,
+				"commit_sha", commitSHA,
+				"correlation_id", exactSlip.CorrelationID)
+			span.SetAttributes(
+				attribute.String("slip.resolved_path", "exact"),
+				attribute.String("slip.correlation_id", exactSlip.CorrelationID),
+				attribute.String("slip.slip_repository", exactSlip.Repository),
+			)
+			span.SetStatus(codes.Ok, "resolved via exact")
+			return exactSlip, nil
+		}
+		if !errors.Is(exactErr, slippy.ErrSlipNotFound) {
+			// Infrastructure error (ClickHouse down, etc.) — do NOT swallow into
+			// a not-found / 404. Propagate so mapError yields 5xx.
+			slog.ErrorContext(ctx, "ancestry: exact-SHA read failed",
+				"requested_repository", repository, "commit_sha", commitSHA, "error", exactErr)
+			span.RecordError(exactErr)
+			span.SetStatus(codes.Error, "exact read error")
+			return nil, exactErr
+		}
+		// Exact miss — fall through to the ancestry walk below.
+		slog.InfoContext(ctx, "ancestry: exact-SHA read found no slip, falling back to ancestry",
+			"requested_repository", repository, "commit_sha", commitSHA)
+	}
+
 	slog.InfoContext(ctx, "ancestry: resolving slip via library",
 		"requested_repository", repository, "commit_sha", commitSHA)
+	span.SetAttributes(attribute.String("slip.resolved_path", "ancestry"))
 
 	result, err := a.resolver.ResolveSlip(ctx, slippy.ResolveOptions{
 		Repository: repository,
@@ -293,4 +335,21 @@ func (a *SlipResolverAdapter) FindAllByCommits(
 	span.SetAttributes(attribute.Int("slip.results_count", len(allResults)))
 	span.SetStatus(codes.Ok, "resolved")
 	return allResults, nil
+}
+
+// isFullCommitSHA reports whether ref is an unambiguous full git commit SHA:
+// exactly 40 characters, all hexadecimal. Branch names (e.g. "integration"),
+// short SHAs, and tags return false and are routed through ancestry resolution.
+func isFullCommitSHA(ref string) bool {
+	if len(ref) != 40 {
+		return false
+	}
+	for i := range len(ref) {
+		c := ref[i]
+		isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+		if !isHex {
+			return false
+		}
+	}
+	return true
 }

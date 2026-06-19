@@ -97,12 +97,15 @@ tidy:
 	done
 
 .PHONY: check-sec
+# govulncheck pinned to v1.3.0: v1.4.0 panics ("ForEachElement called on type
+# containing *types.TypeParam") under Go 1.26 generics (huma). Unpin when a
+# govulncheck >v1.4.0 fixes the regression.
 check-sec:
 	@echo "Checking security vulnerabilities..."
 	@for dir in $(or $(PKG),$(MODULES)); do \
 		if [ -d "$$dir" ]; then \
 			echo "Checking $$dir module..."; \
-			(cd $$dir && go mod download && go install golang.org/x/vuln/cmd/govulncheck@latest && govulncheck -show verbose ./...) || exit 1; \
+			(cd $$dir && go mod download && go install golang.org/x/vuln/cmd/govulncheck@v1.3.0 && govulncheck -show verbose ./...) || exit 1; \
 		else \
 			echo "Directory $$dir not found, skipping..."; \
 		fi; \

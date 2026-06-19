@@ -375,16 +375,23 @@ func TestNewSlipHandler(t *testing.T) {
 }
 
 // TestGetSlipByCommit_RoutesToAncestryResolvingLoad guards R3 — the
-// ancestry-preservation invariant. The public GET /slips/by-commit/{owner}/{repo}/{sha}
-// endpoint MUST route to the ancestry-resolving LoadByCommit (which walks the
-// commit ancestry to find the closest matching slip) and MUST NOT route to
-// LoadByCommitExact (the exact-SHA lookup added for the dedup-lock-miss await
-// path). LoadByCommitExact bypasses ancestry resolution and would silently
-// regress the public lookup behavior — image-tag historical lookups and PR/CI
-// "find slip for this commit" workflows depend on the ancestry walk.
+// ancestry-preservation invariant for NON-full-SHA refs. The public
+// GET /slips/by-commit/{owner}/{repo}/{ref} endpoint MUST route to the
+// ancestry-resolving LoadByCommit on the reader. For a short SHA / branch ref
+// (like "feedfacecafe", 12 hex chars — not a full 40-hex commit SHA) the
+// adapter's exact-first optimization does NOT apply, so the resolver path is
+// still the only path that can satisfy the request. Image-tag historical
+// lookups and PR/CI "find slip for this commit" workflows on branch refs depend
+// on the ancestry walk.
 //
-// If a future refactor swaps the handler to LoadByCommitExact, this test will
-// fail with a clear message pointing back to the invariant.
+// NOTE: As of the exact-first fix in SlipResolverAdapter.LoadByCommit, a FULL
+// 40-hex SHA ref MAY be served by a direct exact-SHA read before ancestry (see
+// TestGetSlipByCommit_FullSHA_AllowsExactFirst below and the adapter-level
+// regression tests in internal/infrastructure/ancestry_test.go). The handler
+// still calls the same reader.LoadByCommit method; the exact-vs-ancestry choice
+// is an internal adapter concern. This test therefore pins the invariant at the
+// handler boundary (handler -> LoadByCommit, never the bare LoadByCommitExact
+// method) rather than dictating the adapter's internal resolution path.
 func TestGetSlipByCommit_RoutesToAncestryResolvingLoad(t *testing.T) {
 	const sentinelCorrelationID = "ancestry-resolved-slip"
 	loadByCommitCalls := 0
@@ -402,7 +409,7 @@ func TestGetSlipByCommit_RoutesToAncestryResolvingLoad(t *testing.T) {
 		},
 		loadByCommitExactFn: func(_ context.Context, _, _ string) (*domain.Slip, error) {
 			loadByCommitExactCalls++
-			return nil, errors.New("LoadByCommitExact MUST NOT be called from the public by-commit handler — guards R3")
+			return nil, errors.New("handler MUST NOT call the bare LoadByCommitExact method — guards R3; exact-first is an internal LoadByCommit concern")
 		},
 	}
 
@@ -415,10 +422,54 @@ func TestGetSlipByCommit_RoutesToAncestryResolvingLoad(t *testing.T) {
 	assert.Equal(t, 1, loadByCommitCalls,
 		"public GET /slips/by-commit handler MUST call LoadByCommit (ancestry-resolving) exactly once")
 	assert.Equal(t, 0, loadByCommitExactCalls,
-		"public GET /slips/by-commit handler MUST NOT call LoadByCommitExact — that path bypasses ancestry resolution and is reserved for the dedup-lock-miss await path in slip_writer.go")
+		"public GET /slips/by-commit handler MUST route through reader.LoadByCommit, never the bare LoadByCommitExact method — exact-first SHA handling lives inside the adapter's LoadByCommit")
 
 	var body domain.Slip
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&body))
 	assert.Equal(t, sentinelCorrelationID, body.CorrelationID,
-		"response must come from the ancestry-resolved load, not the exact-SHA path")
+		"response must come from the ancestry-resolved load for a non-full-SHA ref")
+}
+
+// TestGetSlipByCommit_FullSHA_AllowsExactFirst documents the complementary half
+// of the invariant: for a FULL 40-hex SHA the public endpoint still calls
+// reader.LoadByCommit (not the bare LoadByCommitExact method) and resolves
+// correctly. The exact-first behavior that prevents the 404 flap is exercised at
+// the adapter level; here we simply confirm the handler contract is unchanged
+// for full-SHA refs and that the public endpoint resolves the slip.
+func TestGetSlipByCommit_FullSHA_AllowsExactFirst(t *testing.T) {
+	const sentinelCorrelationID = "exact-resolved-slip"
+	const fullSHA = "f615c4c0000000000000000000000000deadbeef"
+	loadByCommitCalls := 0
+	loadByCommitExactCalls := 0
+	mock := &mockReader{
+		loadByCommitFn: func(_ context.Context, repo, sha string) (*domain.Slip, error) {
+			loadByCommitCalls++
+			assert.Equal(t, "org/repo", repo)
+			assert.Equal(t, fullSHA, sha)
+			return &domain.Slip{
+				CorrelationID: sentinelCorrelationID,
+				Repository:    repo,
+				CommitSHA:     sha,
+			}, nil
+		},
+		loadByCommitExactFn: func(_ context.Context, _, _ string) (*domain.Slip, error) {
+			loadByCommitExactCalls++
+			return nil, errors.New("handler MUST route through reader.LoadByCommit, not the bare LoadByCommitExact method")
+		},
+	}
+
+	handler := setupTestAPI(mock)
+	req := httptest.NewRequest(http.MethodGet, "/slips/by-commit/org/repo/"+fullSHA, nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, 1, loadByCommitCalls,
+		"public GET /slips/by-commit handler MUST call reader.LoadByCommit exactly once, even for full-SHA refs")
+	assert.Equal(t, 0, loadByCommitExactCalls,
+		"handler must not call the bare LoadByCommitExact method; exact-first SHA handling is internal to the adapter's LoadByCommit")
+
+	var body domain.Slip
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&body))
+	assert.Equal(t, sentinelCorrelationID, body.CorrelationID)
 }
