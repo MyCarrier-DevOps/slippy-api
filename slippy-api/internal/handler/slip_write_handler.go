@@ -542,6 +542,12 @@ func mapWriteError(err error) error {
 			http.StatusConflict,
 			"slip creation already in progress for this commit; duplicate suppressed",
 		)
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		// Infrastructure-level cancellation (client disconnect, LB idle-timeout,
+		// upstream ClickHouse cancel). Return 504 so callers know to retry.
+		// Without this branch the error would unwrap into the *StepError /
+		// *SlipError default case below and surface as a misleading 422.
+		return huma.NewError(http.StatusGatewayTimeout, "upstream timeout")
 	default:
 		if strings.Contains(err.Error(), "invalid push options") {
 			return huma.NewError(http.StatusBadRequest, err.Error())

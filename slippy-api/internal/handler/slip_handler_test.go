@@ -221,6 +221,20 @@ func TestMapError_InvalidRepository(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, he.GetStatus())
 }
 
+func TestMapError_ContextCanceled(t *testing.T) {
+	err := mapError(context.Canceled)
+	var he huma.StatusError
+	require.ErrorAs(t, err, &he)
+	assert.Equal(t, http.StatusGatewayTimeout, he.GetStatus())
+}
+
+func TestMapError_DeadlineExceeded(t *testing.T) {
+	err := mapError(context.DeadlineExceeded)
+	var he huma.StatusError
+	require.ErrorAs(t, err, &he)
+	assert.Equal(t, http.StatusGatewayTimeout, he.GetStatus())
+}
+
 func TestGetSlip_InternalError(t *testing.T) {
 	mock := &mockReader{
 		loadFn: func(_ context.Context, id string) (*domain.Slip, error) {

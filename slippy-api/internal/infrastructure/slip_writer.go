@@ -19,6 +19,23 @@ import (
 // writerTracerName is the instrumentation scope for write operations.
 const writerTracerName = "slippy-api/writer"
 
+// writeOpTimeout bounds a single ClickHouse write (insert + hydrate). The
+// derived context detaches from the HTTP request ctx so a client disconnect
+// or LB idle-timeout mid-request does not abort an in-flight write — the
+// authoritative `slip_component_states` row must land regardless of whether
+// the response makes it back to the caller. Span context is preserved (via
+// context.WithoutCancel), only cancellation is decoupled.
+//
+// Exposed as a var (not const) so tests can shorten it to verify the bound.
+var writeOpTimeout = 15 * time.Second
+
+// writeContext returns a context for a single durable write: detached from
+// the request ctx's cancellation signal, bounded by writeOpTimeout, otel
+// span context preserved.
+func writeContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), writeOpTimeout)
+}
+
 // SlipWriterAdapter adapts the upstream slippy.Client to the domain.SlipWriter
 // interface. It wraps the high-level business client (not the raw store) so that
 // operations like CreateSlipForPush include ancestry resolution and step updates
@@ -101,6 +118,15 @@ func (a *SlipWriterAdapter) CreateSlipForPush(
 
 	if acquired {
 		span.AddEvent("dedup_lock_acquired")
+		// CreateSlipForPush deliberately runs on the raw request ctx — do NOT
+		// wrap in writeContext like the step/terminal writers below. A cancelled
+		// create returns an error here, triggers the WithoutCancel-detached lock
+		// release path below, and the webhook redelivery (pushhookparser is the
+		// only in-process creator) re-acquires the lock and re-creates. The
+		// awaitExistingSlip lock-miss path also relies on ctx.Done() to bound
+		// itself against lockWait / lock TTL — detaching that would change dedup
+		// semantics. Direct POST /slips callers should expect a one-shot
+		// disconnect mid-create to lose the write with no recovery.
 		result, err := a.client.CreateSlipForPush(ctx, opts)
 		if err != nil {
 			// Release on failure so a genuine retry can re-acquire and proceed.
@@ -133,189 +159,199 @@ func (a *SlipWriterAdapter) CreateSlipForPush(
 }
 
 func (a *SlipWriterAdapter) StartStep(ctx context.Context, correlationID, stepName, componentName string) error {
-	ctx, span := otel.Tracer(writerTracerName).Start(ctx, "writer.StartStep",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(
+	return a.instrumentedWrite(ctx, "writer.StartStep",
+		[]attribute.KeyValue{
 			attribute.String("slip.correlation_id", correlationID),
 			attribute.String("slip.step_name", stepName),
 			attribute.String("slip.component_name", componentName),
-		),
+		},
+		func(wctx context.Context, span trace.Span) error {
+			writtenAt := time.Now()
+			if err := a.client.StartStep(wctx, correlationID, stepName, componentName); err != nil {
+				return err
+			}
+			if a.isPipelineStep(stepName, componentName) {
+				if err := a.hydrateAndPersist(
+					wctx, correlationID, stepName, slippy.StepStatusRunning, writtenAt,
+				); err != nil {
+					span.AddEvent("hydration failed", trace.WithAttributes(attribute.String("error", err.Error())))
+				}
+			}
+			return nil
+		},
 	)
-	defer span.End()
-
-	writtenAt := time.Now()
-	if err := a.client.StartStep(ctx, correlationID, stepName, componentName); err != nil {
-		recordWriterError(span, err)
-		return err
-	}
-	if a.isPipelineStep(stepName, componentName) {
-		if err := a.hydrateAndPersist(
-			ctx, correlationID, stepName, slippy.StepStatusRunning, writtenAt,
-		); err != nil {
-			span.AddEvent("hydration failed", trace.WithAttributes(attribute.String("error", err.Error())))
-		}
-	}
-	return nil
 }
 
 func (a *SlipWriterAdapter) CompleteStep(ctx context.Context, correlationID, stepName, componentName string) error {
-	ctx, span := otel.Tracer(writerTracerName).Start(ctx, "writer.CompleteStep",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(
+	return a.instrumentedWrite(ctx, "writer.CompleteStep",
+		[]attribute.KeyValue{
 			attribute.String("slip.correlation_id", correlationID),
 			attribute.String("slip.step_name", stepName),
 			attribute.String("slip.component_name", componentName),
-		),
+		},
+		func(wctx context.Context, span trace.Span) error {
+			// Pipeline-level terminal events route directly: steps.go:101 guard fires
+			// checkPipelineCompletion automatically, saving a redundant Load.
+			// Component events MUST go through RunPostExecution to drive aggregate recomputation.
+			writtenAt := time.Now()
+			if componentName != "" {
+				if _, err := a.client.RunPostExecution(wctx, slippy.PostExecutionOptions{
+					CorrelationID:     correlationID,
+					StepName:          stepName,
+					ComponentName:     componentName,
+					WorkflowSucceeded: true,
+				}); err != nil {
+					return err
+				}
+			} else {
+				if err := a.client.CompleteStep(wctx, correlationID, stepName, componentName); err != nil {
+					return err
+				}
+			}
+			if a.isPipelineStep(stepName, componentName) {
+				if err := a.hydrateAndPersist(
+					wctx, correlationID, stepName, slippy.StepStatusCompleted, writtenAt,
+				); err != nil {
+					span.AddEvent("hydration failed", trace.WithAttributes(attribute.String("error", err.Error())))
+				}
+			}
+			return nil
+		},
 	)
-	defer span.End()
-
-	// Pipeline-level terminal events route directly: steps.go:101 guard fires
-	// checkPipelineCompletion automatically, saving a redundant Load.
-	// Component events MUST go through RunPostExecution to drive aggregate recomputation.
-	writtenAt := time.Now()
-	if componentName != "" {
-		if _, err := a.client.RunPostExecution(ctx, slippy.PostExecutionOptions{
-			CorrelationID:     correlationID,
-			StepName:          stepName,
-			ComponentName:     componentName,
-			WorkflowSucceeded: true,
-		}); err != nil {
-			recordWriterError(span, err)
-			return err
-		}
-	} else {
-		if err := a.client.CompleteStep(ctx, correlationID, stepName, componentName); err != nil {
-			recordWriterError(span, err)
-			return err
-		}
-	}
-	if a.isPipelineStep(stepName, componentName) {
-		if err := a.hydrateAndPersist(
-			ctx, correlationID, stepName, slippy.StepStatusCompleted, writtenAt,
-		); err != nil {
-			span.AddEvent("hydration failed", trace.WithAttributes(attribute.String("error", err.Error())))
-		}
-	}
-	return nil
 }
 
 func (a *SlipWriterAdapter) FailStep(ctx context.Context, correlationID, stepName, componentName, reason string) error {
-	ctx, span := otel.Tracer(writerTracerName).Start(ctx, "writer.FailStep",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(
+	return a.instrumentedWrite(ctx, "writer.FailStep",
+		[]attribute.KeyValue{
 			attribute.String("slip.correlation_id", correlationID),
 			attribute.String("slip.step_name", stepName),
 			attribute.String("slip.component_name", componentName),
-		),
+		},
+		func(wctx context.Context, span trace.Span) error {
+			// Pipeline-level terminal events route directly: steps.go:101 guard fires
+			// checkPipelineCompletion automatically, saving a redundant Load.
+			// Component events MUST go through RunPostExecution to drive aggregate recomputation.
+			writtenAt := time.Now()
+			if componentName != "" {
+				if _, err := a.client.RunPostExecution(wctx, slippy.PostExecutionOptions{
+					CorrelationID:     correlationID,
+					StepName:          stepName,
+					ComponentName:     componentName,
+					WorkflowSucceeded: false,
+					FailureMessage:    reason,
+				}); err != nil {
+					return err
+				}
+			} else {
+				if err := a.client.FailStep(wctx, correlationID, stepName, componentName, reason); err != nil {
+					return err
+				}
+			}
+			if a.isPipelineStep(stepName, componentName) {
+				if err := a.hydrateAndPersist(
+					wctx, correlationID, stepName, slippy.StepStatusFailed, writtenAt,
+				); err != nil {
+					span.AddEvent("hydration failed", trace.WithAttributes(attribute.String("error", err.Error())))
+				}
+			}
+			return nil
+		},
 	)
-	defer span.End()
-
-	// Pipeline-level terminal events route directly: steps.go:101 guard fires
-	// checkPipelineCompletion automatically, saving a redundant Load.
-	// Component events MUST go through RunPostExecution to drive aggregate recomputation.
-	writtenAt := time.Now()
-	if componentName != "" {
-		if _, err := a.client.RunPostExecution(ctx, slippy.PostExecutionOptions{
-			CorrelationID:     correlationID,
-			StepName:          stepName,
-			ComponentName:     componentName,
-			WorkflowSucceeded: false,
-			FailureMessage:    reason,
-		}); err != nil {
-			recordWriterError(span, err)
-			return err
-		}
-	} else {
-		if err := a.client.FailStep(ctx, correlationID, stepName, componentName, reason); err != nil {
-			recordWriterError(span, err)
-			return err
-		}
-	}
-	if a.isPipelineStep(stepName, componentName) {
-		if err := a.hydrateAndPersist(
-			ctx, correlationID, stepName, slippy.StepStatusFailed, writtenAt,
-		); err != nil {
-			span.AddEvent("hydration failed", trace.WithAttributes(attribute.String("error", err.Error())))
-		}
-	}
-	return nil
 }
 
 func (a *SlipWriterAdapter) SkipStep(ctx context.Context, correlationID, stepName, componentName, reason string) error {
-	ctx, span := otel.Tracer(writerTracerName).Start(ctx, "writer.SkipStep",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(
+	return a.instrumentedWrite(ctx, "writer.SkipStep",
+		[]attribute.KeyValue{
 			attribute.String("slip.correlation_id", correlationID),
 			attribute.String("slip.step_name", stepName),
 			attribute.String("slip.component_name", componentName),
-		),
+		},
+		func(wctx context.Context, span trace.Span) error {
+			writtenAt := time.Now()
+			if err := a.client.SkipStep(wctx, correlationID, stepName, componentName, reason); err != nil {
+				return err
+			}
+			if a.isPipelineStep(stepName, componentName) {
+				if err := a.hydrateAndPersist(
+					wctx, correlationID, stepName, slippy.StepStatusSkipped, writtenAt,
+				); err != nil {
+					span.AddEvent("hydration failed", trace.WithAttributes(attribute.String("error", err.Error())))
+				}
+			}
+			return nil
+		},
 	)
-	defer span.End()
-
-	writtenAt := time.Now()
-	if err := a.client.SkipStep(ctx, correlationID, stepName, componentName, reason); err != nil {
-		recordWriterError(span, err)
-		return err
-	}
-	if a.isPipelineStep(stepName, componentName) {
-		if err := a.hydrateAndPersist(
-			ctx, correlationID, stepName, slippy.StepStatusSkipped, writtenAt,
-		); err != nil {
-			span.AddEvent("hydration failed", trace.WithAttributes(attribute.String("error", err.Error())))
-		}
-	}
-	return nil
 }
 
 func (a *SlipWriterAdapter) SetComponentImageTag(
 	ctx context.Context,
 	correlationID, componentName, imageTag string,
 ) error {
-	ctx, span := otel.Tracer(writerTracerName).Start(ctx, "writer.SetComponentImageTag",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(
+	return a.instrumentedWrite(ctx, "writer.SetComponentImageTag",
+		[]attribute.KeyValue{
 			attribute.String("slip.correlation_id", correlationID),
 			attribute.String("slip.component_name", componentName),
 			attribute.String("slip.image_tag", imageTag),
-		),
+		},
+		func(wctx context.Context, _ trace.Span) error {
+			return a.client.SetComponentImageTag(wctx, correlationID, componentName, imageTag)
+		},
 	)
-	defer span.End()
-
-	if err := a.client.SetComponentImageTag(ctx, correlationID, componentName, imageTag); err != nil {
-		recordWriterError(span, err)
-		return err
-	}
-	return nil
 }
 
 func (a *SlipWriterAdapter) PromoteSlip(ctx context.Context, correlationID, promotedTo string) error {
-	ctx, span := otel.Tracer(writerTracerName).Start(ctx, "writer.PromoteSlip",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(
+	return a.instrumentedWrite(ctx, "writer.PromoteSlip",
+		[]attribute.KeyValue{
 			attribute.String("slip.correlation_id", correlationID),
 			attribute.String("slip.promoted_to", promotedTo),
-		),
+		},
+		func(wctx context.Context, _ trace.Span) error {
+			return a.client.PromoteSlip(wctx, correlationID, promotedTo)
+		},
 	)
-	defer span.End()
-
-	if err := a.client.PromoteSlip(ctx, correlationID, promotedTo); err != nil {
-		recordWriterError(span, err)
-		return err
-	}
-	return nil
 }
 
 func (a *SlipWriterAdapter) AbandonSlip(ctx context.Context, correlationID, supersededBy string) error {
-	ctx, span := otel.Tracer(writerTracerName).Start(ctx, "writer.AbandonSlip",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(
+	return a.instrumentedWrite(ctx, "writer.AbandonSlip",
+		[]attribute.KeyValue{
 			attribute.String("slip.correlation_id", correlationID),
 			attribute.String("slip.superseded_by", supersededBy),
-		),
+		},
+		func(wctx context.Context, _ trace.Span) error {
+			return a.client.AbandonSlip(wctx, correlationID, supersededBy)
+		},
+	)
+}
+
+// instrumentedWrite is the single entry point for durable step/terminal
+// writes. It starts a tracer span, derives a cancellation-detached write
+// context via writeContext, and invokes op with that ctx and the span.
+// All adapter methods that mutate slip state route through here, so the
+// WithoutCancel + writeOpTimeout guarantee can't be silently dropped by a
+// future method that forgets the wrap — adding a new write method without
+// this helper is the only way to lose the guarantee, and that omission is
+// loud in review.
+//
+// The closure receives only wctx for use with the upstream client and
+// hydrateAndPersist — the caller-supplied ctx is exclusively for span
+// scoping. Do NOT pass the outer ctx to client.* calls; that would defeat
+// the point of this indirection.
+func (a *SlipWriterAdapter) instrumentedWrite(
+	ctx context.Context,
+	spanName string,
+	attrs []attribute.KeyValue,
+	op func(wctx context.Context, span trace.Span) error,
+) error {
+	ctx, span := otel.Tracer(writerTracerName).Start(ctx, spanName,
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(attrs...),
 	)
 	defer span.End()
 
-	if err := a.client.AbandonSlip(ctx, correlationID, supersededBy); err != nil {
+	wctx, cancel := writeContext(ctx)
+	defer cancel()
+
+	if err := op(wctx, span); err != nil {
 		recordWriterError(span, err)
 		return err
 	}
