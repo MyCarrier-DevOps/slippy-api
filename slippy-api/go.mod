@@ -102,3 +102,13 @@ require (
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/MyCarrier-DevOps/goLibMyCarrier/slippy => /tmp/wt-82917-golib/slippy
+
+replace github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse => /tmp/wt-82917-golib/clickhouse
+
+replace github.com/MyCarrier-DevOps/goLibMyCarrier/logger => /tmp/wt-82917-golib/logger
+
+replace github.com/MyCarrier-DevOps/goLibMyCarrier/clickhousemigrator => /tmp/wt-82917-golib/clickhousemigrator
+
+replace github.com/MyCarrier-DevOps/goLibMyCarrier/github => /tmp/wt-82917-golib/github

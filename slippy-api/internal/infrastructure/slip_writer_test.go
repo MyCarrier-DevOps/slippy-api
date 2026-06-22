@@ -713,6 +713,62 @@ func TestSlipWriterAdapter_FailStep_HydrationError_NonFatal(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestWriteOpTimeout_DefaultIs240s verifies that the package-level default
+// write timeout is 240 s (not the former 15 s). This is a regression guard:
+// if the constant reverts, this test catches it before the timeout can kill
+// in-flight ClickHouse writes in production.
+func TestWriteOpTimeout_DefaultIs240s(t *testing.T) {
+	// writeOpTimeout is set at package init from initWriteOpTimeout(). In the
+	// test environment SLIPPY_WRITE_OP_TIMEOUT is unset, so it must equal the
+	// compile-time default.
+	assert.Equal(t, defaultWriteOpTimeout, 240*time.Second,
+		"defaultWriteOpTimeout constant must be 240s")
+	// The live var should also match the default when the env is absent.
+	// (Tests that shorten it via withTestWriteOpTimeout restore it in t.Cleanup.)
+	assert.GreaterOrEqual(t, writeOpTimeout, 240*time.Second,
+		"writeOpTimeout must be at least 240s in a clean test environment")
+}
+
+// TestSlipWriterAdapter_HydrateAndPersist_TimeoutNonFatal_AfterClientWrite
+// verifies that a slow/timing-out hydrateAndPersist (simulated by shortening
+// writeOpTimeout and having the Load block longer than the timeout) does NOT
+// cause the overall write to return an error. The authoritative client write
+// has already succeeded; the cache writeback is best-effort.
+//
+// This is the key regression guard for the fix: previously the 15 s timeout
+// would fire and kill the whole context, which surfaced as an error to the
+// handler and caused a 504 (now 202). With a 240 s timeout this fires less
+// often in production, but the non-fatal semantics must hold regardless.
+func TestSlipWriterAdapter_HydrateAndPersist_TimeoutNonFatal_AfterClientWrite(t *testing.T) {
+	withTestWriteOpTimeout(t, 30*time.Millisecond)
+
+	clientWritten := false
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			clientWritten = true
+			return nil
+		},
+		// Load is called by hydrateAndPersist. Block until the write-context
+		// deadline fires to simulate a slow CH query during the cache writeback.
+		loadFn: func(ctx context.Context, _ string) (*slippy.Slip, error) {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(200 * time.Millisecond):
+				return &slippy.Slip{CorrelationID: "abc-123"}, nil
+			}
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	// push_parsed is a plain pipeline step → hydrateAndPersist fires.
+	err := adapter.StartStep(context.Background(), "abc-123", "push_parsed", "")
+	require.NoError(t, err,
+		"a timing-out hydrateAndPersist must NOT propagate as an error after a successful client write")
+	assert.True(t, clientWritten,
+		"the authoritative client write must have completed before the timeout fires")
+}
+
 // TestSlipWriterAdapter_HydrateAndPersist_UpdateError exercises hydrateAndPersist's
 // Update error path: Load returns a slip, but Store().Update fails. The write path
 // still succeeds because hydration errors are non-fatal.

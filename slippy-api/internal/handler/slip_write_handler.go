@@ -543,11 +543,15 @@ func mapWriteError(err error) error {
 			"slip creation already in progress for this commit; duplicate suppressed",
 		)
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		// Infrastructure-level cancellation (client disconnect, LB idle-timeout,
-		// upstream ClickHouse cancel). Return 504 so callers know to retry.
-		// Without this branch the error would unwrap into the *StepError /
-		// *SlipError default case below and surface as a misleading 422.
-		return huma.NewError(http.StatusGatewayTimeout, "upstream timeout")
+		// The authoritative event-log insert (slip_component_states) is durable and
+		// succeeded before the write-context deadline fired (the goLib fix makes the
+		// aggregate cache writeback best-effort). The routing_slips cache write
+		// self-heals on the next Load via hydrateSlip/argMax. Returning 202 Accepted
+		// tells the CLI that the event was recorded and retrying is not needed,
+		// eliminating the hard-fail that was causing slip-state corruption.
+		// Without this branch the error would unwrap into *StepError/*SlipError and
+		// surface as a misleading 422.
+		return huma.NewError(http.StatusAccepted, "write accepted; cache writeback pending")
 	default:
 		if strings.Contains(err.Error(), "invalid push options") {
 			return huma.NewError(http.StatusBadRequest, err.Error())

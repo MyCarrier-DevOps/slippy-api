@@ -9,16 +9,6 @@ github.com/ClickHouse/clickhouse-go/v2 v2.46.0/go.mod h1:giJfUVlMkcfUEPVfRpt51zZ
 github.com/Microsoft/go-winio v0.5.2/go.mod h1:WpS1mjBmmwHBEWmogvA2mj8546UReBk4v8QkMxJ6pZY=
 github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERoyfY=
 github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
-github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse v1.3.92 h1:1soJUYDmgtQaJ80Qc0gyMlWBjz8i1uSsSYp4SFLQdAE=
-github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse v1.3.92/go.mod h1:Pshv0K5F6qemBqVVSEEaDHjb2WLmMHhAUgk7LjiUgko=
-github.com/MyCarrier-DevOps/goLibMyCarrier/clickhousemigrator v1.3.92 h1:gP4jNf5ypz5R9anwa5dFzIsTMhgsLKc9KVA2tRTS228=
-github.com/MyCarrier-DevOps/goLibMyCarrier/clickhousemigrator v1.3.92/go.mod h1:sXdtB7wi0DxKZMkt3QCUmedGcaGf8VG2juBtKz8VhW8=
-github.com/MyCarrier-DevOps/goLibMyCarrier/github v1.3.92 h1:kBRefqUQMl33MKDaGgJxLobdRLgRznZw2w6W4mf8lkA=
-github.com/MyCarrier-DevOps/goLibMyCarrier/github v1.3.92/go.mod h1:+g7ImJNr0ppGPJr+UeG48dONE+XLjoGr9nGbdTVmafM=
-github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.92 h1:2iAx+ftyirJrqVzkpfUjv7JTPYEwzBG/ANFA+Svcrdc=
-github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.92/go.mod h1:8ZFrEONoNfgaoY8TnAbq7ZeYDjJcW6XFk5XzwYhzdhs=
-github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.92 h1:BxTn5I4dvQpGW4NK9MSl7qBCP3xm5TZgRbDme8g01FE=
-github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.92/go.mod h1:LwXs/3v1gIeTmS0DokuibpnauyioZsEpJIIl++PE1dA=
 github.com/ProtonMail/go-crypto v1.4.1 h1:9RfcZHqEQUvP8RzecWEUafnZVtEvrBVL9BiF67IQOfM=
 github.com/ProtonMail/go-crypto v1.4.1/go.mod h1:e1OaTyu5SYVrO9gKOEhTc+5UcXtTUa+P3uLudwcgPqo=
 github.com/alicebob/miniredis/v2 v2.38.0 h1:nZAzCR+Lj+Vxk4ZXzm2NuKq2O33RXj1XxJ2e2uP9jiw=

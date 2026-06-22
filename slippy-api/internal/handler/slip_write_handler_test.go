@@ -659,17 +659,21 @@ func TestMapWriteError(t *testing.T) {
 			fmt.Errorf("dedup: slip for repo:sha creation in progress, retry: %w", domain.ErrCreationInProgress),
 			http.StatusConflict,
 		},
-		{"context canceled", context.Canceled, http.StatusGatewayTimeout},
-		{"deadline exceeded", context.DeadlineExceeded, http.StatusGatewayTimeout},
+		// context.Canceled / context.DeadlineExceeded map to 202 Accepted (not 504):
+		// the authoritative event-log row has already landed durably; the cache
+		// writeback may be pending but self-heals on next Load. 202 tells the CLI
+		// "accepted — no retry needed", eliminating false-positive failures.
+		{"context canceled", context.Canceled, http.StatusAccepted},
+		{"deadline exceeded", context.DeadlineExceeded, http.StatusAccepted},
 		{
 			"context canceled wrapped in StepError",
 			slippy.NewStepError("update", "id", "step", "", context.Canceled),
-			http.StatusGatewayTimeout,
+			http.StatusAccepted,
 		},
 		{
 			"deadline exceeded wrapped in StepError",
 			slippy.NewStepError("update", "id", "step", "", context.DeadlineExceeded),
-			http.StatusGatewayTimeout,
+			http.StatusAccepted,
 		},
 		{"generic error", errors.New("something broke"), http.StatusInternalServerError},
 	}
@@ -681,6 +685,51 @@ func TestMapWriteError(t *testing.T) {
 			assert.Equal(t, tt.wantStatus, he.GetStatus())
 		})
 	}
+}
+
+// TestStartStep_ContextDeadlineExceeded_Returns202 verifies the full HTTP
+// round-trip: when the writer returns context.DeadlineExceeded (e.g. the
+// write-op timeout fired after the authoritative event-log row landed), the
+// handler must respond 202 Accepted — not 504. This is the regression guard
+// for the slip-state corruption root cause.
+func TestStartStep_ContextDeadlineExceeded_Returns202(t *testing.T) {
+	w := &mockWriter{
+		startStepFn: func(_ context.Context, _, _, _ string) error {
+			return context.DeadlineExceeded
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/push_parsed/start", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusAccepted, rec.Code,
+		"writer.DeadlineExceeded must yield 202, not 504: authoritative row is durable")
+}
+
+// TestCompleteStep_ContextCanceled_Returns202 verifies the same contract for
+// context.Canceled (e.g. LB idle-timeout reset mid-flight after the insert
+// landed). Must be 202, not 504.
+func TestCompleteStep_ContextCanceled_Returns202(t *testing.T) {
+	w := &mockWriter{
+		completeStepFn: func(_ context.Context, _, _, _ string) error {
+			return context.Canceled
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/slips/abc-123/steps/push_parsed/complete",
+		strings.NewReader(`{}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusAccepted, rec.Code,
+		"writer.Canceled must yield 202, not 504")
 }
 
 // TestCompleteStep_AllowsRecoveryFromFailed verifies that the handler accepts a

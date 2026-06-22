@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"strconv"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -19,6 +21,13 @@ import (
 // writerTracerName is the instrumentation scope for write operations.
 const writerTracerName = "slippy-api/writer"
 
+// defaultWriteOpTimeout is the default bound for a single ClickHouse write
+// (insert + hydrate). Sized to be safely above observed CH async-insert
+// wait (≈120 s) plus merge time (200–500 s), while remaining below the
+// goLib CH max_execution_time (300 s set by the goLib fix). 240 s gives
+// headroom for transient CH slowness without tying up the request indefinitely.
+const defaultWriteOpTimeout = 240 * time.Second
+
 // writeOpTimeout bounds a single ClickHouse write (insert + hydrate). The
 // derived context detaches from the HTTP request ctx so a client disconnect
 // or LB idle-timeout mid-request does not abort an in-flight write — the
@@ -26,8 +35,30 @@ const writerTracerName = "slippy-api/writer"
 // the response makes it back to the caller. Span context is preserved (via
 // context.WithoutCancel), only cancellation is decoupled.
 //
-// Exposed as a var (not const) so tests can shorten it to verify the bound.
-var writeOpTimeout = 15 * time.Second
+// Override at runtime with SLIPPY_WRITE_OP_TIMEOUT (Go duration string,
+// e.g. "300s"). Exposed as a var (not const) so tests can shorten it.
+var writeOpTimeout = initWriteOpTimeout()
+
+// initWriteOpTimeout reads SLIPPY_WRITE_OP_TIMEOUT from the environment.
+// Valid values are Go duration strings (e.g. "240s", "5m"). On parse error
+// the default is used and a warning is logged to stderr at startup.
+func initWriteOpTimeout() time.Duration {
+	if v := os.Getenv("SLIPPY_WRITE_OP_TIMEOUT"); v != "" {
+		// Accept bare seconds as well as full duration strings.
+		if secs, err := strconv.ParseFloat(v, 64); err == nil {
+			return time.Duration(secs * float64(time.Second))
+		}
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+		// Warn but don't fatal — the server can still start with the default.
+		slog.Warn("SLIPPY_WRITE_OP_TIMEOUT is not a valid duration; using default",
+			"value", v,
+			"default", defaultWriteOpTimeout,
+		)
+	}
+	return defaultWriteOpTimeout
+}
 
 // writeContext returns a context for a single durable write: detached from
 // the request ctx's cancellation signal, bounded by writeOpTimeout, otel
@@ -175,6 +206,12 @@ func (a *SlipWriterAdapter) StartStep(ctx context.Context, correlationID, stepNa
 					wctx, correlationID, stepName, slippy.StepStatusRunning, writtenAt,
 				); err != nil {
 					span.AddEvent("hydration failed", trace.WithAttributes(attribute.String("error", err.Error())))
+					slog.WarnContext(wctx, "writer: cache writeback failed (non-fatal); slip self-heals on next Load",
+						"op", "StartStep",
+						"correlation_id", correlationID,
+						"step_name", stepName,
+						"error", err,
+					)
 				}
 			}
 			return nil
@@ -213,6 +250,12 @@ func (a *SlipWriterAdapter) CompleteStep(ctx context.Context, correlationID, ste
 					wctx, correlationID, stepName, slippy.StepStatusCompleted, writtenAt,
 				); err != nil {
 					span.AddEvent("hydration failed", trace.WithAttributes(attribute.String("error", err.Error())))
+					slog.WarnContext(wctx, "writer: cache writeback failed (non-fatal); slip self-heals on next Load",
+						"op", "CompleteStep",
+						"correlation_id", correlationID,
+						"step_name", stepName,
+						"error", err,
+					)
 				}
 			}
 			return nil
@@ -252,6 +295,12 @@ func (a *SlipWriterAdapter) FailStep(ctx context.Context, correlationID, stepNam
 					wctx, correlationID, stepName, slippy.StepStatusFailed, writtenAt,
 				); err != nil {
 					span.AddEvent("hydration failed", trace.WithAttributes(attribute.String("error", err.Error())))
+					slog.WarnContext(wctx, "writer: cache writeback failed (non-fatal); slip self-heals on next Load",
+						"op", "FailStep",
+						"correlation_id", correlationID,
+						"step_name", stepName,
+						"error", err,
+					)
 				}
 			}
 			return nil
@@ -276,6 +325,12 @@ func (a *SlipWriterAdapter) SkipStep(ctx context.Context, correlationID, stepNam
 					wctx, correlationID, stepName, slippy.StepStatusSkipped, writtenAt,
 				); err != nil {
 					span.AddEvent("hydration failed", trace.WithAttributes(attribute.String("error", err.Error())))
+					slog.WarnContext(wctx, "writer: cache writeback failed (non-fatal); slip self-heals on next Load",
+						"op", "SkipStep",
+						"correlation_id", correlationID,
+						"step_name", stepName,
+						"error", err,
+					)
 				}
 			}
 			return nil
