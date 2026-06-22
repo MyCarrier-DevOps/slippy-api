@@ -659,21 +659,24 @@ func TestMapWriteError(t *testing.T) {
 			fmt.Errorf("dedup: slip for repo:sha creation in progress, retry: %w", domain.ErrCreationInProgress),
 			http.StatusConflict,
 		},
-		// context.Canceled / context.DeadlineExceeded map to 202 Accepted (not 504):
-		// the authoritative event-log row has already landed durably; the cache
-		// writeback may be pending but self-heals on next Load. 202 tells the CLI
-		// "accepted — no retry needed", eliminating false-positive failures.
-		{"context canceled", context.Canceled, http.StatusAccepted},
-		{"deadline exceeded", context.DeadlineExceeded, http.StatusAccepted},
+		// context.Canceled / context.DeadlineExceeded map to 504 GatewayTimeout:
+		// a deadline that reaches mapWriteError means the AUTHORITATIVE insert
+		// (slip_component_states) did not land. goLibMyCarrier's UpdateStepWithHistory
+		// swallows cache-writeback errors internally; any context error surfaced here
+		// is therefore from the insert itself. 504 is retryable so the CLI re-POSTs,
+		// preventing silent data loss. 202 would be wrong: it would tell the CLI the
+		// write succeeded when it did not.
+		{"context canceled", context.Canceled, http.StatusGatewayTimeout},
+		{"deadline exceeded", context.DeadlineExceeded, http.StatusGatewayTimeout},
 		{
 			"context canceled wrapped in StepError",
 			slippy.NewStepError("update", "id", "step", "", context.Canceled),
-			http.StatusAccepted,
+			http.StatusGatewayTimeout,
 		},
 		{
 			"deadline exceeded wrapped in StepError",
 			slippy.NewStepError("update", "id", "step", "", context.DeadlineExceeded),
-			http.StatusAccepted,
+			http.StatusGatewayTimeout,
 		},
 		{"generic error", errors.New("something broke"), http.StatusInternalServerError},
 	}
@@ -687,12 +690,14 @@ func TestMapWriteError(t *testing.T) {
 	}
 }
 
-// TestStartStep_ContextDeadlineExceeded_Returns202 verifies the full HTTP
-// round-trip: when the writer returns context.DeadlineExceeded (e.g. the
-// write-op timeout fired after the authoritative event-log row landed), the
-// handler must respond 202 Accepted — not 504. This is the regression guard
-// for the slip-state corruption root cause.
-func TestStartStep_ContextDeadlineExceeded_Returns202(t *testing.T) {
+// TestStartStep_ContextDeadlineExceeded_Returns504 verifies the full HTTP
+// round-trip: when the writer returns context.DeadlineExceeded the handler must
+// respond 504 GatewayTimeout, not 202. A deadline reaching mapWriteError means
+// the authoritative insert (slip_component_states) did NOT land — the write-op
+// timeout fired before the row was durable. 504 is retryable; the CLI re-POSTs
+// to prevent silent data loss. This is the regression guard against the
+// incorrectly-added 202 branch.
+func TestStartStep_ContextDeadlineExceeded_Returns504(t *testing.T) {
 	w := &mockWriter{
 		startStepFn: func(_ context.Context, _, _, _ string) error {
 			return context.DeadlineExceeded
@@ -704,14 +709,13 @@ func TestStartStep_ContextDeadlineExceeded_Returns202(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusAccepted, rec.Code,
-		"writer.DeadlineExceeded must yield 202, not 504: authoritative row is durable")
+	assert.Equal(t, http.StatusGatewayTimeout, rec.Code,
+		"writer.DeadlineExceeded must yield 504: authoritative row did not land, CLI must retry")
 }
 
-// TestCompleteStep_ContextCanceled_Returns202 verifies the same contract for
-// context.Canceled (e.g. LB idle-timeout reset mid-flight after the insert
-// landed). Must be 202, not 504.
-func TestCompleteStep_ContextCanceled_Returns202(t *testing.T) {
+// TestCompleteStep_ContextCanceled_Returns504 verifies the same contract for
+// context.Canceled. Must be 504 (retryable), not 202 (silent data loss).
+func TestCompleteStep_ContextCanceled_Returns504(t *testing.T) {
 	w := &mockWriter{
 		completeStepFn: func(_ context.Context, _, _, _ string) error {
 			return context.Canceled
@@ -728,8 +732,8 @@ func TestCompleteStep_ContextCanceled_Returns202(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusAccepted, rec.Code,
-		"writer.Canceled must yield 202, not 504")
+	assert.Equal(t, http.StatusGatewayTimeout, rec.Code,
+		"writer.Canceled must yield 504, not 202: CLI must retry on lost write")
 }
 
 // TestCompleteStep_AllowsRecoveryFromFailed verifies that the handler accepts a

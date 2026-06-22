@@ -729,6 +729,54 @@ func TestWriteOpTimeout_DefaultIs240s(t *testing.T) {
 		"writeOpTimeout must be at least 240s in a clean test environment")
 }
 
+// TestInitWriteOpTimeout_ZeroFallsBackToDefault verifies that
+// SLIPPY_WRITE_OP_TIMEOUT=0 is rejected by the floor check and falls back to
+// defaultWriteOpTimeout. A zero timeout would make context.WithTimeout expire
+// instantly, causing every write to fail before the query is even sent.
+func TestInitWriteOpTimeout_ZeroFallsBackToDefault(t *testing.T) {
+	t.Setenv("SLIPPY_WRITE_OP_TIMEOUT", "0")
+	got := initWriteOpTimeout()
+	assert.Equal(t, defaultWriteOpTimeout, got,
+		"SLIPPY_WRITE_OP_TIMEOUT=0 must fall back to default (floor is 1s)")
+}
+
+// TestInitWriteOpTimeout_NegativeFallsBackToDefault verifies that a negative
+// value (e.g. -5) is rejected and falls back to defaultWriteOpTimeout.
+func TestInitWriteOpTimeout_NegativeFallsBackToDefault(t *testing.T) {
+	t.Setenv("SLIPPY_WRITE_OP_TIMEOUT", "-5")
+	got := initWriteOpTimeout()
+	assert.Equal(t, defaultWriteOpTimeout, got,
+		"SLIPPY_WRITE_OP_TIMEOUT=-5 must fall back to default (floor is 1s)")
+}
+
+// TestInitWriteOpTimeout_ValidValueIsAccepted verifies that a valid value
+// within [minWriteOpTimeout, maxWriteOpTimeout] is accepted as-is.
+func TestInitWriteOpTimeout_ValidValueIsAccepted(t *testing.T) {
+	t.Setenv("SLIPPY_WRITE_OP_TIMEOUT", "30s")
+	got := initWriteOpTimeout()
+	assert.Equal(t, 30*time.Second, got,
+		"SLIPPY_WRITE_OP_TIMEOUT=30s must be accepted")
+}
+
+// TestInitWriteOpTimeout_AbsurdUpperBoundFallsBackToDefault verifies that an
+// absurdly large value (e.g. 700s, above the 600s ceiling) falls back to the
+// default rather than tying up a handler indefinitely.
+func TestInitWriteOpTimeout_AbsurdUpperBoundFallsBackToDefault(t *testing.T) {
+	t.Setenv("SLIPPY_WRITE_OP_TIMEOUT", "700s")
+	got := initWriteOpTimeout()
+	assert.Equal(t, defaultWriteOpTimeout, got,
+		"SLIPPY_WRITE_OP_TIMEOUT=700s must fall back to default (ceiling is 600s)")
+}
+
+// TestInitWriteOpTimeout_UnsetReturnsDefault verifies that when the env var is
+// absent, initWriteOpTimeout returns defaultWriteOpTimeout.
+func TestInitWriteOpTimeout_UnsetReturnsDefault(t *testing.T) {
+	t.Setenv("SLIPPY_WRITE_OP_TIMEOUT", "")
+	got := initWriteOpTimeout()
+	assert.Equal(t, defaultWriteOpTimeout, got,
+		"unset SLIPPY_WRITE_OP_TIMEOUT must return defaultWriteOpTimeout")
+}
+
 // TestSlipWriterAdapter_HydrateAndPersist_TimeoutNonFatal_AfterClientWrite
 // verifies that a slow/timing-out hydrateAndPersist (simulated by shortening
 // writeOpTimeout and having the Load block longer than the timeout) does NOT

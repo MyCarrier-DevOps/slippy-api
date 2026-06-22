@@ -543,15 +543,17 @@ func mapWriteError(err error) error {
 			"slip creation already in progress for this commit; duplicate suppressed",
 		)
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		// The authoritative event-log insert (slip_component_states) is durable and
-		// succeeded before the write-context deadline fired (the goLib fix makes the
-		// aggregate cache writeback best-effort). The routing_slips cache write
-		// self-heals on the next Load via hydrateSlip/argMax. Returning 202 Accepted
-		// tells the CLI that the event was recorded and retrying is not needed,
-		// eliminating the hard-fail that was causing slip-state corruption.
+		// A context deadline/cancellation that reaches mapWriteError means the
+		// AUTHORITATIVE event-log insert (slip_component_states) did NOT land —
+		// the write-op timeout fired before the insert completed. goLibMyCarrier's
+		// UpdateStepWithHistory now swallows cache-writeback errors internally and
+		// returns nil on success, so a nil error from the writer means the row is
+		// durable. Any context error surfaced here is therefore from the insert
+		// itself, not from the best-effort cache writeback. Returning 504 (retryable)
+		// tells the CLI to reconcile and re-POST, preventing silent data loss.
 		// Without this branch the error would unwrap into *StepError/*SlipError and
 		// surface as a misleading 422.
-		return huma.NewError(http.StatusAccepted, "write accepted; cache writeback pending")
+		return huma.NewError(http.StatusGatewayTimeout, "upstream timeout")
 	default:
 		if strings.Contains(err.Error(), "invalid push options") {
 			return huma.NewError(http.StatusBadRequest, err.Error())

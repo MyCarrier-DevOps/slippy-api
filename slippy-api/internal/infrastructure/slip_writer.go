@@ -39,23 +39,64 @@ const defaultWriteOpTimeout = 240 * time.Second
 // e.g. "300s"). Exposed as a var (not const) so tests can shorten it.
 var writeOpTimeout = initWriteOpTimeout()
 
+// minWriteOpTimeout is the minimum accepted value for SLIPPY_WRITE_OP_TIMEOUT.
+// Any parsed value below this floor (including 0 and negatives) is rejected:
+// a zero-or-negative timeout makes context.WithTimeout expire instantly,
+// causing every write to fail before the ClickHouse driver even sends the query.
+const minWriteOpTimeout = 1 * time.Second
+
+// maxWriteOpTimeout is the ceiling for SLIPPY_WRITE_OP_TIMEOUT. Values above
+// this are almost certainly a misconfiguration (e.g. unit confusion); cap them
+// to keep requests from hanging indefinitely.
+const maxWriteOpTimeout = 600 * time.Second
+
 // initWriteOpTimeout reads SLIPPY_WRITE_OP_TIMEOUT from the environment.
-// Valid values are Go duration strings (e.g. "240s", "5m"). On parse error
-// the default is used and a warning is logged to stderr at startup.
+// Valid values are Go duration strings (e.g. "240s", "5m") or bare seconds.
+// On parse error, or when the parsed value is outside [minWriteOpTimeout,
+// maxWriteOpTimeout], the default is used and a warning is logged at startup.
 func initWriteOpTimeout() time.Duration {
 	if v := os.Getenv("SLIPPY_WRITE_OP_TIMEOUT"); v != "" {
+		var d time.Duration
+		parsed := false
 		// Accept bare seconds as well as full duration strings.
 		if secs, err := strconv.ParseFloat(v, 64); err == nil {
-			return time.Duration(secs * float64(time.Second))
+			d = time.Duration(secs * float64(time.Second))
+			parsed = true
+		} else if dur, err := time.ParseDuration(v); err == nil {
+			d = dur
+			parsed = true
 		}
-		if d, err := time.ParseDuration(v); err == nil {
-			return d
+
+		if !parsed {
+			// Warn but don't fatal — the server can still start with the default.
+			slog.Warn("SLIPPY_WRITE_OP_TIMEOUT is not a valid duration; using default",
+				"value", v,
+				"default", defaultWriteOpTimeout,
+			)
+			return defaultWriteOpTimeout
 		}
-		// Warn but don't fatal — the server can still start with the default.
-		slog.Warn("SLIPPY_WRITE_OP_TIMEOUT is not a valid duration; using default",
-			"value", v,
-			"default", defaultWriteOpTimeout,
-		)
+
+		if d < minWriteOpTimeout {
+			slog.Warn("SLIPPY_WRITE_OP_TIMEOUT is below minimum floor; using default",
+				"value", v,
+				"parsed", d,
+				"floor", minWriteOpTimeout,
+				"default", defaultWriteOpTimeout,
+			)
+			return defaultWriteOpTimeout
+		}
+
+		if d > maxWriteOpTimeout {
+			slog.Warn("SLIPPY_WRITE_OP_TIMEOUT exceeds maximum ceiling; using default",
+				"value", v,
+				"parsed", d,
+				"ceiling", maxWriteOpTimeout,
+				"default", defaultWriteOpTimeout,
+			)
+			return defaultWriteOpTimeout
+		}
+
+		return d
 	}
 	return defaultWriteOpTimeout
 }
@@ -206,11 +247,19 @@ func (a *SlipWriterAdapter) StartStep(ctx context.Context, correlationID, stepNa
 					wctx, correlationID, stepName, slippy.StepStatusRunning, writtenAt,
 				); err != nil {
 					span.AddEvent("hydration failed", trace.WithAttributes(attribute.String("error", err.Error())))
-					slog.WarnContext(wctx, "writer: cache writeback failed (non-fatal); slip self-heals on next Load",
-						"op", "StartStep",
-						"correlation_id", correlationID,
-						"step_name", stepName,
-						"error", err,
+					// STATUS self-heals on next Load (hydrateSlip recomputes from event log).
+					// state_history is NOT reconstructed — this transition's audit entry is lost.
+					slog.WarnContext(
+						wctx,
+						"writer: cache writeback failed (non-fatal); status self-heals, state_history lost",
+						"op",
+						"StartStep",
+						"correlation_id",
+						correlationID,
+						"step_name",
+						stepName,
+						"error",
+						err,
 					)
 				}
 			}
@@ -250,11 +299,19 @@ func (a *SlipWriterAdapter) CompleteStep(ctx context.Context, correlationID, ste
 					wctx, correlationID, stepName, slippy.StepStatusCompleted, writtenAt,
 				); err != nil {
 					span.AddEvent("hydration failed", trace.WithAttributes(attribute.String("error", err.Error())))
-					slog.WarnContext(wctx, "writer: cache writeback failed (non-fatal); slip self-heals on next Load",
-						"op", "CompleteStep",
-						"correlation_id", correlationID,
-						"step_name", stepName,
-						"error", err,
+					// STATUS self-heals on next Load (hydrateSlip recomputes from event log).
+					// state_history is NOT reconstructed — this transition's audit entry is lost.
+					slog.WarnContext(
+						wctx,
+						"writer: cache writeback failed (non-fatal); status self-heals, state_history lost",
+						"op",
+						"CompleteStep",
+						"correlation_id",
+						correlationID,
+						"step_name",
+						stepName,
+						"error",
+						err,
 					)
 				}
 			}
@@ -295,11 +352,19 @@ func (a *SlipWriterAdapter) FailStep(ctx context.Context, correlationID, stepNam
 					wctx, correlationID, stepName, slippy.StepStatusFailed, writtenAt,
 				); err != nil {
 					span.AddEvent("hydration failed", trace.WithAttributes(attribute.String("error", err.Error())))
-					slog.WarnContext(wctx, "writer: cache writeback failed (non-fatal); slip self-heals on next Load",
-						"op", "FailStep",
-						"correlation_id", correlationID,
-						"step_name", stepName,
-						"error", err,
+					// STATUS self-heals on next Load (hydrateSlip recomputes from event log).
+					// state_history is NOT reconstructed — this transition's audit entry is lost.
+					slog.WarnContext(
+						wctx,
+						"writer: cache writeback failed (non-fatal); status self-heals, state_history lost",
+						"op",
+						"FailStep",
+						"correlation_id",
+						correlationID,
+						"step_name",
+						stepName,
+						"error",
+						err,
 					)
 				}
 			}
@@ -325,11 +390,19 @@ func (a *SlipWriterAdapter) SkipStep(ctx context.Context, correlationID, stepNam
 					wctx, correlationID, stepName, slippy.StepStatusSkipped, writtenAt,
 				); err != nil {
 					span.AddEvent("hydration failed", trace.WithAttributes(attribute.String("error", err.Error())))
-					slog.WarnContext(wctx, "writer: cache writeback failed (non-fatal); slip self-heals on next Load",
-						"op", "SkipStep",
-						"correlation_id", correlationID,
-						"step_name", stepName,
-						"error", err,
+					// STATUS self-heals on next Load (hydrateSlip recomputes from event log).
+					// state_history is NOT reconstructed — this transition's audit entry is lost.
+					slog.WarnContext(
+						wctx,
+						"writer: cache writeback failed (non-fatal); status self-heals, state_history lost",
+						"op",
+						"SkipStep",
+						"correlation_id",
+						correlationID,
+						"step_name",
+						stepName,
+						"error",
+						err,
 					)
 				}
 			}
