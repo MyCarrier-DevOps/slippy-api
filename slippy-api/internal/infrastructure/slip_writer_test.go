@@ -1291,6 +1291,57 @@ func TestOverlayPipelineStep_R1_NoEventsYet_AppliesNormally(t *testing.T) {
 	assert.Equal(t, slippy.StepStatusCompleted, slip.Steps["dev_tests"].Status)
 }
 
+// TestOverlayPipelineStep_R2_BothTerminalDiverge_EventLogWins covers the PR #39
+// review finding: a same-µs race where both writers send terminal but DIFFER
+// (e.g. completed vs failed). argMax in ClickHouse resolves to failed (status_int
+// tiebreak 5 > 4) but without this branch, the OTHER writer's overlay would pin
+// its caller-supplied terminal status into routing_slips.<step>_status, briefly
+// disagreeing with argMax truth.
+//
+// Contract: when event-log status is terminal AND caller status is terminal AND
+// they differ, the overlay pins the EVENT-LOG status (substitutes into the
+// step's transition + the *_status override) so the *_status column matches the
+// argMax-resolved row.
+func TestOverlayPipelineStep_R2_BothTerminalDiverge_EventLogWins(t *testing.T) {
+	slip := &slippy.Slip{
+		Steps: map[string]slippy.Step{
+			// CompletedAt nil so the in-memory guard would otherwise have allowed
+			// the caller's terminal overlay through. The R2 divergence branch is
+			// the only thing forcing event-log wins.
+			"dev_tests": {Status: slippy.StepStatusRunning, CompletedAt: nil},
+		},
+	}
+	// Caller wrote completed; event log shows failed (the argMax-winning row).
+	applied := overlayPipelineStep(
+		slip, "dev_tests", slippy.StepStatusCompleted, time.Now(),
+		eventLogReturns(slippy.StepStatusFailed),
+	)
+	assert.True(t, applied,
+		"divergent terminals: overlay MUST still apply so the pin path runs with event-log truth")
+	assert.Equal(t, slippy.StepStatusFailed, slip.Steps["dev_tests"].Status,
+		"divergent terminals: overlay MUST substitute event-log status (failed) for caller status (completed)")
+	require.NotNil(t, slip.Steps["dev_tests"].CompletedAt,
+		"divergent-terminal overlay must set CompletedAt via ApplyStatusTransition")
+}
+
+// TestOverlayPipelineStep_R2_BothTerminalAgree_AppliesNormally is the negative
+// control: when caller and event log agree on the same terminal status, the
+// divergence branch does NOT fire and the overlay applies the caller status
+// (which equals the event-log status) as a normal terminal pin.
+func TestOverlayPipelineStep_R2_BothTerminalAgree_AppliesNormally(t *testing.T) {
+	slip := &slippy.Slip{
+		Steps: map[string]slippy.Step{
+			"dev_tests": {Status: slippy.StepStatusRunning, CompletedAt: nil},
+		},
+	}
+	applied := overlayPipelineStep(
+		slip, "dev_tests", slippy.StepStatusCompleted, time.Now(),
+		eventLogReturns(slippy.StepStatusCompleted),
+	)
+	assert.True(t, applied)
+	assert.Equal(t, slippy.StepStatusCompleted, slip.Steps["dev_tests"].Status)
+}
+
 // TestHydrateAndPersist_StartStep_DoesNotClobberTerminalStatus is the F1 end-to-end
 // regression test via the real hydrateAndPersist path. Reproduces the production
 // scenario from slip b058127d where a second StartStep arrived 3 minutes after

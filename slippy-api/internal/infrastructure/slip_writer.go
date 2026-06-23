@@ -834,10 +834,20 @@ func overlayPipelineStep(
 		return false
 	}
 
-	// R1: consult the event log. Three branches:
+	// R1: consult the event log. Four branches:
 	//   err != nil → fail-open; fall through to in-memory CompletedAt guard.
 	//   !found     → no event rows yet → apply overlay (first-event).
 	//   found      → if event-log terminal AND caller non-terminal → DROP.
+	//   found      → if BOTH terminal but DIFFER → pin event-log truth (R2 PR #39).
+	//
+	// The both-terminal-divergence branch closes a same-µs race where two
+	// terminal writers (e.g. completed vs failed) race the argMax tiebreak
+	// (`timestamp_micros*100 + toUInt8(status)`). The argMax resolves to one
+	// status (failed=5 > completed=4) but the OTHER writer's overlay would
+	// still pin its caller-supplied terminal status into the routing_slips
+	// *_status column, briefly disagreeing with argMax truth until the next
+	// hydrate. Pinning the event-log status here keeps the overlay aligned
+	// with argMax even in the divergent-terminal race window.
 	if latestStatus != nil {
 		eventStatus, found, err := latestStatus()
 		switch {
@@ -849,6 +859,19 @@ func overlayPipelineStep(
 			// the I5 fix: event log says terminal, caller is writing non-terminal.
 			// Drop the overlay so the caller-side R2 logic also skips the override.
 			return false
+		case eventStatus.IsTerminal() && status.IsTerminal() && eventStatus != status:
+			// Both terminal but disagree (same-µs race). Event log is authoritative
+			// (it reflects the argMax tiebreak). Substitute eventStatus for the
+			// caller's terminal so the overlay pin matches the argMax-resolved
+			// *_status column. WARN log gives operators a signal to investigate
+			// the upstream producer that emitted the losing terminal.
+			slog.Warn("I5_overlay_terminal_divergence",
+				slog.String("step", stepName),
+				slog.String("caller_status", string(status)),
+				slog.String("event_log_status", string(eventStatus)),
+				slog.Time("written_at", writtenAt),
+			)
+			status = eventStatus
 		}
 	}
 
