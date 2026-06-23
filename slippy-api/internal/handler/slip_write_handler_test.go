@@ -659,13 +659,18 @@ func TestMapWriteError(t *testing.T) {
 			fmt.Errorf("dedup: slip for repo:sha creation in progress, retry: %w", domain.ErrCreationInProgress),
 			http.StatusConflict,
 		},
-		// context.Canceled / context.DeadlineExceeded map to 504 GatewayTimeout:
-		// a deadline that reaches mapWriteError means the AUTHORITATIVE insert
-		// (slip_component_states) did not land. goLibMyCarrier's UpdateStepWithHistory
-		// swallows cache-writeback errors internally; any context error surfaced here
-		// is therefore from the insert itself. 504 is retryable so the CLI re-POSTs,
-		// preventing silent data loss. 202 would be wrong: it would tell the CLI the
-		// write succeeded when it did not.
+		// context.Canceled / context.DeadlineExceeded map to 504 GatewayTimeout.
+		// These errors are only produced for insert-failure paths (start/skip and
+		// pipeline-level complete/fail where componentName == ""), where a write-op
+		// timeout fires before UpdateStepWithHistory lands the row.
+		//
+		// For component-level complete/fail (componentName != ""), the adapter routes
+		// through goLib RunPostExecution: the durable insert runs first, then
+		// checkPipelineCompletion is called on the same write-op context. A timeout
+		// inside checkPipelineCompletion is wrapped by goLib as ErrSlipNotFound or
+		// ErrSlipStatusUpdateFailed (see cases above) — so a raw context error is NOT
+		// produced for that sub-path, and the component row is always durable when
+		// those 404/500 errors surface. See TestComponentCompletePath_GoLibWraps* below.
 		{"context canceled", context.Canceled, http.StatusGatewayTimeout},
 		{"deadline exceeded", context.DeadlineExceeded, http.StatusGatewayTimeout},
 		{
@@ -734,6 +739,64 @@ func TestCompleteStep_ContextCanceled_Returns504(t *testing.T) {
 
 	assert.Equal(t, http.StatusGatewayTimeout, rec.Code,
 		"writer.Canceled must yield 504, not 202: CLI must retry on lost write")
+}
+
+// TestComponentCompletePath_GoLibWrapsCheckPipelineCompletion_404 documents the
+// REAL error path for component-level Complete when the post-insert pipeline
+// completion check times out or cannot find the slip.
+//
+// goLib executor.go RunPostExecution calls client.CompleteStep (durable insert)
+// first, then checkPipelineCompletion on the same write-op context. A timeout
+// inside checkPipelineCompletion wraps the error as ErrSlipNotFound:
+//
+//	return false, "", fmt.Errorf("%w: failed to load slip for completion check: %s", ErrSlipNotFound, err)
+//
+// That wraps up through RunPostExecution as
+// "post-execution completed but pipeline status update failed: %w". So when
+// mapWriteError sees an ErrSlipNotFound it produces 404, not 504. The component
+// row is already durable at that point; step/aggregate status self-heals on
+// the next Load. The slip-level completion not advancing is a known gap tracked
+// as a follow-up (derive slip-completion on read).
+func TestComponentCompletePath_GoLibWrapsCheckPipelineCompletion_404(t *testing.T) {
+	// Simulate goLib RunPostExecution returning the wrapped ErrSlipNotFound that
+	// checkPipelineCompletion produces when store.Load times out after the
+	// authoritative component insert has already landed.
+	wrappedErr := fmt.Errorf("post-execution completed but pipeline status update failed: %w",
+		fmt.Errorf("%w: failed to load slip for completion check: context deadline exceeded", slippy.ErrSlipNotFound),
+	)
+
+	humaErr := mapWriteError(wrappedErr)
+	var he huma.StatusError
+	require.ErrorAs(t, humaErr, &he)
+	assert.Equal(t, http.StatusNotFound, he.GetStatus(),
+		"goLib wraps checkPipelineCompletion timeout as ErrSlipNotFound → 404; "+
+			"component row is durable, this is NOT a retryable insert failure (not 504)")
+}
+
+// TestComponentCompletePath_GoLibWrapsCheckPipelineCompletion_500 documents the
+// parallel path where the completion-check load succeeds but the subsequent slip
+// status update fails. goLib wraps that as ErrSlipStatusUpdateFailed:
+//
+//	return false, SlipStatusFailed, fmt.Errorf("%w: %s", ErrSlipStatusUpdateFailed, err.Error())
+//
+// mapWriteError has no explicit case for ErrSlipStatusUpdateFailed, so it falls
+// to the default StepError/SlipError branches (422) or the generic 500. The
+// component row is already durable; the slip status will converge on the next
+// checkPipelineCompletion call.
+func TestComponentCompletePath_GoLibWrapsCheckPipelineCompletion_500(t *testing.T) {
+	// Simulate goLib RunPostExecution returning the wrapped ErrSlipStatusUpdateFailed
+	// that checkPipelineCompletion produces when the slip-status UPDATE itself fails
+	// after the authoritative component insert already landed.
+	wrappedErr := fmt.Errorf("post-execution completed but pipeline status update failed: %w",
+		fmt.Errorf("%w: clickhouse: write timeout", slippy.ErrSlipStatusUpdateFailed),
+	)
+
+	humaErr := mapWriteError(wrappedErr)
+	var he huma.StatusError
+	require.ErrorAs(t, humaErr, &he)
+	assert.Equal(t, http.StatusInternalServerError, he.GetStatus(),
+		"goLib wraps checkPipelineCompletion slip-status-update failure as ErrSlipStatusUpdateFailed → 500; "+
+			"component row is durable, slip status self-heals on next event")
 }
 
 // TestCompleteStep_AllowsRecoveryFromFailed verifies that the handler accepts a
