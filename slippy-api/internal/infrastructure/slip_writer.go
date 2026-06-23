@@ -739,19 +739,24 @@ func (a *SlipWriterAdapter) hydrateAndPersist(
 		}
 		return status, found, err
 	}
-	applied := overlayPipelineStep(slip, stepName, status, writtenAt, latestFn)
+	applied, resolved := overlayPipelineStep(slip, stepName, status, writtenAt, latestFn)
 
-	// R2 Option D: when the overlay applied (caller's status is the authoritative
-	// truth for THIS step), pin the routing_slips.<step>_status column and the
-	// step_details.<step>.status JSON value to the caller-supplied status via
-	// StepStatusOverride. When the overlay was dropped (event log already
-	// terminal, caller wrote non-terminal), pass no override so Update falls back
-	// to slip.Steps[name].Status — which still reflects event-log truth from
+	// R2 Option D: when the overlay applied, pin the routing_slips.<step>_status
+	// column and the step_details.<step>.status JSON value to the RESOLVED
+	// status (NOT the original caller-supplied status). resolved equals the
+	// caller's status in the common case; in the divergent-terminal race
+	// (R2 PR #39: both writers terminal but different), resolved is the
+	// event-log status — the argMax winner — so the *_status column stays
+	// aligned with the materialized event-log row.
+	//
+	// When the overlay was dropped (event log already terminal, caller wrote
+	// non-terminal), pass no override so Update falls back to
+	// slip.Steps[name].Status — which still reflects event-log truth from
 	// Load because overlay was skipped without mutation.
 	var overrides []slippy.StepStatusOverride
 	if applied {
 		overrides = []slippy.StepStatusOverride{
-			{ColumnName: slippy.StepStatusColumnName(stepName), Status: status},
+			{ColumnName: slippy.StepStatusColumnName(stepName), Status: resolved},
 		}
 	}
 	if err := a.client.Store().Update(ctx, slip, overrides...); err != nil {
@@ -823,22 +828,32 @@ type latestStepStatusFn func() (slippy.StepStatus, bool, error)
 // Mirrors the sentinel-path logic of goLibMyCarrier's overlayComponentState.
 // Duplication is intentional: overlayComponentState is an unexported function
 // and cannot be called from this module. Both functions must stay in sync.
+// Returns (applied, resolved):
+//   - applied: true when ApplyStatusTransition ran and the step in slip.Steps
+//     reflects the just-written truth.
+//   - resolved: the status that was actually pinned. Equals the caller's
+//     `status` argument except in the divergent-terminal branch, where it
+//     equals the event-log status (the argMax winner). Callers MUST use
+//     resolved (NOT their original `status`) when building the
+//     StepStatusOverride for the *_status column, otherwise the column
+//     drifts from argMax in the divergent-terminal race window.
+//   - When applied=false, resolved is unspecified; callers MUST NOT use it.
 func overlayPipelineStep(
 	slip *slippy.Slip,
 	stepName string,
 	status slippy.StepStatus,
 	writtenAt time.Time,
 	latestStatus latestStepStatusFn,
-) (applied bool) {
+) (applied bool, resolved slippy.StepStatus) {
 	if slip == nil {
-		return false
+		return false, ""
 	}
 	if slip.Steps == nil {
-		return false
+		return false, ""
 	}
 	step, ok := slip.Steps[stepName]
 	if !ok {
-		return false
+		return false, ""
 	}
 
 	// R1: consult the event log. Four branches:
@@ -865,7 +880,7 @@ func overlayPipelineStep(
 		case eventStatus.IsTerminal() && !status.IsTerminal():
 			// the I5 fix: event log says terminal, caller is writing non-terminal.
 			// Drop the overlay so the caller-side R2 logic also skips the override.
-			return false
+			return false, ""
 		case eventStatus.IsTerminal() && status.IsTerminal() && eventStatus != status:
 			// Both terminal but disagree (same-µs race). Event log is authoritative
 			// (it reflects the argMax tiebreak). Substitute eventStatus for the
@@ -885,14 +900,14 @@ func overlayPipelineStep(
 	// Defensive in-memory guard (fail-open fallback when latestStatus errored or
 	// is nil, e.g. in older unit-test fixtures that have not been migrated yet).
 	if !status.IsTerminal() && step.CompletedAt != nil {
-		return false
+		return false, ""
 	}
 	if step.CompletedAt == nil || writtenAt.After(*step.CompletedAt) {
 		step.ApplyStatusTransition(status, writtenAt)
 		slip.Steps[stepName] = step
-		return true
+		return true, status
 	}
-	return false
+	return false, ""
 }
 
 // recordWriterError records an error on a span, distinguishing client errors

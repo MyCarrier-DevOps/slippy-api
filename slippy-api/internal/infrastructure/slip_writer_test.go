@@ -1161,7 +1161,7 @@ func eventLogReturns(status slippy.StepStatus) latestStepStatusFn {
 // called with a nil slip (defensive guard, mirrors overlayComponentState nil check).
 func TestOverlayPipelineStep_NilSlip(t *testing.T) {
 	// Must not panic. Returns false (no overlay applied).
-	applied := overlayPipelineStep(nil, "dev_tests", slippy.StepStatusCompleted, time.Now(), noEventLog)
+	applied, _ := overlayPipelineStep(nil, "dev_tests", slippy.StepStatusCompleted, time.Now(), noEventLog)
 	assert.False(t, applied)
 }
 
@@ -1171,7 +1171,7 @@ func TestOverlayPipelineStep_MissingStep(t *testing.T) {
 	slip := &slippy.Slip{
 		Steps: map[string]slippy.Step{},
 	}
-	applied := overlayPipelineStep(slip, "nonexistent_step", slippy.StepStatusCompleted, time.Now(), noEventLog)
+	applied, _ := overlayPipelineStep(slip, "nonexistent_step", slippy.StepStatusCompleted, time.Now(), noEventLog)
 	assert.False(t, applied)
 	// No panic, no entry added.
 	assert.Empty(t, slip.Steps)
@@ -1186,8 +1186,9 @@ func TestOverlayPipelineStep_NilCompletedAt(t *testing.T) {
 		},
 	}
 	now := time.Now()
-	applied := overlayPipelineStep(slip, "dev_tests", slippy.StepStatusCompleted, now, noEventLog)
+	applied, resolved := overlayPipelineStep(slip, "dev_tests", slippy.StepStatusCompleted, now, noEventLog)
 	assert.True(t, applied)
+	assert.Equal(t, slippy.StepStatusCompleted, resolved, "non-divergent overlay returns caller status as resolved")
 	assert.Equal(t, slippy.StepStatusCompleted, slip.Steps["dev_tests"].Status)
 	require.NotNil(t, slip.Steps["dev_tests"].CompletedAt)
 }
@@ -1202,8 +1203,9 @@ func TestOverlayPipelineStep_OlderCompletedAt(t *testing.T) {
 		},
 	}
 	now := time.Now()
-	applied := overlayPipelineStep(slip, "dev_tests", slippy.StepStatusCompleted, now, noEventLog)
+	applied, resolved := overlayPipelineStep(slip, "dev_tests", slippy.StepStatusCompleted, now, noEventLog)
 	assert.True(t, applied)
+	assert.Equal(t, slippy.StepStatusCompleted, resolved)
 	assert.Equal(t, slippy.StepStatusCompleted, slip.Steps["dev_tests"].Status)
 }
 
@@ -1222,7 +1224,7 @@ func TestOverlayPipelineStep_RunningDoesNotClobberTerminal(t *testing.T) {
 		},
 	}
 	// R1: event log says completed. Caller writes running → overlay dropped.
-	applied := overlayPipelineStep(
+	applied, _ := overlayPipelineStep(
 		slip, "dev_tests", slippy.StepStatusRunning, time.Now(),
 		eventLogReturns(slippy.StepStatusCompleted),
 	)
@@ -1253,7 +1255,7 @@ func TestOverlayPipelineStep_R1_EventLogTerminalBlocksNonTerminal(t *testing.T) 
 			"dev_tests": {Status: slippy.StepStatusRunning, CompletedAt: nil},
 		},
 	}
-	applied := overlayPipelineStep(
+	applied, _ := overlayPipelineStep(
 		slip, "dev_tests", slippy.StepStatusRunning, time.Now(),
 		eventLogReturns(slippy.StepStatusCompleted),
 	)
@@ -1273,8 +1275,9 @@ func TestOverlayPipelineStep_R1_EventLogQueryError_FailOpen(t *testing.T) {
 	failingFn := func() (slippy.StepStatus, bool, error) {
 		return "", false, assert.AnError
 	}
-	applied := overlayPipelineStep(slip, "dev_tests", slippy.StepStatusCompleted, time.Now(), failingFn)
+	applied, resolved := overlayPipelineStep(slip, "dev_tests", slippy.StepStatusCompleted, time.Now(), failingFn)
 	assert.True(t, applied, "fail-open: query error must not block a terminal overlay when the in-memory guard would allow it")
+	assert.Equal(t, slippy.StepStatusCompleted, resolved, "fail-open resolved status equals caller status (no event-log substitution)")
 	assert.Equal(t, slippy.StepStatusCompleted, slip.Steps["dev_tests"].Status)
 }
 
@@ -1287,8 +1290,9 @@ func TestOverlayPipelineStep_R1_NoEventsYet_AppliesNormally(t *testing.T) {
 			"dev_tests": {Status: slippy.StepStatusRunning, CompletedAt: nil},
 		},
 	}
-	applied := overlayPipelineStep(slip, "dev_tests", slippy.StepStatusCompleted, time.Now(), noEventLog)
+	applied, resolved := overlayPipelineStep(slip, "dev_tests", slippy.StepStatusCompleted, time.Now(), noEventLog)
 	assert.True(t, applied, "no events yet must allow overlay (first-event path)")
+	assert.Equal(t, slippy.StepStatusCompleted, resolved)
 	assert.Equal(t, slippy.StepStatusCompleted, slip.Steps["dev_tests"].Status)
 }
 
@@ -1300,29 +1304,63 @@ func TestOverlayPipelineStep_R1_NoEventsYet_AppliesNormally(t *testing.T) {
 // disagreeing with argMax truth.
 //
 // Contract: when event-log status is terminal AND caller status is terminal AND
-// they differ, the overlay pins the EVENT-LOG status (substitutes into the
-// step's transition + the *_status override) so the *_status column matches the
-// argMax-resolved row.
+// they differ, the overlay pins the EVENT-LOG status — the function returns it
+// via the second return value (resolved) so the caller (hydrateAndPersist) can
+// build the StepStatusOverride with event-log truth. The substitution also
+// flows through ApplyStatusTransition so slip.Steps[step].Status matches.
+//
+// Table-driven to cover BOTH directions of the divergence (caller=completed
+// vs caller=failed) since the branch predicate (`eventStatus != status`) is
+// directionally symmetric — a future refactor that adds a directional guard
+// would silently regress one direction without this coverage.
 func TestOverlayPipelineStep_R2_BothTerminalDiverge_EventLogWins(t *testing.T) {
-	slip := &slippy.Slip{
-		Steps: map[string]slippy.Step{
-			// CompletedAt nil so the in-memory guard would otherwise have allowed
-			// the caller's terminal overlay through. The R2 divergence branch is
-			// the only thing forcing event-log wins.
-			"dev_tests": {Status: slippy.StepStatusRunning, CompletedAt: nil},
+	cases := []struct {
+		name        string
+		callerStat  slippy.StepStatus
+		eventStat   slippy.StepStatus
+		wantInStep  slippy.StepStatus
+		wantInResolve slippy.StepStatus
+	}{
+		{
+			name:          "caller=completed event=failed (argMax winner is failed)",
+			callerStat:    slippy.StepStatusCompleted,
+			eventStat:     slippy.StepStatusFailed,
+			wantInStep:    slippy.StepStatusFailed,
+			wantInResolve: slippy.StepStatusFailed,
+		},
+		{
+			name:          "caller=failed event=completed (reverse direction)",
+			callerStat:    slippy.StepStatusFailed,
+			eventStat:     slippy.StepStatusCompleted,
+			wantInStep:    slippy.StepStatusCompleted,
+			wantInResolve: slippy.StepStatusCompleted,
 		},
 	}
-	// Caller wrote completed; event log shows failed (the argMax-winning row).
-	applied := overlayPipelineStep(
-		slip, "dev_tests", slippy.StepStatusCompleted, time.Now(),
-		eventLogReturns(slippy.StepStatusFailed),
-	)
-	assert.True(t, applied,
-		"divergent terminals: overlay MUST still apply so the pin path runs with event-log truth")
-	assert.Equal(t, slippy.StepStatusFailed, slip.Steps["dev_tests"].Status,
-		"divergent terminals: overlay MUST substitute event-log status (failed) for caller status (completed)")
-	require.NotNil(t, slip.Steps["dev_tests"].CompletedAt,
-		"divergent-terminal overlay must set CompletedAt via ApplyStatusTransition")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			slip := &slippy.Slip{
+				Steps: map[string]slippy.Step{
+					// CompletedAt nil so the in-memory guard would otherwise have allowed
+					// the caller's terminal overlay through. The R2 divergence branch is
+					// the only thing forcing event-log wins.
+					"dev_tests": {Status: slippy.StepStatusRunning, CompletedAt: nil},
+				},
+			}
+			applied, resolved := overlayPipelineStep(
+				slip, "dev_tests", tc.callerStat, time.Now(),
+				eventLogReturns(tc.eventStat),
+			)
+			assert.True(t, applied,
+				"divergent terminals: overlay MUST still apply so the column-pin path runs")
+			assert.Equal(t, tc.wantInResolve, resolved,
+				"resolved MUST equal event-log status — this is what hydrateAndPersist threads into StepStatusOverride.Status")
+			assert.Equal(t, tc.wantInStep, slip.Steps["dev_tests"].Status,
+				"slip.Steps[step].Status MUST reflect the substituted event-log status")
+			require.NotNil(t, slip.Steps["dev_tests"].CompletedAt,
+				"divergent-terminal overlay must set CompletedAt via ApplyStatusTransition")
+		})
+	}
 }
 
 // TestOverlayPipelineStep_R2_BothTerminalAgree_AppliesNormally is the negative
@@ -1335,11 +1373,12 @@ func TestOverlayPipelineStep_R2_BothTerminalAgree_AppliesNormally(t *testing.T) 
 			"dev_tests": {Status: slippy.StepStatusRunning, CompletedAt: nil},
 		},
 	}
-	applied := overlayPipelineStep(
+	applied, resolved := overlayPipelineStep(
 		slip, "dev_tests", slippy.StepStatusCompleted, time.Now(),
 		eventLogReturns(slippy.StepStatusCompleted),
 	)
 	assert.True(t, applied)
+	assert.Equal(t, slippy.StepStatusCompleted, resolved, "agreement: resolved equals both inputs")
 	assert.Equal(t, slippy.StepStatusCompleted, slip.Steps["dev_tests"].Status)
 }
 
@@ -1416,6 +1455,84 @@ func TestHydrateAndPersist_StartStep_DoesNotClobberTerminalStatus(t *testing.T) 
 	// routing_slips column literal back to running.
 	assert.Empty(t, observedOverrides,
 		"hydrateAndPersist must pass NO override when R1 dropped the overlay (Option D conditional pin)")
+}
+
+// TestHydrateAndPersist_R2_DivergentTerminals_OverridePinsEventLogStatus is the
+// end-to-end regression for the PR #39 review finding: in the divergent-terminal
+// race (caller's status terminal AND event-log status terminal AND they differ),
+// the StepStatusOverride passed into Update MUST carry the event-log status
+// (the argMax winner) and NOT the caller's terminal — otherwise the
+// routing_slips.<step>_status column would briefly disagree with argMax truth
+// until the next hydration cycle.
+//
+// This is the missing assertion the original PR #39 fix shipped without:
+// overlayPipelineStep's unit test only inspected slip.Steps[step].Status, but
+// the hydrateAndPersist override slice (the thing that actually writes the
+// column) is built from a separate variable. This test pins both.
+func TestHydrateAndPersist_R2_DivergentTerminals_OverridePinsEventLogStatus(t *testing.T) {
+	const id = "11111111-2222-3333-4444-555555555555"
+	const stepName = "push_parsed"
+
+	// Load returns a non-terminal step so the in-memory CompletedAt guard does
+	// not block the overlay — the divergence branch alone forces event-log wins.
+	loadedSlip := &slippy.Slip{
+		CorrelationID: id,
+		Status:        slippy.SlipStatusInProgress,
+		Steps: map[string]slippy.Step{
+			stepName: {Status: slippy.StepStatusRunning, CompletedAt: nil},
+		},
+	}
+
+	var persistedSlip *slippy.Slip
+	var observedOverrides []slippy.StepStatusOverride
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			return nil
+		},
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			cp := *loadedSlip
+			steps := make(map[string]slippy.Step, len(loadedSlip.Steps))
+			for k, v := range loadedSlip.Steps {
+				steps[k] = v
+			}
+			cp.Steps = steps
+			return &cp, nil
+		},
+		updateFn: func(_ context.Context, s *slippy.Slip, overrides ...slippy.StepStatusOverride) error {
+			persistedSlip = s
+			observedOverrides = append([]slippy.StepStatusOverride(nil), overrides...)
+			return nil
+		},
+		// Event log shows failed (the argMax winner). Caller (CompleteStep below)
+		// will pass StepStatusCompleted — they differ → divergence branch fires.
+		latestStepStatusFromEventsFn: func(_ context.Context, _, step string) (slippy.StepStatus, bool, error) {
+			if step == stepName {
+				return slippy.StepStatusFailed, true, nil
+			}
+			return "", false, nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	// CompleteStep on a pipeline step (componentName == "") triggers
+	// hydrateAndPersist with StepStatusCompleted as the caller's status.
+	err := adapter.CompleteStep(context.Background(), id, stepName, "")
+	require.NoError(t, err)
+	require.NotNil(t, persistedSlip, "Update must be called (hydration runs)")
+
+	// In-memory step map MUST carry the event-log substitution (failed).
+	assert.Equal(t, slippy.StepStatusFailed, persistedSlip.Steps[stepName].Status,
+		"slip.Steps[step].Status MUST reflect the event-log substitution in the divergence branch")
+
+	// The critical assertion the prior PR shipped without: the override slice
+	// passed into Update MUST carry the event-log status, not the caller's.
+	require.Len(t, observedOverrides, 1,
+		"hydrateAndPersist MUST emit exactly one override when overlay applied")
+	assert.Equal(t, slippy.StepStatusColumnName(stepName), observedOverrides[0].ColumnName,
+		"override column MUST target the right *_status column")
+	assert.Equal(t, slippy.StepStatusFailed, observedOverrides[0].Status,
+		"override Status MUST be event-log status (argMax winner), NOT caller-supplied status — "+
+			"this is the routing_slips column pin and the whole point of the divergence fix")
 }
 
 // --- Option 1 sentinel propagation tests (plan v3 §C.8) ---
