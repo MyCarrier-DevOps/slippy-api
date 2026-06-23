@@ -6,9 +6,9 @@ toolchain go1.26.3
 
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.46.0
-	github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse v1.3.93-fix-82917-ch-writeback-best-effort.2
+	github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse v1.3.93
 	github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.92
-	github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.93-fix-82917-ch-writeback-best-effort.2
+	github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.93
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/danielgtaylor/huma/v2 v2.38.0
 	github.com/google/uuid v1.6.0
