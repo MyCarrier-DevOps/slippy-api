@@ -410,8 +410,12 @@ func (a *SlipWriterAdapter) AbandonSlip(ctx context.Context, correlationID, supe
 //
 // correlationID may be empty for writes that don't target a specific slip
 // (none currently — all step/terminal/dedup writes have one). When empty,
-// the lock is bypassed (defense in depth: handler boundary should already
-// have rejected invalid IDs).
+// the lock is bypassed; the handler-boundary validator
+// handler.validateCorrelationID (slip_write_handler.go, added in commit
+// f101d77 per PR #39 review) is the first line of defense and rejects
+// malformed UUIDs with HTTP 400 before any write path runs. This bypass
+// keeps the adapter resilient if a future non-HTTP caller forwards an
+// empty corrID — the WARN log below makes the regression observable.
 //
 // The closure receives only wctx for use with the upstream client and
 // hydrateAndPersist — the caller-supplied ctx is exclusively for span
@@ -503,7 +507,11 @@ func (a *SlipWriterAdapter) withCorrIDLock(
 
 	key := CorrIDLockKey(correlationID)
 	if key == "" {
-		// Defense in depth — handler boundary should have rejected this.
+		// Layered with handler.validateCorrelationID (slip_write_handler.go,
+		// added in commit f101d77 per PR #39 review) — the handler rejects
+		// malformed UUIDs with HTTP 400 before any write path runs. This
+		// adapter-side check is the residual safety net for non-HTTP
+		// callers (e.g. dedup-driven internal flows).
 		return domain.ErrInvalidCorrelationID
 	}
 	span.SetAttributes(attribute.String("corrid_lock.key", key))

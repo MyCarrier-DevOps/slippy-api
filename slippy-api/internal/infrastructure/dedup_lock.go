@@ -57,10 +57,14 @@ const (
 // CorrIDLockKey returns the Redis key for a per-correlationID write lock.
 //
 // Returns the empty string if correlationID does not parse as a UUID — callers
-// MUST treat that as ErrInvalidCorrelationID. UUID validation here is defense
-// in depth on top of the handler-boundary check (plan v3 §M.1.2, Mod 5):
-// rejecting malformed inputs at both layers prevents log/key-injection and
-// guards against future code paths that might bypass the handler validator.
+// MUST treat that as ErrInvalidCorrelationID. UUID validation here is layered
+// with handler.validateCorrelationID (slip_write_handler.go, added in commit
+// f101d77 per PR #39 review) — the handler rejects malformed UUIDs with HTTP
+// 400 before any write path runs. This adapter-side check is a residual
+// safety net for non-HTTP callers (e.g. dedup-driven internal flows) and
+// guards against future code paths that bypass the handler validator. The
+// belt-and-suspenders posture also prevents log/key-injection if a future
+// caller forwards an unsanitized string into the lock keyspace.
 //
 // The key shape is "sliplock:cid:<lowercase-uuid>". Lowercasing is paranoid —
 // uuid.Parse normalizes case — but keeps the keyspace deterministic if a
