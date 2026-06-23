@@ -8,6 +8,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
 
@@ -231,6 +234,148 @@ func TestSlipWriterAdapter_CompleteStep_Error(t *testing.T) {
 
 	err := adapter.CompleteStep(context.Background(), "abc-123", "builds_completed", "api")
 	assert.Error(t, err)
+}
+
+// TestSlipWriterAdapter_CompleteStep_SurvivesRequestCancellation verifies that
+// a request-context cancellation does NOT abort the ClickHouse write. The
+// writer derives a context.WithoutCancel-based write ctx so the durable
+// `slip_component_states` row lands even if the HTTP client disconnects or an
+// LB resets the upstream connection mid-flight.
+func TestSlipWriterAdapter_CompleteStep_SurvivesRequestCancellation(t *testing.T) {
+	var seenCtxErr error
+	var called bool
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(ctx context.Context, _, _, _ string, status slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			called = true
+			seenCtxErr = ctx.Err()
+			assert.Equal(t, slippy.StepStatusCompleted, status)
+			return nil
+		},
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			return &slippy.Slip{CorrelationID: "abc-123", Status: slippy.SlipStatusInProgress}, nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	reqCtx, cancel := context.WithCancel(context.Background())
+	cancel() // simulate client/LB cancellation BEFORE the write starts
+
+	err := adapter.CompleteStep(reqCtx, "abc-123", "builds_completed", "api")
+	require.NoError(t, err)
+	assert.True(t, called, "write must be attempted despite cancelled request ctx")
+	assert.NoError(t, seenCtxErr, "store must receive a live, non-cancelled ctx")
+}
+
+// TestSlipWriterAdapter_StartStep_SurvivesRequestCancellation mirrors the above
+// for StartStep — the most common rerun-after-failure path.
+func TestSlipWriterAdapter_StartStep_SurvivesRequestCancellation(t *testing.T) {
+	var seenCtxErr error
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(ctx context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			seenCtxErr = ctx.Err()
+			return nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	reqCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := adapter.StartStep(reqCtx, "abc-123", "builds_completed", "api")
+	require.NoError(t, err)
+	assert.NoError(t, seenCtxErr, "store must receive a live, non-cancelled ctx")
+}
+
+// TestSlipWriterAdapter_FailStep_SurvivesRequestCancellation mirrors the above
+// for FailStep.
+func TestSlipWriterAdapter_FailStep_SurvivesRequestCancellation(t *testing.T) {
+	var seenCtxErr error
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(ctx context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			seenCtxErr = ctx.Err()
+			return nil
+		},
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			return &slippy.Slip{CorrelationID: "abc-123", Status: slippy.SlipStatusInProgress}, nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	reqCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := adapter.FailStep(reqCtx, "abc-123", "builds_completed", "api", "reason")
+	require.NoError(t, err)
+	assert.NoError(t, seenCtxErr, "store must receive a live, non-cancelled ctx")
+}
+
+// withTestWriteOpTimeout temporarily shortens writeOpTimeout so tests don't
+// have to wait the full 15s to assert it bounds a slow op.
+func withTestWriteOpTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	orig := writeOpTimeout
+	writeOpTimeout = d
+	t.Cleanup(func() { writeOpTimeout = orig })
+}
+
+// TestSlipWriterAdapter_CompleteStep_WriteOpTimeoutBoundsSlowOp asserts the
+// 15s (here shortened) timeout in writeContext actually cuts a slow op off.
+// Without this guard a hung ClickHouse driver could block a request handler
+// indefinitely; this is the safety net behind the WithoutCancel decoupling.
+func TestSlipWriterAdapter_CompleteStep_WriteOpTimeoutBoundsSlowOp(t *testing.T) {
+	withTestWriteOpTimeout(t, 50*time.Millisecond)
+
+	var seenCtxErr error
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(ctx context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			// Block longer than the timeout, then record what the ctx saw.
+			select {
+			case <-ctx.Done():
+				seenCtxErr = ctx.Err()
+				return ctx.Err()
+			case <-time.After(2 * time.Second):
+				seenCtxErr = nil
+				return nil
+			}
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	start := time.Now()
+	err := adapter.CompleteStep(context.Background(), "abc-123", "builds_completed", "api")
+	elapsed := time.Since(start)
+
+	require.Error(t, err, "the upstream call must surface the deadline")
+	assert.ErrorIs(t, seenCtxErr, context.DeadlineExceeded,
+		"writeContext must enforce writeOpTimeout regardless of the request ctx")
+	assert.Less(t, elapsed, 1*time.Second,
+		"the bound must fire well before the store's natural completion")
+}
+
+// TestWriteContext_PreservesSpanContext asserts the contract documented on
+// writeContext: span context survives context.WithoutCancel, so writes still
+// attribute to the request's trace. Without this, traces would fragment at
+// every adapter method boundary.
+func TestWriteContext_PreservesSpanContext(t *testing.T) {
+	// Install an SDK tracer provider so the span is real (default global is a noop).
+	tp := sdktrace.NewTracerProvider()
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+	otel.SetTracerProvider(tp)
+
+	ctx, span := tp.Tracer("test").Start(context.Background(), "parent")
+	defer span.End()
+
+	wctx, cancel := writeContext(ctx)
+	defer cancel()
+
+	parentSC := span.SpanContext()
+	wctxSC := trace.SpanFromContext(wctx).SpanContext()
+
+	assert.True(t, wctxSC.IsValid(), "wctx must carry a valid span context")
+	assert.Equal(t, parentSC.TraceID(), wctxSC.TraceID(),
+		"trace must be preserved through context.WithoutCancel")
+	assert.Equal(t, parentSC.SpanID(), wctxSC.SpanID(),
+		"current span must be preserved through context.WithoutCancel")
 }
 
 // --- FailStep ---

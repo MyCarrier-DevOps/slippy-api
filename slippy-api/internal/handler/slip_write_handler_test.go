@@ -673,6 +673,18 @@ func TestMapWriteError(t *testing.T) {
 		{"corrID write in progress (sentinel)", domain.ErrCorrIDWriteInProgress, http.StatusConflict},
 		// Domain-level invalid corrID format (handler boundary validator).
 		{"invalid corrID format (sentinel)", domain.ErrInvalidCorrelationID, http.StatusBadRequest},
+		{"context canceled", context.Canceled, http.StatusGatewayTimeout},
+		{"deadline exceeded", context.DeadlineExceeded, http.StatusGatewayTimeout},
+		{
+			"context canceled wrapped in StepError",
+			slippy.NewStepError("update", "id", "step", "", context.Canceled),
+			http.StatusGatewayTimeout,
+		},
+		{
+			"deadline exceeded wrapped in StepError",
+			slippy.NewStepError("update", "id", "step", "", context.DeadlineExceeded),
+			http.StatusGatewayTimeout,
+		},
 		{"generic error", errors.New("something broke"), http.StatusInternalServerError},
 	}
 	for _, tt := range tests {
