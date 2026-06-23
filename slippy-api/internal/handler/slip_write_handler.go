@@ -543,10 +543,32 @@ func mapWriteError(err error) error {
 			"slip creation already in progress for this commit; duplicate suppressed",
 		)
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		// Infrastructure-level cancellation (client disconnect, LB idle-timeout,
-		// upstream ClickHouse cancel). Return 504 so callers know to retry.
-		// Without this branch the error would unwrap into the *StepError /
-		// *SlipError default case below and surface as a misleading 422.
+		// A context deadline/cancellation that reaches mapWriteError means the
+		// AUTHORITATIVE insert (UpdateStepWithHistory / slip_component_states) did NOT
+		// land — the write-op timeout fired before the row was durable.
+		//
+		// This branch is only reachable for the start/skip and pipeline-level
+		// complete/fail paths (componentName == ""). For those paths, UpdateStepWithStatus
+		// calls store.UpdateStepWithHistory directly; a timeout there propagates as a
+		// *StepError wrapping context.DeadlineExceeded, which errors.Is unwraps here.
+		// checkPipelineCompletion errors for pipeline-level steps are already swallowed
+		// in steps.go (logged as Warn, not returned), so they never reach this point.
+		//
+		// For component-level complete/fail (componentName != ""), the adapter routes
+		// through goLib's RunPostExecution, which calls store.UpdateStepWithHistory first
+		// (durable), then checkPipelineCompletion on the same write-op-bounded context.
+		// A timeout inside checkPipelineCompletion is wrapped by goLib as ErrSlipNotFound
+		// (→ 404) or ErrSlipStatusUpdateFailed (→ 500) before it returns, so a raw
+		// context.DeadlineExceeded is NOT produced for that sub-path. In other words,
+		// for component events: the component row is durable when this branch fires, but
+		// it will not be reached — the 404/500 cases above win instead. The residual gap
+		// (slip-level completion may not advance if the post-insert completion-check times
+		// out) is tracked as a follow-up: derive slip-completion on Load so step/aggregate
+		// status self-heals without a separate slip-status write.
+		//
+		// Returning 504 tells the CLI to re-POST, preventing silent data loss on the
+		// insert-failure paths. Without this branch the error would unwrap into
+		// *StepError/*SlipError and surface as a misleading 422.
 		return huma.NewError(http.StatusGatewayTimeout, "upstream timeout")
 	default:
 		if strings.Contains(err.Error(), "invalid push options") {
