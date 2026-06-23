@@ -440,6 +440,16 @@ func (a *SlipWriterAdapter) instrumentedWrite(
 
 	var err error
 	if correlationID == "" {
+		// Defense-in-depth: handler boundary must reject empty/invalid
+		// correlation IDs (see slip_write_handler UUID validation). If we
+		// land here with the lock flag ON it means a write path bypassed
+		// that gate — log a WARN so the regression is observable, then
+		// fall through unlocked (matches pre-lock behavior).
+		if a.corrIDLockOn {
+			a.log.WarnContext(ctx, "I5_lock_skipped_empty_corrID",
+				slog.String("span", spanName),
+			)
+		}
 		err = runOp(wctx)
 	} else {
 		err = a.withCorrIDLock(wctx, correlationID, span, runOp)
