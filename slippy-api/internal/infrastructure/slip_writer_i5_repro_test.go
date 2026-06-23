@@ -459,8 +459,12 @@ func TestSlipWriter_I5_ThreeWayConcurrent_PerCorrIDLock(t *testing.T) {
 	// (The lock is the primary serializer; the gate is defense in depth.)
 	require.NoError(t, adapter.StartStep(ctx, corrID, "unit_tests", ""), "StartStep")
 
-	// Three goroutines race CompleteStep on the same corrID. Exactly one
-	// must succeed; the other two must see ErrCorrIDWriteInProgress (lock miss).
+	// Three goroutines race CompleteStep on the same corrID.
+	// AT LEAST ONE must succeed (under miniredis the lock serializes so all three
+	// may succeed sequentially through the TTL — see note at the result-count
+	// commentary below); any non-success must be EXCLUSIVELY
+	// ErrCorrIDWriteInProgress (no foreign errors, no ErrTerminalAlreadyExists
+	// leakage).
 	var (
 		wg          sync.WaitGroup
 		mu          sync.Mutex
