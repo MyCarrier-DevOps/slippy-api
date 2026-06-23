@@ -308,7 +308,9 @@ func buildDedupWriteServer(
 
 	locker := infrastructure.NewRedisLocker(rdb)
 	reader := storeReaderAdapter{store: store}
-	writer := infrastructure.NewSlipWriterAdapter(client, locker, reader)
+	// dedup E2E exercises the repo:sha lock path; the I5 per-corrID lock is OFF
+	// (production default) so failing to inject it does not affect this scenario.
+	writer := infrastructure.NewSlipWriterAdapter(client, locker, reader, false)
 
 	mux := http.NewServeMux()
 	apiConfig := huma.DefaultConfig("Slippy API Dedup E2E", "0.0.1")
@@ -347,7 +349,7 @@ func buildNoLockWriteServer(
 
 	// Nil locker → dedup disabled (original lock-free behavior).
 	reader := storeReaderAdapter{store: store}
-	writer := infrastructure.NewSlipWriterAdapter(client, nil, reader)
+	writer := infrastructure.NewSlipWriterAdapter(client, nil, reader, false)
 
 	mux := http.NewServeMux()
 	apiConfig := huma.DefaultConfig("Slippy API No-Lock E2E", "0.0.1")

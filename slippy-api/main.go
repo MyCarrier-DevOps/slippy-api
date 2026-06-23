@@ -302,7 +302,14 @@ func run() error {
 	} else {
 		log.Printf("slip-creation dedup lock disabled (no cache)")
 	}
-	writer := infrastructure.NewSlipWriterAdapter(slippyClient, locker, reader)
+	// SLIPPY_I5_LOCK_ENABLED is read ONCE at the composition root. The startup
+	// banner line below is the §M.7 rollout sign-off signal: operators grep pod
+	// logs for "slippy-api per-correlationID lock" to confirm the state every
+	// pod actually came up with, independent of any subsequent flag flips.
+	i5LockEnabled, i5LockRaw := infrastructure.ParseI5LockFlag()
+	log.Printf("slippy-api per-correlationID lock: enabled=%v raw_env=%q",
+		i5LockEnabled, i5LockRaw)
+	writer := infrastructure.NewSlipWriterAdapter(slippyClient, locker, reader, i5LockEnabled)
 	log.Printf("write endpoints enabled")
 
 	// --- Admin handler ---

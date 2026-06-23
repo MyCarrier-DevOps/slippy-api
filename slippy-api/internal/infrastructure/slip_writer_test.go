@@ -61,7 +61,8 @@ func newTestWriterAdapter(store slippy.SlipStore) *SlipWriterAdapter {
 	client := slippy.NewClientWithDependencies(store, &mockGitHubAPI{}, cfg)
 	// nil locker + nil reader → preserves the original lock-free behavior, exercising
 	// the regression path that must keep passing when the cache is disabled.
-	return NewSlipWriterAdapter(client, nil, nil)
+	// i5LockEnabled=false matches the production default (plan v3 §G.1).
+	return NewSlipWriterAdapter(client, nil, nil, false)
 }
 
 // --- Compile-time check ---
@@ -518,7 +519,7 @@ func TestSlipWriterAdapter_SetComponentImageTag_NoPipelineConfig(t *testing.T) {
 	store := &mockSlipStore{}
 	// Create client without pipeline config.
 	client := slippy.NewClientWithDependencies(store, nil, slippy.Config{})
-	adapter := NewSlipWriterAdapter(client, nil, nil)
+	adapter := NewSlipWriterAdapter(client, nil, nil, false)
 
 	err := adapter.SetComponentImageTag(context.Background(), "abc-123", "api", "26.09.abc1234")
 	assert.Error(t, err)
@@ -751,7 +752,7 @@ func TestSlipWriterAdapter_IsPipelineStep_NilPipelineConfig(t *testing.T) {
 	}
 	// Construct a client with no pipeline config so PipelineConfig() returns nil.
 	client := slippy.NewClientWithDependencies(store, &mockGitHubAPI{}, slippy.Config{})
-	adapter := NewSlipWriterAdapter(client, nil, nil)
+	adapter := NewSlipWriterAdapter(client, nil, nil, false)
 
 	// componentName empty and pipelineCfg nil → isPipelineStep returns true →
 	// hydrateAndPersist is invoked. Both Load and Update must be called.
@@ -1518,19 +1519,20 @@ func (m *mockLocker) Release(ctx context.Context, key, token string) error {
 	return nil
 }
 
-// withLockEnabledAdapter constructs a SlipWriterAdapter with SLIPPY_I5_LOCK_ENABLED
-// set to true for the test scope and the supplied locker injected. Pattern lets
-// each test focus on lock semantics without rewiring constructors.
+// withLockEnabledAdapter constructs a SlipWriterAdapter with the I5 lock flag
+// injected = true and the supplied locker wired in. Pattern lets each test
+// focus on lock semantics without rewiring constructors. Now that the flag is
+// a constructor parameter (DI), this helper no longer needs t.Setenv —
+// callers are safe to run with t.Parallel().
 func withLockEnabledAdapter(t *testing.T, store slippy.SlipStore, locker Locker) *SlipWriterAdapter {
 	t.Helper()
-	t.Setenv(slippyI5LockEnabledEnv, "true")
 	pipelineCfg, err := slippy.ParsePipelineConfig([]byte(testPipelineConfigJSON))
 	require.NoError(t, err)
 	client := slippy.NewClientWithDependencies(store, &mockGitHubAPI{}, slippy.Config{
 		AncestryDepth:  5,
 		PipelineConfig: pipelineCfg,
 	})
-	return NewSlipWriterAdapter(client, locker, nil)
+	return NewSlipWriterAdapter(client, locker, nil, true)
 }
 
 // validTestUUID is a valid UUID string used by lock tests where the corrID
@@ -1648,8 +1650,9 @@ func TestCorrIDLock_TryAcquireError_FailsOpen(t *testing.T) {
 
 // TestCorrIDLock_NilLocker_BehavesAsBefore verifies the nil-locker path is
 // identical to the pre-lock baseline — same as the dedup_lock contract.
+// Even with the I5 lock flag ON, a nil locker MUST short-circuit the lock path.
 func TestCorrIDLock_NilLocker_BehavesAsBefore(t *testing.T) {
-	t.Setenv(slippyI5LockEnabledEnv, "true")
+	t.Parallel()
 	var clientCalled bool
 	store := &mockSlipStore{
 		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
@@ -1663,19 +1666,18 @@ func TestCorrIDLock_NilLocker_BehavesAsBefore(t *testing.T) {
 		AncestryDepth:  5,
 		PipelineConfig: pipelineCfg,
 	})
-	adapter := NewSlipWriterAdapter(client, nil, nil) // nil locker
+	// i5LockEnabled=true + nil locker → lock path skipped (nil-locker short-circuit).
+	adapter := NewSlipWriterAdapter(client, nil, nil, true)
 
-	// Even with the env flag on, nil locker skips the lock path entirely.
 	err = adapter.StartStep(context.Background(), validTestUUID, "push_parsed", "")
 	require.NoError(t, err)
 	assert.True(t, clientCalled, "nil locker MUST behave exactly as the pre-lock baseline")
 }
 
-// TestCorrIDLock_FlagOff_DoesNotAcquire verifies that the env flag default
-// (SLIPPY_I5_LOCK_ENABLED unset → off) skips the lock path entirely.
+// TestCorrIDLock_FlagOff_DoesNotAcquire verifies that i5LockEnabled=false skips
+// the lock path entirely even when a locker is wired.
 func TestCorrIDLock_FlagOff_DoesNotAcquire(t *testing.T) {
-	// Explicitly unset to defeat any ambient env.
-	t.Setenv(slippyI5LockEnabledEnv, "")
+	t.Parallel()
 	store := &mockSlipStore{
 		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
 			return nil
@@ -1683,7 +1685,7 @@ func TestCorrIDLock_FlagOff_DoesNotAcquire(t *testing.T) {
 	}
 	locker := &mockLocker{
 		tryAcquireFn: func(_ context.Context, _ string, _ time.Duration) (bool, string, error) {
-			t.Fatal("TryAcquire MUST NOT be called when SLIPPY_I5_LOCK_ENABLED is off")
+			t.Fatal("TryAcquire MUST NOT be called when i5LockEnabled=false")
 			return false, "", nil
 		},
 	}
@@ -1693,7 +1695,7 @@ func TestCorrIDLock_FlagOff_DoesNotAcquire(t *testing.T) {
 		AncestryDepth:  5,
 		PipelineConfig: pipelineCfg,
 	})
-	adapter := NewSlipWriterAdapter(client, locker, nil)
+	adapter := NewSlipWriterAdapter(client, locker, nil, false)
 
 	err = adapter.StartStep(context.Background(), validTestUUID, "push_parsed", "")
 	require.NoError(t, err)

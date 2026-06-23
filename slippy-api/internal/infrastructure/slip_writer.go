@@ -26,35 +26,24 @@ import (
 // step failures with no Argo retry coverage (plan v3 §M.7).
 const slippyI5LockEnabledEnv = "SLIPPY_I5_LOCK_ENABLED"
 
-// corrIDLockEnabled reports whether the per-correlationID write lock should be
-// applied for this process. The value is sampled at adapter construction (NOT
-// every call) so flipping the env var at runtime has no effect — operators
-// must restart the pod after toggling. This is intentional: a mid-flight
-// flip mixed with already-acquired locks would create a confused state.
+// ParseI5LockFlag reads SLIPPY_I5_LOCK_ENABLED from the process environment and
+// returns whether the per-correlationID write lock should be active for this
+// adapter. Pure parser — no side effects. Composition root (main.go) MUST call
+// this once at startup, log the resulting state, and pass the bool into
+// NewSlipWriterAdapter for dependency injection.
+//
+// Splitting the side-effect (the slog.Info) out of the constructor keeps the
+// adapter SRP-clean (no env or logging coupling at construction) and lets
+// tests instantiate adapters in parallel without t.Setenv races.
 //
 // Parsing uses strconv.ParseBool so the accepted truthy/falsy set is the
 // canonical Go convention (1/t/T/TRUE/true/True/0/f/F/FALSE/false/False).
 // Any other value (including empty) is treated as OFF — the plan v3 §G.1
-// default — and produces a parse error that the startup log surfaces for
-// SRE visibility.
-//
-// A single slog.Info line is emitted PER CALL — i.e. once per adapter
-// construction (NewSlipWriterAdapter). This is the §M.7 rollout sign-off
-// signal: operators grep pod logs for "slippy-api per-correlationID lock"
-// to confirm what state every pod actually came up with, independent of
-// any subsequent flag flips. Repeated lines under repeated construction
-// (unit tests, multi-adapter wiring) are accepted noise — the alternative
-// (sync.Once at package scope) would mask config drift across pods.
-func corrIDLockEnabled() bool {
-	raw := os.Getenv(slippyI5LockEnabledEnv)
+// default.
+func ParseI5LockFlag() (enabled bool, raw string) {
+	raw = os.Getenv(slippyI5LockEnabledEnv)
 	v, err := strconv.ParseBool(raw)
-	on := err == nil && v
-	slog.Info("slippy-api per-correlationID lock",
-		"enabled", on,
-		"raw_env", raw,
-		"env_var", slippyI5LockEnabledEnv,
-	)
-	return on
+	return err == nil && v, raw
 }
 
 // writerTracerName is the instrumentation scope for write operations.
@@ -123,19 +112,29 @@ type SlipWriterAdapter struct {
 // only consulted on the dedup lock-miss path; it may be the cache-decorated
 // reader so the poll observes committed rows.
 //
-// SLIPPY_I5_LOCK_ENABLED is sampled once here and persisted on the adapter.
+// i5LockEnabled is the resolved SLIPPY_I5_LOCK_ENABLED state. The composition
+// root (main.go) MUST compute it once via ParseI5LockFlag and log it once
+// alongside the other startup banner lines, then pass it here. This DI seam
+// keeps the constructor free of env / logging side effects so tests can run
+// in parallel without t.Setenv races.
+//
 // Defaults OFF (plan v3 §G.1) — production enablement BLOCKED until PR 3
 // (Slippy CLI 409 retry-with-jitter) lands, per plan v3 §M.7. Until then,
 // turning the flag on would expose legitimate lock-contention as workflow
 // step failures with no Argo retry coverage.
-func NewSlipWriterAdapter(client *slippy.Client, locker Locker, reader domain.SlipReader) *SlipWriterAdapter {
+func NewSlipWriterAdapter(
+	client *slippy.Client,
+	locker Locker,
+	reader domain.SlipReader,
+	i5LockEnabled bool,
+) *SlipWriterAdapter {
 	return &SlipWriterAdapter{
 		client:        client,
 		locker:        locker,
 		reader:        reader,
 		lockTTL:       DefaultLockTTL,
 		lockWait:      DefaultLockWait,
-		corrIDLockOn:  corrIDLockEnabled(),
+		corrIDLockOn:  i5LockEnabled,
 		corrIDLockTTL: DefaultCorrIDLockTTL,
 		log:           slog.Default(),
 	}

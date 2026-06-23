@@ -201,7 +201,7 @@ func buildI5Adapter(t *testing.T, setup *i5ContainerSetup) *SlipWriterAdapter {
 		AncestryDepth:  5,
 		PipelineConfig: pipelineCfg,
 	})
-	return NewSlipWriterAdapter(client, nil, nil)
+	return NewSlipWriterAdapter(client, nil, nil, false)
 }
 
 // noopGitHub satisfies slippy.GitHubAPI without making any calls.
@@ -422,9 +422,6 @@ func TestSlipWriter_I5_ThreeWayConcurrent_PerCorrIDLock(t *testing.T) {
 		t.Skip("skipping I5 concurrency integration test in short mode")
 	}
 
-	// Enable lock for this test scope.
-	t.Setenv(slippyI5LockEnabledEnv, "true")
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
@@ -441,8 +438,9 @@ func TestSlipWriter_I5_ThreeWayConcurrent_PerCorrIDLock(t *testing.T) {
 		AncestryDepth:  5,
 		PipelineConfig: pipelineCfg,
 	})
-	adapter := NewSlipWriterAdapter(client, locker, nil)
-	require.True(t, adapter.corrIDLockOn, "precondition: SLIPPY_I5_LOCK_ENABLED must be true")
+	// Inject the I5 lock flag directly (DI) — no t.Setenv needed.
+	adapter := NewSlipWriterAdapter(client, locker, nil, true)
+	require.True(t, adapter.corrIDLockOn, "precondition: I5 lock flag injected = true")
 
 	// Use a valid UUID so CorrIDLockKey returns a non-empty key.
 	corrID := newUUIDForTest(t)
@@ -580,7 +578,7 @@ func TestSlipWriter_I5_CascadeResetAbortedToPending_E2E(t *testing.T) {
 		AncestryDepth:  5,
 		PipelineConfig: pipelineCfg,
 	})
-	adapter := NewSlipWriterAdapter(client, nil, nil)
+	adapter := NewSlipWriterAdapter(client, nil, nil, false)
 
 	corrID := fmt.Sprintf("i5-cascade-%d", time.Now().UnixNano())
 	commitSHA := fmt.Sprintf("sha-%d", time.Now().UnixNano())
