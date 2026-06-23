@@ -67,14 +67,19 @@ func AssertAsyncInsertEnabled(ctx context.Context, session ch.ClickhouseSessionI
 		}
 		observed[name] = value
 	}
+	// Surface iteration errors (rows.Err) before close errors so a malformed
+	// row set is reported with the underlying CH error, not an unrelated
+	// close failure. scanErr (if any) shadows both — the scan loop bailed
+	// early and is the most informative root cause.
+	if rowsErr := rows.Err(); scanErr == nil && rowsErr != nil {
+		_ = rows.Close()
+		return fmt.Errorf("AssertAsyncInsertEnabled: iterate system.settings rows: %w", rowsErr)
+	}
 	if closeErr := rows.Close(); scanErr == nil && closeErr != nil {
 		return fmt.Errorf("AssertAsyncInsertEnabled: close rows: %w", closeErr)
 	}
 	if scanErr != nil {
 		return scanErr
-	}
-	if rowsErr := rows.Err(); rowsErr != nil {
-		return fmt.Errorf("AssertAsyncInsertEnabled: iterate system.settings rows: %w", rowsErr)
 	}
 
 	for _, name := range expectedAsyncInsertSettings {
