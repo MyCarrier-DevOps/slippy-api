@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -17,6 +18,19 @@ import (
 
 	"github.com/MyCarrier-DevOps/slippy-api/internal/domain"
 )
+
+// validateCorrelationID parses correlationID as a UUID. Empty or malformed IDs
+// return domain.ErrInvalidCorrelationID which mapWriteError translates to 400.
+// Defense-in-depth at the handler boundary so logging, span attributes, and
+// downstream writer calls only ever see well-formed correlation IDs. This
+// pairs with the empty-corrID guard in SlipWriterAdapter.instrumentedWrite
+// (plan v3 §M.1.2) — that guard is a safety net; this check is the gate.
+func validateCorrelationID(correlationID string) error {
+	if _, err := uuid.Parse(correlationID); err != nil {
+		return domain.ErrInvalidCorrelationID
+	}
+	return nil
+}
 
 // SlipWriteHandler holds dependencies for write route handlers.
 type SlipWriteHandler struct {
@@ -244,6 +258,9 @@ func RegisterWriteRoutes(api huma.API, h *SlipWriteHandler) {
 // --- Handlers ------------------------------------------------------------
 
 func (h *SlipWriteHandler) createSlip(ctx context.Context, input *CreateSlipInput) (*CreateSlipOutput, error) {
+	if err := validateCorrelationID(input.Body.CorrelationID); err != nil {
+		return nil, mapWriteError(err)
+	}
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.createSlip",
 		trace.WithAttributes(
 			attribute.String("slip.correlation_id", input.Body.CorrelationID),
@@ -309,6 +326,9 @@ func (h *SlipWriteHandler) createSlip(ctx context.Context, input *CreateSlipInpu
 
 //nolint:dupl // startStep and completeStep share intentional parallel structure; the operations are semantically distinct.
 func (h *SlipWriteHandler) startStep(ctx context.Context, input *StepInput) (*struct{}, error) {
+	if err := validateCorrelationID(input.CorrelationID); err != nil {
+		return nil, mapWriteError(err)
+	}
 	componentName := input.componentName()
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.startStep",
 		trace.WithAttributes(
@@ -340,6 +360,9 @@ func (h *SlipWriteHandler) startStep(ctx context.Context, input *StepInput) (*st
 
 //nolint:dupl // completeStep and startStep share intentional parallel structure; the operations are semantically distinct.
 func (h *SlipWriteHandler) completeStep(ctx context.Context, input *StepInput) (*struct{}, error) {
+	if err := validateCorrelationID(input.CorrelationID); err != nil {
+		return nil, mapWriteError(err)
+	}
 	componentName := input.componentName()
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.completeStep",
 		trace.WithAttributes(
@@ -370,6 +393,9 @@ func (h *SlipWriteHandler) completeStep(ctx context.Context, input *StepInput) (
 }
 
 func (h *SlipWriteHandler) failStep(ctx context.Context, input *FailStepInput) (*struct{}, error) {
+	if err := validateCorrelationID(input.CorrelationID); err != nil {
+		return nil, mapWriteError(err)
+	}
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.failStep",
 		trace.WithAttributes(
 			attribute.String("slip.correlation_id", input.CorrelationID),
@@ -406,6 +432,9 @@ func (h *SlipWriteHandler) failStep(ctx context.Context, input *FailStepInput) (
 }
 
 func (h *SlipWriteHandler) skipStep(ctx context.Context, input *SkipStepInput) (*struct{}, error) {
+	if err := validateCorrelationID(input.CorrelationID); err != nil {
+		return nil, mapWriteError(err)
+	}
 	componentName := input.componentName()
 	reason := input.reason()
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.skipStep",
@@ -437,6 +466,9 @@ func (h *SlipWriteHandler) skipStep(ctx context.Context, input *SkipStepInput) (
 }
 
 func (h *SlipWriteHandler) setImageTag(ctx context.Context, input *SetImageTagInput) (*struct{}, error) {
+	if err := validateCorrelationID(input.CorrelationID); err != nil {
+		return nil, mapWriteError(err)
+	}
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.setImageTag",
 		trace.WithAttributes(
 			attribute.String("slip.correlation_id", input.CorrelationID),
@@ -472,6 +504,9 @@ func (h *SlipWriteHandler) setImageTag(ctx context.Context, input *SetImageTagIn
 
 //nolint:dupl // promoteSlip and abandonSlip share intentional parallel structure; the operations are semantically distinct.
 func (h *SlipWriteHandler) promoteSlip(ctx context.Context, input *PromoteSlipInput) (*struct{}, error) {
+	if err := validateCorrelationID(input.CorrelationID); err != nil {
+		return nil, mapWriteError(err)
+	}
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.promoteSlip",
 		trace.WithAttributes(
 			attribute.String("slip.correlation_id", input.CorrelationID),
@@ -499,6 +534,9 @@ func (h *SlipWriteHandler) promoteSlip(ctx context.Context, input *PromoteSlipIn
 
 //nolint:dupl // abandonSlip and promoteSlip share intentional parallel structure; the operations are semantically distinct.
 func (h *SlipWriteHandler) abandonSlip(ctx context.Context, input *AbandonSlipInput) (*struct{}, error) {
+	if err := validateCorrelationID(input.CorrelationID); err != nil {
+		return nil, mapWriteError(err)
+	}
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.abandonSlip",
 		trace.WithAttributes(
 			attribute.String("slip.correlation_id", input.CorrelationID),

@@ -415,7 +415,10 @@ func TestE2E_DedupLock_ConcurrentDuplicatePost(t *testing.T) {
 		out  handler.CreateSlipOutput
 	}
 	results := make([]result, 2)
-	corrIDs := []string{"corr-dup-A", "corr-dup-B"}
+	corrIDs := []string{
+		"aaaaaaaa-1111-2222-3333-444444444444",
+		"bbbbbbbb-1111-2222-3333-444444444444",
+	}
 
 	var wg sync.WaitGroup
 	start := make(chan struct{})
@@ -470,7 +473,10 @@ func TestE2E_NoLock_ConcurrentDuplicatePost_CreatesTwo(t *testing.T) {
 		out  handler.CreateSlipOutput
 	}
 	results := make([]result, 2)
-	corrIDs := []string{"corr-nolock-A", "corr-nolock-B"}
+	corrIDs := []string{
+		"cccccccc-1111-2222-3333-444444444444",
+		"dddddddd-1111-2222-3333-444444444444",
+	}
 
 	var wg sync.WaitGroup
 	start := make(chan struct{})
@@ -516,7 +522,7 @@ func TestE2E_DedupLock_SequentialDuplicate_Idempotent(t *testing.T) {
 
 	const repo, branch, sha = "org/repo", "main", "seq-sha-001"
 
-	code1, out1 := postCreateSlip(t, srv, authHeader, "seq-A", repo, branch, sha)
+	code1, out1 := postCreateSlip(t, srv, authHeader, "eeeeeeee-1111-2222-3333-444444444444", repo, branch, sha)
 	require.Equal(t, http.StatusCreated, code1)
 	require.NotNil(t, out1.Body.Slip)
 
@@ -524,7 +530,7 @@ func TestE2E_DedupLock_SequentialDuplicate_Idempotent(t *testing.T) {
 	// retry path (existing non-terminal slip) returns the same slip idempotently.
 	mr.FastForward(infrastructure.DefaultLockTTL + time.Second)
 
-	code2, out2 := postCreateSlip(t, srv, authHeader, "seq-B", repo, branch, sha)
+	code2, out2 := postCreateSlip(t, srv, authHeader, "ffffffff-1111-2222-3333-444444444444", repo, branch, sha)
 	require.Equal(t, http.StatusCreated, code2)
 	require.NotNil(t, out2.Body.Slip)
 
