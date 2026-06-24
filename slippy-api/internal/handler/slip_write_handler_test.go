@@ -826,7 +826,7 @@ func TestStartStep_ContextDeadlineExceeded_Returns504(t *testing.T) {
 	}
 	handler := setupWriteTestAPI(w)
 
-	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/push_parsed/start", nil)
+	req := httptest.NewRequest(http.MethodPost, "/slips/11111111-2222-3333-4444-555555555555/steps/push_parsed/start", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -846,7 +846,7 @@ func TestCompleteStep_ContextCanceled_Returns504(t *testing.T) {
 
 	req := httptest.NewRequest(
 		http.MethodPost,
-		"/slips/abc-123/steps/push_parsed/complete",
+		"/slips/11111111-2222-3333-4444-555555555555/steps/push_parsed/complete",
 		strings.NewReader(`{}`),
 	)
 	req.Header.Set("Content-Type", "application/json")
