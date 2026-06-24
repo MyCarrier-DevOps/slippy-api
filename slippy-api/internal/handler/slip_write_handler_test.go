@@ -212,6 +212,7 @@ func TestStartStep_InvalidCorrelationID(t *testing.T) {
 			wantSts: http.StatusBadRequest,
 			wantHit: false,
 		},
+		// "abc-123" is RETAINED here deliberately — asserts the UUID validator rejects short non-UUID with 400 (defense-in-depth boundary case).
 		{
 			name:    "short non-UUID",
 			path:    "/slips/abc-123/steps/builds_completed/start",

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -307,8 +308,14 @@ func run() error {
 	// logs for "slippy-api per-correlationID lock" to confirm the state every
 	// pod actually came up with, independent of any subsequent flag flips.
 	i5LockEnabled, i5LockRaw := infrastructure.ParseI5LockFlag()
-	log.Printf("slippy-api per-correlationID lock: enabled=%v raw_env=%q",
-		i5LockEnabled, i5LockRaw)
+	// Structured slog (matches the prior in-adapter style replaced by the DI
+	// refactor in commit cc2f15e). The human-readable "slippy-api
+	// per-correlationID lock" substring is preserved verbatim so operator
+	// log-greps (§M.7 rollout sign-off) keep working.
+	slog.Info("slippy-api per-correlationID lock state",
+		slog.Bool("enabled", i5LockEnabled),
+		slog.String("raw_env", i5LockRaw),
+	)
 	writer := infrastructure.NewSlipWriterAdapter(slippyClient, locker, reader, i5LockEnabled)
 	log.Printf("write endpoints enabled")
 

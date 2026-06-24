@@ -1028,6 +1028,12 @@ func overlayPipelineStep(
 	if !status.IsTerminal() && step.CompletedAt != nil {
 		return false, ""
 	}
+	// writtenAt gate: if step.CompletedAt is already set to a time at or after
+	// writtenAt, we intentionally do NOT override. This is SAFE even after the
+	// divergent-terminal substitution above: slip.Steps was just refreshed from
+	// ClickHouse, which is the argMax-resolved truth. A later CompletedAt means
+	// the in-memory step already reflects the winning terminal — emitting no
+	// override leaves the correct status in place (no divergence regression).
 	if step.CompletedAt == nil || writtenAt.After(*step.CompletedAt) {
 		step.ApplyStatusTransition(status, writtenAt)
 		slip.Steps[stepName] = step

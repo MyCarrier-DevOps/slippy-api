@@ -3,6 +3,7 @@ package infrastructure
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -719,12 +720,18 @@ func TestSlipWriterAdapter_FailStep_HydrationError_NonFatal(t *testing.T) {
 // if the constant reverts, this test catches it before the timeout can kill
 // in-flight ClickHouse writes in production.
 func TestWriteOpTimeout_DefaultIs240s(t *testing.T) {
-	// writeOpTimeout is set at package init from initWriteOpTimeout(). In the
-	// test environment SLIPPY_WRITE_OP_TIMEOUT is unset, so it must equal the
-	// compile-time default.
+	// writeOpTimeout is set at package init from initWriteOpTimeout(). The
+	// constant assertion below holds regardless of the runtime environment.
 	assert.Equal(t, defaultWriteOpTimeout, 240*time.Second,
 		"defaultWriteOpTimeout constant must be 240s")
-	// The live var should also match the default when the env is absent.
+	// The live var only matches the default when SLIPPY_WRITE_OP_TIMEOUT is
+	// unset. CI environments occasionally export the env to tune timeouts;
+	// skip the live-var assertion in that case rather than spuriously failing
+	// — the constant check above already guards against the constant
+	// reverting to the former 15 s value.
+	if v := os.Getenv("SLIPPY_WRITE_OP_TIMEOUT"); v != "" {
+		t.Skipf("SLIPPY_WRITE_OP_TIMEOUT=%q is set; skipping live-var default assertion", v)
+	}
 	// (Tests that shorten it via withTestWriteOpTimeout restore it in t.Cleanup.)
 	assert.GreaterOrEqual(t, writeOpTimeout, 240*time.Second,
 		"writeOpTimeout must be at least 240s in a clean test environment")
