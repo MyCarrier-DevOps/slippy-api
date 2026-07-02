@@ -1949,3 +1949,151 @@ func TestCorrIDLockKey_InvalidUUID(t *testing.T) {
 		assert.Empty(t, got, "input %q must return empty key", c)
 	}
 }
+
+// --- Mixed-staleness regression tests (ADO #82468, 436cc68c production mechanism) ---
+//
+// These tests stage the EXACT topology evidenced in production slip 436cc68c:
+// hydrateAndPersist Load reads routing_slips FRESH (step.CompletedAt non-nil, fresh,
+// set slightly AFTER writtenAt) but slip_component_states STALE (step.Status still
+// "running"). Under the pre-fix code, Guard 2 (writtenAt.After(*step.CompletedAt))
+// fails by ~1.2µs and returns applied=false — the overlay silently skips, Update
+// writes the stale "running" status wholesale, permanently wedging the slip.
+// Audit reference: standup-notes/2026/07/i5-fable-audit.md §A1/B.
+
+// TestOverlayPipelineStep_MixedStaleness_436cc68c_FreshCompletedAtStaleStatus
+// stages the exact production topology: step.Status=running (STALE from
+// slip_component_states), step.CompletedAt=freshCompletedAt (FRESH from
+// routing_slips state_history, set ~1.2µs AFTER writtenAt), caller=completed,
+// event log returns (completed, found=true, nil) — w4ai guarantees visibility.
+// The overlay MUST apply unconditionally: event-log-found path bypasses Guard 2.
+func TestOverlayPipelineStep_MixedStaleness_436cc68c_FreshCompletedAtStaleStatus(t *testing.T) {
+	writtenAt := time.Now()
+	// freshCompletedAt mirrors the ~1.2µs production gap: writtenAt was captured in
+	// the adapter BEFORE the library write; CompletedAt reflects the library entry
+	// timestamp (routing_slips state_history) written by the library AFTER writtenAt.
+	freshCompletedAt := writtenAt.Add(1200 * time.Nanosecond)
+	slip := &slippy.Slip{
+		Steps: map[string]slippy.Step{
+			"unit_tests": {
+				Status:      slippy.StepStatusRunning, // STALE: from slip_component_states
+				CompletedAt: &freshCompletedAt,         // FRESH: from routing_slips state_history
+			},
+		},
+	}
+	applied, resolved := overlayPipelineStep(
+		slip, "unit_tests", slippy.StepStatusCompleted, writtenAt,
+		eventLogReturns(slippy.StepStatusCompleted),
+	)
+	assert.True(t, applied,
+		"436cc68c: event-log-found path MUST pin the overlay unconditionally — "+
+			"pre-fix code: Guard 2 failed by ~1.2µs (writtenAt before freshCompletedAt) "+
+			"→ applied=false → Update wrote stale running wholesale (permanent wedge)")
+	assert.Equal(t, slippy.StepStatusCompleted, resolved,
+		"436cc68c: resolved MUST be completed so hydrateAndPersist threads it into StepStatusOverride")
+	assert.Equal(t, slippy.StepStatusCompleted, slip.Steps["unit_tests"].Status,
+		"436cc68c: in-memory step Status MUST be updated to completed by ApplyStatusTransition")
+}
+
+// TestOverlayPipelineStep_MixedStaleness_FailOpenPath_GuardTwoDecides is the
+// companion: when the event-log lookup ERRORS (fail-open path), Guard 2 remains
+// in effect. With freshCompletedAt after writtenAt (~1.2µs delta), Guard 2
+// evaluates false and the overlay is NOT applied. This is the known residual risk
+// under CH degradation; callers must alert on the WARN logged by latestFn.
+func TestOverlayPipelineStep_MixedStaleness_FailOpenPath_GuardTwoDecides(t *testing.T) {
+	writtenAt := time.Now()
+	freshCompletedAt := writtenAt.Add(1200 * time.Nanosecond)
+	slip := &slippy.Slip{
+		Steps: map[string]slippy.Step{
+			"unit_tests": {
+				Status:      slippy.StepStatusRunning,
+				CompletedAt: &freshCompletedAt,
+			},
+		},
+	}
+	failingFn := func() (slippy.StepStatus, bool, error) {
+		return "", false, errors.New("CH transport error")
+	}
+	applied, _ := overlayPipelineStep(
+		slip, "unit_tests", slippy.StepStatusCompleted, writtenAt, failingFn,
+	)
+	assert.False(t, applied,
+		"fail-open: Guard 2 must veto when event-log query errors and writtenAt is "+
+			"before freshCompletedAt — known residual risk; operators alerted via WARN log")
+	assert.Equal(t, slippy.StepStatusRunning, slip.Steps["unit_tests"].Status,
+		"fail-open: in-memory step must be unchanged when overlay is rejected")
+}
+
+// TestHydrateAndPersist_MixedStaleness_OverridePinsCompleted is the end-to-end
+// variant via hydrateAndPersist. Mirrors
+// TestHydrateAndPersist_R2_DivergentTerminals_OverridePinsEventLogStatus but
+// stages the 436cc68c topology: Load returns step with Status=running (STALE) and
+// CompletedAt strictly after the adapter's writtenAt (FRESH). Event log returns
+// (completed, true, nil). The StepStatusOverride passed into Update MUST carry
+// completed — the column pin that prevents routing_slips.unit_tests_status from
+// being overwritten with the stale "running" status.
+func TestHydrateAndPersist_MixedStaleness_OverridePinsCompleted(t *testing.T) {
+	const id = "436cc68c-dead-beef-cafe-000000000001"
+	const stepName = "unit_tests"
+
+	// futureCompletedAt is set in the future relative to the test start. Because the
+	// adapter captures writtenAt := time.Now() BEFORE the library write (synchronous
+	// mock), and the loadFn is called AFTER writtenAt is captured, any time.Now() in
+	// the loadFn is >= writtenAt. Adding 1s ensures CompletedAt > writtenAt regardless
+	// of scheduling — reproducing the µs-gap without nanosecond timing sensitivity.
+	futureCompletedAt := time.Now().Add(time.Second)
+
+	var persistedSlip *slippy.Slip
+	var observedOverrides []slippy.StepStatusOverride
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
+			return nil
+		},
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			return &slippy.Slip{
+				CorrelationID: id,
+				Status:        slippy.SlipStatusInProgress,
+				Steps: map[string]slippy.Step{
+					// STALE status + FRESH CompletedAt — the mixed-staleness snapshot.
+					stepName: {
+						Status:      slippy.StepStatusRunning,
+						CompletedAt: &futureCompletedAt,
+					},
+				},
+			}, nil
+		},
+		updateFn: func(_ context.Context, s *slippy.Slip, overrides ...slippy.StepStatusOverride) error {
+			persistedSlip = s
+			observedOverrides = append([]slippy.StepStatusOverride(nil), overrides...)
+			return nil
+		},
+		// w4ai=1: the just-written completed event IS visible in the event log.
+		latestStepStatusFromEventsFn: func(_ context.Context, _, step string) (slippy.StepStatus, bool, error) {
+			if step == stepName {
+				return slippy.StepStatusCompleted, true, nil
+			}
+			return "", false, nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	err := adapter.CompleteStep(context.Background(), id, stepName, "")
+	require.NoError(t, err)
+	require.NotNil(t, persistedSlip, "Update must be called (hydration runs)")
+
+	// In-memory step MUST reflect completed — the overlay was applied despite
+	// CompletedAt being after writtenAt (event-log-found path bypasses Guard 2).
+	assert.Equal(t, slippy.StepStatusCompleted, persistedSlip.Steps[stepName].Status,
+		"436cc68c mixed-staleness: overlay MUST apply even when CompletedAt > writtenAt — "+
+			"event-log-found path unconditionally pins the terminal status")
+
+	// Critical: the StepStatusOverride passed into Update MUST carry completed.
+	// Pre-fix: applied=false → overrides empty → Update writes slip.Steps[stepName].Status
+	// ("running", STALE) into routing_slips.unit_tests_status — permanent wedge.
+	require.Len(t, observedOverrides, 1,
+		"436cc68c: hydrateAndPersist MUST emit exactly one StepStatusOverride when overlay applied")
+	assert.Equal(t, slippy.StepStatusColumnName(stepName), observedOverrides[0].ColumnName,
+		"override ColumnName MUST target unit_tests_status")
+	assert.Equal(t, slippy.StepStatusCompleted, observedOverrides[0].Status,
+		"436cc68c: override Status MUST be completed — pins routing_slips column so "+
+			"Update does NOT write the stale running status wholesale")
+}

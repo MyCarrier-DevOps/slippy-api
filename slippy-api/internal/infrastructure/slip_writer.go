@@ -935,20 +935,27 @@ type latestStepStatusFn func() (slippy.StepStatus, bool, error)
 // AFTER PR 3 lands; until then, this overlay + the gate close I5 and the
 // lock defaults OFF (plan v3 §M.7 / §F.3 measurement gate).
 //
-// R1 terminal-wins guard (ADO #82468): the guard consults the event log via
-// latestStatus rather than the in-memory CompletedAt. This eliminates the
-// 436cc68c-style failure mode where Load returned a stale snapshot whose
-// CompletedAt did not yet reflect a just-written terminal event. The event log
-// row is durable under wait_for_async_insert=1 (asserted at startup), so the
-// SELECT is guaranteed to observe it.
+// Event-log seam (ADO #82468): when latestStatus returns found=true with no
+// error, the event log is authoritative (w4ai=1 guarantees the caller's own
+// event is visible). For terminal status writes the overlay is pinned
+// UNCONDITIONALLY — Guard 2 (writtenAt-vs-CompletedAt) is bypassed on this
+// path. This closes the 436cc68c production mechanism: a mixed-staleness Load
+// (routing_slips FRESH, slip_component_states STALE) leaves step.CompletedAt
+// non-nil/fresh while Status is stale; Guard 2 then fails by ~1µs and returns
+// applied=false, letting Update write the stale Status wholesale. Two tables,
+// two ClickHouse consistency domains: CompletedAt (routing_slips argMax) and
+// writtenAt (adapter clock before library write) are only reliably comparable
+// when there is no fresh event-log signal to rely on.
+// Audit: standup-notes/2026/07/i5-fable-audit.md §A1/B.
 //
-// Fail-open policy: if latestStatus returns an error, fall through to the
-// existing in-memory guard. If latestStatus reports !found (no events for this
-// step yet), the overlay applies — this preserves first-event behaviour.
+// Fail-open policy: if latestStatus returns an error, OR !found (no events for
+// this step yet), fall through to the in-memory CompletedAt guard (Guard 2).
+// This preserves first-event behaviour and degrades gracefully under CH errors.
 //
-// Overlay rule once the guard has cleared: writtenAt-vs-CompletedAt monotonicity
-// is preserved (the new status wins iff CompletedAt is nil or writtenAt is
-// strictly after it). ApplyStatusTransition sets CompletedAt only on the first
+// Overlay rule (event-log-found path): unconditional pin when status.IsTerminal().
+// Overlay rule (fail-open / no-event-signal path): writtenAt-vs-CompletedAt
+// monotonicity — the new status wins iff CompletedAt is nil or writtenAt is
+// strictly after it. ApplyStatusTransition sets CompletedAt only on the first
 // terminal transition.
 //
 // Mirrors the sentinel-path logic of goLibMyCarrier's overlayComponentState.
@@ -998,21 +1005,25 @@ func overlayPipelineStep(
 	// with argMax even in the divergent-terminal race window.
 	if latestStatus != nil {
 		eventStatus, found, err := latestStatus()
+		// eventLogOK: the event-log lookup returned a confirmed row with no error.
+		// When true, the event log is authoritative and Guard 2 is bypassed for
+		// terminal writes — see unconditional-pin block below.
+		eventLogOK := found && err == nil
 		switch {
 		case err != nil:
 			// fail-open: rely on the in-memory CompletedAt guard below
 		case !found:
 			// no events yet — overlay applies as first transition
 		case eventStatus.IsTerminal() && !status.IsTerminal():
-			// the I5 fix: event log says terminal, caller is writing non-terminal.
+			// R1: event log says terminal, caller is writing non-terminal.
 			// Drop the overlay so the caller-side R2 logic also skips the override.
 			return false, ""
 		case eventStatus.IsTerminal() && status.IsTerminal() && eventStatus != status:
-			// Both terminal but disagree (same-µs race). Event log is authoritative
-			// (it reflects the argMax tiebreak). Substitute eventStatus for the
-			// caller's terminal so the overlay pin matches the argMax-resolved
-			// *_status column. WARN log gives operators a signal to investigate
-			// the upstream producer that emitted the losing terminal.
+			// R2: both terminal but disagree (same-µs race). Event log is
+			// authoritative (it reflects the argMax tiebreak). Substitute
+			// eventStatus for the caller's terminal so the overlay pin matches the
+			// argMax-resolved *_status column. WARN log gives operators a signal
+			// to investigate the upstream producer that emitted the losing terminal.
 			slog.Warn("I5_overlay_terminal_divergence",
 				slog.String("step", stepName),
 				slog.String("caller_status", string(status)),
@@ -1021,19 +1032,36 @@ func overlayPipelineStep(
 			)
 			status = eventStatus
 		}
+		// Unconditional pin when the event-log lookup confirmed a row. The event
+		// log is authoritative (w4ai=1 guarantees the caller's own event is
+		// visible). The in-memory snapshot may be MIXED-stale: routing_slips FRESH
+		// (step.CompletedAt non-nil/fresh) but slip_component_states STALE
+		// (step.Status still "running"). Guard 2 (writtenAt.After(*step.CompletedAt))
+		// then fails by ~1µs and returns applied=false, letting Update write the
+		// stale Status wholesale — the 436cc68c production mechanism (audit:
+		// standup-notes/2026/07/i5-fable-audit.md §A1/B). When the event log
+		// confirms the row, Guard 2 is only a heuristic for a no-event-signal state
+		// that does not apply here. Skip it for terminal status writes.
+		if eventLogOK && status.IsTerminal() {
+			step.ApplyStatusTransition(status, writtenAt)
+			slip.Steps[stepName] = step
+			return true, status
+		}
 	}
 
-	// Defensive in-memory guard (fail-open fallback when latestStatus errored or
-	// is nil, e.g. in older unit-test fixtures that have not been migrated yet).
+	// Defensive in-memory guard (fail-open fallback: latestStatus errored, returned
+	// !found, or is nil — e.g. in older unit-test fixtures). Prevents a non-terminal
+	// write from clobbering a step whose in-memory CompletedAt already shows terminal.
 	if !status.IsTerminal() && step.CompletedAt != nil {
 		return false, ""
 	}
-	// writtenAt gate: if step.CompletedAt is already set to a time at or after
-	// writtenAt, we intentionally do NOT override. This is SAFE even after the
-	// divergent-terminal substitution above: slip.Steps was just refreshed from
-	// ClickHouse, which is the argMax-resolved truth. A later CompletedAt means
-	// the in-memory step already reflects the winning terminal — emitting no
-	// override leaves the correct status in place (no divergence regression).
+	// Guard 2 (fail-open / no-event-signal path only): writtenAt-vs-CompletedAt
+	// monotonicity heuristic. When the event-log lookup succeeds and status is
+	// terminal, the unconditional pin above fires first and this guard is never
+	// reached for that path. When latestStatus errored, returned !found, or is nil,
+	// Guard 2 is the last heuristic. Two tables, two ClickHouse consistency domains:
+	// CompletedAt (from routing_slips argMax) and writtenAt (adapter clock before
+	// library write) are only comparable when there is no fresh event-log signal.
 	if step.CompletedAt == nil || writtenAt.After(*step.CompletedAt) {
 		step.ApplyStatusTransition(status, writtenAt)
 		slip.Steps[stepName] = step
