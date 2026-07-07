@@ -13,6 +13,21 @@ import (
 // (HTTP 409), not a server fault (HTTP 500).
 var ErrCreationInProgress = errors.New("slip creation in progress")
 
+// ErrCorrIDWriteInProgress signals that another writer is currently holding the
+// per-correlationID lock and the caller's mutating request was rejected to
+// prevent a stale Load → mutate → Update race (ADO #82468 I5 bug class).
+// Callers should retry with backoff. Mapped to HTTP 409 Conflict at the handler
+// boundary (plan v3 §C.1, §M.1). Pre-flight: PR 3 (Slippy CLI 409 retry) must
+// land before SLIPPY_I5_LOCK_ENABLED=true in production (plan v3 §M.7, §G.1).
+var ErrCorrIDWriteInProgress = errors.New("write to slip in progress")
+
+// ErrInvalidCorrelationID is returned when a user-supplied correlation ID fails
+// UUID format validation at the handler boundary (plan v3 §M.1.2, Mod 5).
+// Mapped to HTTP 400 Bad Request. Distinguished from slippy.ErrInvalidCorrelationID
+// (raised by the library at a deeper layer) so the handler can return 400 without
+// constructing a slippy.SlipError.
+var ErrInvalidCorrelationID = errors.New("invalid correlation_id format")
+
 // Slip is an alias for the upstream slippy.Slip type.
 // This keeps domain consumers decoupled from direct import of the library package,
 // while avoiding unnecessary type duplication (DRY).

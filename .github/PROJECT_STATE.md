@@ -240,3 +240,288 @@ ADO-80684 (SlipWriter) implemented — pending PR review and merge.
 
 - Implement actual caching logic in CachedSlipReader
 - PR review and merge of `feat/log-search` branch
+
+---
+
+## I5 race resolution — full architecture (Layers 1+2+3)
+
+ADO #82468 — defense-in-depth fix for the TMS "stuck slip" class. The bug shape
+was first observed in production slip `436cc68c` (terminal `unit_tests`
+regressed to `running` after a same-microsecond concurrent write, leaving the
+slip permanently `in_progress`). This section documents the three-tier
+architecture that closes the race.
+
+### Pre-fix bug (slip 436cc68c — single-request mixed-staleness)
+
+> **Investigation note:** the two-pod diagram that previously appeared here was
+> refuted by HyperDX trace evidence (trace `1da4219f…`). The actual mechanism
+> was a SINGLE request — no concurrent Pod B, no second event.  An independent
+> audit reproduced the bypass with a unit test against PR-head code.
+> See `standup-notes/2026/07/i5-fable-audit.md` §A1/B for the full analysis.
+
+```text
+                  Single request: POST /v1/.../complete (unit_tests)
+                  ───────────────────────────────────────────────────
+   t0   SlipWriterAdapter.CompleteStep
+          writtenAt := time.Now()           = 03:06:21.371962  ← adapter clock (BEFORE library write)
+          │
+          │  client.CompleteStep
+          │    store.UpdateStepWithHistory(..., COMPLETED)
+          │      insertComponentState (wait_for_async_insert=1, synchronous)
+          │        INSERT version=.524  unit_tests_status=completed  ← event row committed
+          │
+          hydrateAndPersist(ctx, corrID, "unit_tests", completed, writtenAt)
+          │
+          │  store.Load(corrID)
+          │    routing_slips SELECT  → FRESH  (sees version .524, state_history has
+          │                                    CompletedAt=03:06:21.371963195)
+          │    slip_component_states SELECT → STALE  (replica lag; returns "running")
+          │
+          │  slip.Steps["unit_tests"] after Load:
+          │    .Status      = running          ← STALE (from slip_component_states)
+          │    .CompletedAt = 03:06:21.371963195 ← FRESH (from routing_slips state_history)
+          │
+          │  overlayPipelineStep(slip, "unit_tests", completed, writtenAt, latestFn)
+          │    latestFn → (completed, found=true, nil)   ← event log visible (w4ai)
+          │    caller=completed, event=completed → equal terminals, R1/R2 fall through
+          │    Guard 2: writtenAt.After(*step.CompletedAt)
+          │             = 03:06:21.371962.After(03:06:21.371963195)
+          │             = false  (writtenAt is ~1.2µs BEFORE CompletedAt)
+          │    → applied=false, no StepStatusOverride emitted
+          │
+          │  store.Update(slip, <NO override>)
+          │    writes routing_slips version=.688
+          │      unit_tests_status = slip.Steps["unit_tests"].Status = "running"  ← STALE
+          │
+   RESULT routing_slips.unit_tests_status = running   (terminal regression, permanent)
+          routing_slips.status            = in_progress (slip stuck forever)
+```
+
+**Root cause:** `overlayPipelineStep` Guard 2 (`writtenAt.After(*step.CompletedAt)`)
+is a µs-precision comparison across two ClickHouse tables with independent
+consistency domains. `writtenAt` is the adapter clock captured BEFORE the library
+write; `step.CompletedAt` is the library's history-entry timestamp written AFTER.
+In a mixed-staleness Load (routing_slips FRESH + slip_component_states STALE in
+the same `hydrateSlip` call), `CompletedAt` can be non-nil/fresh while `Status`
+is still stale — and Guard 2 fails by the sub-microsecond ordering gap.
+
+The `a4e42db` comment defending the fall-through ("slip.Steps was just refreshed
+from ClickHouse, which is the argMax-resolved truth") was incorrect: `Status` comes
+from `slip_component_states` (potentially stale replica) while `CompletedAt` comes
+from `routing_slips` state_history (the FRESH table in this Load). Two tables,
+two consistency domains.
+
+**w4ai narrows but does not close:** with `wait_for_async_insert=1` the event INSERT
+commits before the `.524` routing_slips row is written, so the cross-table
+visibility inversion requires replica lag rather than the default async-flush
+ordering (est. 10–50× rarer). But ClickHouse Cloud SharedMergeTree replicas sync
+per-table with no cross-table consistency guarantee; no `select_sequential_consistency`
+anywhere in the read path. The window survives.
+
+**This commit closes it** by pinning the overlay unconditionally when the event-log
+lookup succeeds (`found=true, err=nil`): the event log is authoritative (w4ai
+makes it visible), so Guard 2's heuristic comparison is unnecessary and incorrect
+in the mixed-staleness case.
+
+### TIER 1 — per-correlationID Dragonfly lock (`withCorrIDLock`)
+
+Wraps `StartStep`, `CompleteStep`, `FailStep`, `SkipStep`, `PromoteSlip`,
+`AbandonSlip` adapters. Closes the `Load → mutate → Update` race for the
+**aggregate write-back** path (`s.Update(slip)`), which is NOT covered by the
+goLib gate.
+
+```text
+                  SlipWriteHandler.<verb>Step
+                          │
+                          │  validateCorrelationID(corrID)    (§M.1.2 UUID guard)
+                          │   └─ 400 BadRequest if malformed
+                          │
+                          │  SlipWriterAdapter.<verb>Step
+                          │   └─ withCorrIDLock(ctx, corrID, fn):
+                          │
+                          ▼
+              ┌──────────────────────────────────────┐
+              │  SLIPPY_I5_LOCK_ENABLED ?            │
+              │    no → fn() (fail-open, rollback)   │
+              │    yes ↓                              │
+              │                                       │
+              │  Dragonfly: SET sliplock:cid:<corrID> │
+              │             NX PX 2000ms              │
+              │    acquired=false → return            │
+              │                  ErrCorrIDWriteInProgress
+              │                  (→ 409 in mapWriteError)
+              │    acquired=true  ↓                   │
+              │                                       │
+              │  defer release (CAS-del via Lua,      │
+              │                 ctx.WithTimeout 2s    │
+              │                 to survive request    │
+              │                 cancel)               │
+              │                                       │
+              │  fn():                                │
+              │    slippy.Client.<verb>Step           │
+              │     └─ checkTerminalStatus            │
+              │     └─ store.UpdateStepWithHistory    │
+              │         └─ enforceTerminalMonotonicity  ← TIER 3 (goLib gate)
+              │         └─ insertComponentState       │
+              │     └─ aggregate write-back           │
+              │         └─ hydrateAndPersist          ← TIER 2 (R1 overlay)
+              │             └─ store.Update(slip)     │
+              └──────────────────────────────────────┘
+```
+
+**Key properties:**
+- `TryAcquire` is non-blocking — lock-miss returns 409 immediately (no
+  thundering herd, no head-of-line blocking).
+- Acquire propagates request `ctx` so client-cancellation aborts cleanly
+  (MISS-V2-2).
+- Release uses `context.WithTimeout(context.Background(), 2s)` so it survives
+  request-ctx cancellation (MISS-V2-3).
+- TTL = 2s — provisional, sized ~10× presumed p99. Stage-3 measurement
+  (§F.3) MUST verify before production rollout.
+
+### Combined race resolution (Pod A + Pod B walkthrough)
+
+How the three tiers compose to defeat the 436cc68c scenario:
+
+```text
+                  Pod A (complete)                    Pod B (start, racing)
+                  ----------------                    ---------------------
+   t0   POST /complete unit_tests
+        validateCorrelationID(corrID) → OK
+        withCorrIDLock acquire
+          SET sliplock:cid:<corrID> NX PX 2000  → OK (acquired)
+        ─────────────────  TIER 1 HOLDS  ─────────────────
+        Client.CompleteStep
+          ↓
+          checkTerminalStatus → not terminal (proceed)
+          store.UpdateStepWithHistory(..., COMPLETED)
+            ↓ TIER 3: enforceTerminalMonotonicity
+            ↓   prior = empty → ALLOW
+            ↓ insertComponentState (queued)
+          ↓
+          aggregate write-back
+            ↓ TIER 2: hydrateAndPersist
+            ↓   reload event log + recompute aggregates
+            ↓   store.Update(slip) under lock
+        withCorrIDLock release (CAS-del Lua)
+        ←────────────  TIER 1 RELEASED  ────────────
+        200 OK
+   t1                                            POST /start unit_tests
+                                                 validateCorrelationID → OK
+                                                 withCorrIDLock acquire
+                                                   SET sliplock:cid:<corrID>
+                                                       NX PX 2000  → OK
+                                                   (Pod A already released)
+                                                 Client.StartStep
+                                                   ↓
+                                                   checkTerminalStatus →
+                                                     slip.unit_tests = completed
+                                                     (TERMINAL)
+                                                   ↓
+                                                   short-circuit
+                                                   → return nil (idempotent skip,
+                                                                 per slippy-api
+                                                                 v1.3.77+)
+
+                                                 OR if checkTerminalStatus skipped:
+                                                   store.UpdateStep(..., RUNNING)
+                                                     ↓ TIER 3: gate
+                                                     ↓   prior = completed
+                                                     ↓   isRecoveryAllowed → false
+                                                     ↓   return ErrTerminalAlreadyExists
+                                                   → mapWriteError → 409 Conflict
+```
+
+**Outcome:** the terminal `completed` write WINS. Pod B is rejected at one of
+three layers (terminal-status guard, gate, or — if gate-disabled — at the R1
+overlay event-log validator). `argMax` regression is impossible because the
+INSERT never happens.
+
+### Defense-in-depth tier stack
+
+```text
+                  HTTP boundary    │   slippy-api    │   slippy lib (goLib)
+                  ─────────────────┼─────────────────┼─────────────────────
+                                    │                  │
+   Layer 0       validateCorrelat… │                  │
+                  (UUID format)     │                  │
+                                    │                  │
+   TIER 1        withCorrIDLock    │                  │
+                  (Dragonfly per-   │                  │
+                   corrID lock,     │                  │
+                   2s TTL, fail-open│                  │
+                   on nil locker)   │                  │
+                                    │                  │
+   checkTerminal …                  │  Client.<verb>  │
+   Status guard                     │  (slip-level    │
+                                    │   short-circuit) │
+                                    │                  │
+   TIER 2        hydrateAndPersist  │                  │
+   (R1 overlay)  (event-log         │                  │
+                  recompute +       │                  │
+                  validate before   │                  │
+                  store.Update)     │                  │
+                                    │                  │
+   TIER 3        enforceTerminal…   │                  │  clickhouse_store.go
+   (goLib gate)  Monotonicity       │                  │  :612 UpdateStep
+                  (81-cell allow-   │                  │  :673 UpdateStepWith…
+                   list matrix at   │                  │
+                   INSERT boundary, │                  │
+                   fail-open on     │                  │
+                   query err)       │                  │
+                                    │                  │
+                  ▼                  ▼                  ▼
+                  Even if TIER 1 (lock) misses (nil locker, flag off,
+                  Dragonfly outage), TIER 2 (R1 overlay) recomputes from
+                  the event log and rejects stale writes. Even if TIER 2
+                  is bypassed, TIER 3 refuses terminal-regressing INSERTs
+                  at the lowest layer.
+```
+
+Each tier is independently rollback-able via env flag and fails-open on
+transport errors, so a single failed tier degrades to the next without
+blocking writes.
+
+### Rollback flag matrix
+
+```text
+   GATE flag        | LOCK flag          | Behavior                | Risk profile
+   (goLib)          | (slippy-api)        |                          |
+   -----------------+--------------------+-------------------------+-----------------
+   unset / false    | unset / false      | Pre-cutover (current     | I5 bug live;
+                                          production)               status quo
+                                                                    |
+   unset / false    | true                | Lock only — closes       | Aggregate path
+                                          aggregate write-back      | safe; INSERT
+                                          race; gate inactive       | path still racy
+                                                                    |
+   true             | unset / false      | Gate only — refuses      | INSERT path safe;
+                                          terminal regressions at   | aggregate path
+                                          INSERT; lock inactive     | still racy
+                                          (CAN'T serialize same-µs  |
+                                          concurrent INSERTs;       |
+                                          weaker invariant per      |
+                                          §B.8 #17b)                |
+                                                                    |
+   true             | true                | FULL FIX — both layers   | I5 closed;
+                                          active; defense-in-depth  | target state
+```
+
+**Rollout sequence (per §G.1):**
+1. Both flags default OFF; merge both PRs.
+2. Enable `SLIPPY_I5_GATE_ENABLED=true` in staging; soak 48h.
+3. Enable `SLIPPY_I5_LOCK_ENABLED=true` in staging; soak 48h.
+4. Stage-3 measurement gate (§F.3): verify lock-hold p99 ≤ 500ms.
+5. PR 3 (Slippy CLI 409 retry-with-jitter) merged BEFORE step 6.
+6. Production GATE on, then LOCK on.
+7. Either flag can be flipped OFF for instant rollback.
+
+## Related
+
+- ADO #82468 — TMS infrastructure I5 stuck-slip class
+- slippy-api PR #39 (this PR) — Layer 1 (validation) + TIER 1 (lock) + TIER 2
+  (R1 overlay) + wires TIER 3 from the library
+- goLibMyCarrier PR #72 — TIER 3 INSERT-time monotonicity gate
+- Plan v3: `standup-notes/2026/06/resolve-i5-option1-stage2-plan-v3.md`
+- Production case: slip `436cc68c` (RCA in `standup-notes/2026/06/`)
+- Stage-6 iteration notes: `standup-notes/2026/06/resolve-i5-option1-stage6b-slippy-api.md`

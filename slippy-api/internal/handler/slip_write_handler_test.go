@@ -88,7 +88,7 @@ func TestCreateSlip_Success(t *testing.T) {
 	}
 	handler := setupWriteTestAPI(w)
 
-	body := `{"correlation_id":"abc-123","repository":"org/repo","branch":"main","commit_sha":"deadbeef"}`
+	body := `{"correlation_id":"11111111-2222-3333-4444-555555555555","repository":"org/repo","branch":"main","commit_sha":"deadbeef"}`
 	req := httptest.NewRequest(http.MethodPost, "/slips", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -99,7 +99,7 @@ func TestCreateSlip_Success(t *testing.T) {
 	var resp map[string]any
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	slip := resp["slip"].(map[string]any)
-	assert.Equal(t, "abc-123", slip["correlation_id"])
+	assert.Equal(t, "11111111-2222-3333-4444-555555555555", slip["correlation_id"])
 	assert.Equal(t, true, resp["ancestry_resolved"])
 }
 
@@ -116,7 +116,7 @@ func TestCreateSlip_WithComponents(t *testing.T) {
 	handler := setupWriteTestAPI(w)
 
 	body := `{
-		"correlation_id":"abc-123","repository":"org/repo","branch":"main","commit_sha":"dead",
+		"correlation_id":"11111111-2222-3333-4444-555555555555","repository":"org/repo","branch":"main","commit_sha":"dead",
 		"components":[{"name":"api","dockerfile_path":"src/Api/Dockerfile"}]
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/slips", strings.NewReader(body))
@@ -141,7 +141,7 @@ func TestCreateSlip_WithWarnings(t *testing.T) {
 	}
 	handler := setupWriteTestAPI(w)
 
-	body := `{"correlation_id":"abc","repository":"org/repo","branch":"main","commit_sha":"dead"}`
+	body := `{"correlation_id":"22222222-3333-4444-5555-666666666666","repository":"org/repo","branch":"main","commit_sha":"dead"}`
 	req := httptest.NewRequest(http.MethodPost, "/slips", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -180,7 +180,7 @@ func TestCreateSlip_InternalError(t *testing.T) {
 	}
 	handler := setupWriteTestAPI(w)
 
-	body := `{"correlation_id":"abc","repository":"org/repo","branch":"main","commit_sha":"dead"}`
+	body := `{"correlation_id":"33333333-4444-5555-6666-777777777777","repository":"org/repo","branch":"main","commit_sha":"dead"}`
 	req := httptest.NewRequest(http.MethodPost, "/slips", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -191,10 +191,68 @@ func TestCreateSlip_InternalError(t *testing.T) {
 
 // --- StartStep tests ---
 
+// TestStartStep_InvalidCorrelationID verifies the handler-boundary UUID
+// validation (defense-in-depth, plan v3 §M.1.2): the writer mock MUST NOT be
+// invoked when the correlationID is empty or malformed. A valid UUID still
+// reaches the writer and returns 2xx. Covers the gate that pairs with the
+// empty-corrID WARN in SlipWriterAdapter.instrumentedWrite.
+func TestStartStep_InvalidCorrelationID(t *testing.T) {
+	cases := []struct {
+		name    string
+		path    string
+		wantSts int
+		wantHit bool
+	}{
+		// Note: empty path segment causes Huma routing to 404 the request
+		// before the handler runs, so we only assert on malformed UUIDs
+		// which DO route to the handler and hit our validation gate.
+		{
+			name:    "malformed UUID",
+			path:    "/slips/not-a-uuid/steps/builds_completed/start",
+			wantSts: http.StatusBadRequest,
+			wantHit: false,
+		},
+		// "abc-123" is RETAINED here deliberately — asserts the UUID validator rejects short non-UUID with 400 (defense-in-depth boundary case).
+		{
+			name:    "short non-UUID",
+			path:    "/slips/abc-123/steps/builds_completed/start",
+			wantSts: http.StatusBadRequest,
+			wantHit: false,
+		},
+		{
+			name:    "valid UUID",
+			path:    "/slips/44444444-5555-6666-7777-888888888888/steps/builds_completed/start",
+			wantSts: http.StatusNoContent,
+			wantHit: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hit := false
+			w := &mockWriter{
+				startStepFn: func(_ context.Context, _, _, _ string) error {
+					hit = true
+					return nil
+				},
+			}
+			handler := setupWriteTestAPI(w)
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(`{}`))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			assert.Equal(t, tc.wantSts, rec.Code)
+			assert.Equal(t, tc.wantHit, hit,
+				"writer must NOT be invoked for invalid corrID; MUST be invoked for valid UUID")
+		})
+	}
+}
+
 func TestStartStep_Success(t *testing.T) {
 	w := &mockWriter{
 		startStepFn: func(_ context.Context, cID, step, comp string) error {
-			assert.Equal(t, "abc-123", cID)
+			assert.Equal(t, "11111111-2222-3333-4444-555555555555", cID)
 			assert.Equal(t, "builds_completed", step)
 			assert.Equal(t, "api", comp)
 			return nil
@@ -203,7 +261,7 @@ func TestStartStep_Success(t *testing.T) {
 	handler := setupWriteTestAPI(w)
 
 	body := `{"component_name":"api"}`
-	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/builds_completed/start", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/slips/11111111-2222-3333-4444-555555555555/steps/builds_completed/start", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -214,7 +272,7 @@ func TestStartStep_Success(t *testing.T) {
 func TestStartStep_NoBody(t *testing.T) {
 	w := &mockWriter{
 		startStepFn: func(_ context.Context, cID, step, comp string) error {
-			assert.Equal(t, "abc-123", cID)
+			assert.Equal(t, "11111111-2222-3333-4444-555555555555", cID)
 			assert.Equal(t, "push_parsed", step)
 			assert.Equal(t, "", comp)
 			return nil
@@ -222,7 +280,7 @@ func TestStartStep_NoBody(t *testing.T) {
 	}
 	handler := setupWriteTestAPI(w)
 
-	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/push_parsed/start", nil)
+	req := httptest.NewRequest(http.MethodPost, "/slips/11111111-2222-3333-4444-555555555555/steps/push_parsed/start", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -237,7 +295,7 @@ func TestStartStep_NotFound(t *testing.T) {
 	}
 	handler := setupWriteTestAPI(w)
 
-	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/builds_completed/start", strings.NewReader(`{}`))
+	req := httptest.NewRequest(http.MethodPost, "/slips/11111111-2222-3333-4444-555555555555/steps/builds_completed/start", strings.NewReader(`{}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -248,12 +306,12 @@ func TestStartStep_NotFound(t *testing.T) {
 func TestStartStep_StepError(t *testing.T) {
 	w := &mockWriter{
 		startStepFn: func(_ context.Context, _, _, _ string) error {
-			return slippy.NewStepError("update", "abc-123", "build", "api", errors.New("failed"))
+			return slippy.NewStepError("update", "11111111-2222-3333-4444-555555555555", "build", "api", errors.New("failed"))
 		},
 	}
 	handler := setupWriteTestAPI(w)
 
-	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/build/start", strings.NewReader(`{}`))
+	req := httptest.NewRequest(http.MethodPost, "/slips/11111111-2222-3333-4444-555555555555/steps/build/start", strings.NewReader(`{}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -271,7 +329,7 @@ func TestCompleteStep_Success(t *testing.T) {
 
 	req := httptest.NewRequest(
 		http.MethodPost,
-		"/slips/abc-123/steps/builds_completed/complete",
+		"/slips/11111111-2222-3333-4444-555555555555/steps/builds_completed/complete",
 		strings.NewReader(`{}`),
 	)
 	req.Header.Set("Content-Type", "application/json")
@@ -291,7 +349,7 @@ func TestCompleteStep_Error(t *testing.T) {
 
 	req := httptest.NewRequest(
 		http.MethodPost,
-		"/slips/abc-123/steps/builds_completed/complete",
+		"/slips/11111111-2222-3333-4444-555555555555/steps/builds_completed/complete",
 		strings.NewReader(`{}`),
 	)
 	req.Header.Set("Content-Type", "application/json")
@@ -306,7 +364,7 @@ func TestCompleteStep_Error(t *testing.T) {
 func TestFailStep_Success(t *testing.T) {
 	w := &mockWriter{
 		failStepFn: func(_ context.Context, cID, step, comp, reason string) error {
-			assert.Equal(t, "abc-123", cID)
+			assert.Equal(t, "11111111-2222-3333-4444-555555555555", cID)
 			assert.Equal(t, "build timeout", reason)
 			return nil
 		},
@@ -314,7 +372,7 @@ func TestFailStep_Success(t *testing.T) {
 	handler := setupWriteTestAPI(w)
 
 	body := `{"component_name":"api","reason":"build timeout"}`
-	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/builds_completed/fail", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/slips/11111111-2222-3333-4444-555555555555/steps/builds_completed/fail", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -331,7 +389,7 @@ func TestFailStep_NotFound(t *testing.T) {
 	handler := setupWriteTestAPI(w)
 
 	body := `{"reason":"timeout"}`
-	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/builds_completed/fail", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/slips/11111111-2222-3333-4444-555555555555/steps/builds_completed/fail", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -344,7 +402,7 @@ func TestFailStep_NotFound(t *testing.T) {
 func TestSkipStep_Success(t *testing.T) {
 	w := &mockWriter{
 		skipStepFn: func(_ context.Context, cID, step, comp, reason string) error {
-			assert.Equal(t, "abc-123", cID)
+			assert.Equal(t, "11111111-2222-3333-4444-555555555555", cID)
 			assert.Equal(t, "prod_rollback_status", step)
 			assert.Equal(t, "", comp)
 			assert.Equal(t, "alert-gate passed", reason)
@@ -356,7 +414,7 @@ func TestSkipStep_Success(t *testing.T) {
 	body := `{"reason":"alert-gate passed"}`
 	req := httptest.NewRequest(
 		http.MethodPost,
-		"/slips/abc-123/steps/prod_rollback_status/skip",
+		"/slips/11111111-2222-3333-4444-555555555555/steps/prod_rollback_status/skip",
 		strings.NewReader(body),
 	)
 	req.Header.Set("Content-Type", "application/json")
@@ -369,7 +427,7 @@ func TestSkipStep_Success(t *testing.T) {
 func TestSkipStep_WithComponent(t *testing.T) {
 	w := &mockWriter{
 		skipStepFn: func(_ context.Context, cID, step, comp, reason string) error {
-			assert.Equal(t, "abc-123", cID)
+			assert.Equal(t, "11111111-2222-3333-4444-555555555555", cID)
 			assert.Equal(t, "builds_completed", step)
 			assert.Equal(t, "api", comp)
 			assert.Equal(t, "not needed", reason)
@@ -379,7 +437,7 @@ func TestSkipStep_WithComponent(t *testing.T) {
 	handler := setupWriteTestAPI(w)
 
 	body := `{"component_name":"api","reason":"not needed"}`
-	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/builds_completed/skip", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/slips/11111111-2222-3333-4444-555555555555/steps/builds_completed/skip", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -390,7 +448,7 @@ func TestSkipStep_WithComponent(t *testing.T) {
 func TestSkipStep_NoBody(t *testing.T) {
 	w := &mockWriter{
 		skipStepFn: func(_ context.Context, cID, step, comp, reason string) error {
-			assert.Equal(t, "abc-123", cID)
+			assert.Equal(t, "11111111-2222-3333-4444-555555555555", cID)
 			assert.Equal(t, "prod_rollback_status", step)
 			assert.Equal(t, "", comp)
 			assert.Equal(t, "", reason)
@@ -401,7 +459,7 @@ func TestSkipStep_NoBody(t *testing.T) {
 
 	req := httptest.NewRequest(
 		http.MethodPost,
-		"/slips/abc-123/steps/prod_rollback_status/skip",
+		"/slips/11111111-2222-3333-4444-555555555555/steps/prod_rollback_status/skip",
 		strings.NewReader(`{}`),
 	)
 	req.Header.Set("Content-Type", "application/json")
@@ -414,7 +472,7 @@ func TestSkipStep_NoBody(t *testing.T) {
 func TestSkipStep_NilBody(t *testing.T) {
 	w := &mockWriter{
 		skipStepFn: func(_ context.Context, cID, step, comp, reason string) error {
-			assert.Equal(t, "abc-123", cID)
+			assert.Equal(t, "11111111-2222-3333-4444-555555555555", cID)
 			assert.Equal(t, "prod_rollback_status", step)
 			assert.Equal(t, "", comp)
 			assert.Equal(t, "", reason)
@@ -423,7 +481,7 @@ func TestSkipStep_NilBody(t *testing.T) {
 	}
 	handler := setupWriteTestAPI(w)
 
-	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/prod_rollback_status/skip", nil)
+	req := httptest.NewRequest(http.MethodPost, "/slips/11111111-2222-3333-4444-555555555555/steps/prod_rollback_status/skip", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -439,7 +497,7 @@ func TestSkipStep_NotFound(t *testing.T) {
 	handler := setupWriteTestAPI(w)
 
 	body := `{"reason":"skip it"}`
-	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/builds_completed/skip", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/slips/11111111-2222-3333-4444-555555555555/steps/builds_completed/skip", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -456,7 +514,7 @@ func TestSkipStep_InternalError(t *testing.T) {
 	handler := setupWriteTestAPI(w)
 
 	body := `{"reason":"skip it"}`
-	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/builds_completed/skip", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/slips/11111111-2222-3333-4444-555555555555/steps/builds_completed/skip", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -469,7 +527,7 @@ func TestSkipStep_InternalError(t *testing.T) {
 func TestSetImageTag_Success(t *testing.T) {
 	w := &mockWriter{
 		setComponentImageTagFn: func(_ context.Context, cID, comp, tag string) error {
-			assert.Equal(t, "abc-123", cID)
+			assert.Equal(t, "11111111-2222-3333-4444-555555555555", cID)
 			assert.Equal(t, "api", comp)
 			assert.Equal(t, "26.09.abc1234", tag)
 			return nil
@@ -478,7 +536,7 @@ func TestSetImageTag_Success(t *testing.T) {
 	handler := setupWriteTestAPI(w)
 
 	body := `{"image_tag":"26.09.abc1234"}`
-	req := httptest.NewRequest(http.MethodPut, "/slips/abc-123/components/api/image-tag", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPut, "/slips/11111111-2222-3333-4444-555555555555/components/api/image-tag", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -495,7 +553,7 @@ func TestSetImageTag_NotFound(t *testing.T) {
 	handler := setupWriteTestAPI(w)
 
 	body := `{"image_tag":"26.09.abc1234"}`
-	req := httptest.NewRequest(http.MethodPut, "/slips/abc-123/components/api/image-tag", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPut, "/slips/11111111-2222-3333-4444-555555555555/components/api/image-tag", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -512,7 +570,7 @@ func TestSetImageTag_InternalError(t *testing.T) {
 	handler := setupWriteTestAPI(w)
 
 	body := `{"image_tag":"26.09.abc1234"}`
-	req := httptest.NewRequest(http.MethodPut, "/slips/abc-123/components/api/image-tag", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPut, "/slips/11111111-2222-3333-4444-555555555555/components/api/image-tag", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -533,13 +591,13 @@ func TestPromoteSlip_Success(t *testing.T) {
 	handler := setupWriteTestAPI(w)
 
 	body := `{"promoted_to":"corr-main-merge"}`
-	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/promote", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/slips/11111111-2222-3333-4444-555555555555/promote", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusNoContent, rec.Code)
-	assert.Equal(t, "abc-123", gotCID)
+	assert.Equal(t, "11111111-2222-3333-4444-555555555555", gotCID)
 	assert.Equal(t, "corr-main-merge", gotPromotedTo)
 }
 
@@ -552,7 +610,7 @@ func TestPromoteSlip_NotFound(t *testing.T) {
 	handler := setupWriteTestAPI(w)
 
 	body := `{"promoted_to":"corr-main"}`
-	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/promote", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/slips/11111111-2222-3333-4444-555555555555/promote", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -569,7 +627,7 @@ func TestPromoteSlip_InternalError(t *testing.T) {
 	handler := setupWriteTestAPI(w)
 
 	body := `{"promoted_to":"corr-main"}`
-	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/promote", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/slips/11111111-2222-3333-4444-555555555555/promote", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -590,13 +648,13 @@ func TestAbandonSlip_Success(t *testing.T) {
 	handler := setupWriteTestAPI(w)
 
 	body := `{"superseded_by":"corr-new-push"}`
-	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/abandon", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/slips/11111111-2222-3333-4444-555555555555/abandon", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusNoContent, rec.Code)
-	assert.Equal(t, "abc-123", gotCID)
+	assert.Equal(t, "11111111-2222-3333-4444-555555555555", gotCID)
 	assert.Equal(t, "corr-new-push", gotSupersededBy)
 }
 
@@ -609,7 +667,7 @@ func TestAbandonSlip_NotFound(t *testing.T) {
 	handler := setupWriteTestAPI(w)
 
 	body := `{"superseded_by":"corr-new"}`
-	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/abandon", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/slips/11111111-2222-3333-4444-555555555555/abandon", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -626,7 +684,7 @@ func TestAbandonSlip_InternalError(t *testing.T) {
 	handler := setupWriteTestAPI(w)
 
 	body := `{"superseded_by":"corr-new"}`
-	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/abandon", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/slips/11111111-2222-3333-4444-555555555555/abandon", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -659,6 +717,20 @@ func TestMapWriteError(t *testing.T) {
 			fmt.Errorf("dedup: slip for repo:sha creation in progress, retry: %w", domain.ErrCreationInProgress),
 			http.StatusConflict,
 		},
+		// I5 Option 1 — terminal monotonicity gate refused the transition.
+		// Plan v3 §C.1: must be 409, not 422 (the default StepError path).
+		{"terminal already exists (sentinel)", slippy.ErrTerminalAlreadyExists, http.StatusConflict},
+		// Plan v3 §C.1: the library wraps the sentinel in a *slippy.StepError.
+		// The 409 mapping must precede the As(*StepError) → 422 branch.
+		{
+			"terminal already exists (wrapped in StepError, as the library returns it)",
+			slippy.NewStepError("update", "id", "step", "comp", slippy.ErrTerminalAlreadyExists),
+			http.StatusConflict,
+		},
+		// I5 Option 1 — per-correlationID lock contention.
+		{"corrID write in progress (sentinel)", domain.ErrCorrIDWriteInProgress, http.StatusConflict},
+		// Domain-level invalid corrID format (handler boundary validator).
+		{"invalid corrID format (sentinel)", domain.ErrInvalidCorrelationID, http.StatusBadRequest},
 		// context.Canceled / context.DeadlineExceeded map to 504 GatewayTimeout.
 		// These errors are only produced for insert-failure paths (start/skip and
 		// pipeline-level complete/fail where componentName == ""), where a write-op
@@ -695,6 +767,51 @@ func TestMapWriteError(t *testing.T) {
 	}
 }
 
+// TestMapWriteError_TerminalAlreadyExists_Returns409 is an explicit ordering
+// test (plan v3 §C.1): the library returns ErrTerminalAlreadyExists wrapped
+// in a *slippy.StepError. A naive errors.As(*StepError) branch would map
+// the wrapped form to 422 Unprocessable Entity instead of 409 Conflict.
+// The 409 branch MUST precede the As(*StepError) branch in mapWriteError.
+func TestMapWriteError_TerminalAlreadyExists_Returns409(t *testing.T) {
+	// Bare sentinel.
+	got1 := mapWriteError(slippy.ErrTerminalAlreadyExists)
+	var he1 huma.StatusError
+	require.ErrorAs(t, got1, &he1)
+	assert.Equal(t, http.StatusConflict, he1.GetStatus(),
+		"bare ErrTerminalAlreadyExists MUST map to 409 (plan v3 §C.1)")
+
+	// Wrapped in *slippy.StepError as the library actually returns it.
+	wrapped := slippy.NewStepError(
+		"update", "11111111-2222-3333-4444-555555555555", "push_parsed", "",
+		slippy.ErrTerminalAlreadyExists,
+	)
+	got2 := mapWriteError(wrapped)
+	var he2 huma.StatusError
+	require.ErrorAs(t, got2, &he2)
+	assert.Equal(t, http.StatusConflict, he2.GetStatus(),
+		"StepError-wrapped ErrTerminalAlreadyExists MUST map to 409, NOT 422")
+}
+
+// TestMapWriteError_CorrIDWriteInProgress_Returns409 verifies the per-corrID
+// lock miss surfaces as 409 (plan v3 §C.1, §M.7). Bare and StepError-wrapped
+// variants are both checked even though the adapter currently returns the
+// bare form — future caller layers may wrap.
+func TestMapWriteError_CorrIDWriteInProgress_Returns409(t *testing.T) {
+	got1 := mapWriteError(domain.ErrCorrIDWriteInProgress)
+	var he1 huma.StatusError
+	require.ErrorAs(t, got1, &he1)
+	assert.Equal(t, http.StatusConflict, he1.GetStatus(),
+		"ErrCorrIDWriteInProgress MUST map to 409")
+
+	// Wrapped form for defense in depth.
+	wrapped := fmt.Errorf("adapter: %w", domain.ErrCorrIDWriteInProgress)
+	got2 := mapWriteError(wrapped)
+	var he2 huma.StatusError
+	require.ErrorAs(t, got2, &he2)
+	assert.Equal(t, http.StatusConflict, he2.GetStatus(),
+		"wrapped ErrCorrIDWriteInProgress MUST map to 409")
+}
+
 // TestStartStep_ContextDeadlineExceeded_Returns504 verifies the full HTTP
 // round-trip: when the writer returns context.DeadlineExceeded the handler must
 // respond 504 GatewayTimeout, not 202. A deadline reaching mapWriteError means
@@ -710,7 +827,7 @@ func TestStartStep_ContextDeadlineExceeded_Returns504(t *testing.T) {
 	}
 	handler := setupWriteTestAPI(w)
 
-	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/push_parsed/start", nil)
+	req := httptest.NewRequest(http.MethodPost, "/slips/11111111-2222-3333-4444-555555555555/steps/push_parsed/start", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -730,7 +847,7 @@ func TestCompleteStep_ContextCanceled_Returns504(t *testing.T) {
 
 	req := httptest.NewRequest(
 		http.MethodPost,
-		"/slips/abc-123/steps/push_parsed/complete",
+		"/slips/11111111-2222-3333-4444-555555555555/steps/push_parsed/complete",
 		strings.NewReader(`{}`),
 	)
 	req.Header.Set("Content-Type", "application/json")
@@ -813,7 +930,7 @@ func TestCompleteStep_AllowsRecoveryFromFailed(t *testing.T) {
 	}
 	handler := setupWriteTestAPI(w)
 
-	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/prod_deploy/complete", nil)
+	req := httptest.NewRequest(http.MethodPost, "/slips/11111111-2222-3333-4444-555555555555/steps/prod_deploy/complete", nil)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)

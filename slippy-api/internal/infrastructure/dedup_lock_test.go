@@ -189,7 +189,9 @@ func newWriterAdapterWithDeps(store slippy.SlipStore, locker Locker, reader doma
 		AncestryDepth:  5,
 		PipelineConfig: pipelineCfg,
 	})
-	a := NewSlipWriterAdapter(client, locker, reader)
+	// dedup-lock tests don't touch the per-correlationID lock path, so the
+	// I5 lock flag is injected as false (production default).
+	a := NewSlipWriterAdapter(client, locker, reader, false)
 	// Shrink the poll wait so the timeout test is fast.
 	a.lockWait = 300 * time.Millisecond
 	return a

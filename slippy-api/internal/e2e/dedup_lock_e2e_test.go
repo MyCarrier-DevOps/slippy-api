@@ -48,13 +48,48 @@ type asyncInsertSlipStore struct {
 	visibleAt map[string]time.Time
 	insertLag time.Duration
 	creates   int // total Create calls that succeeded (== materialized slip count)
+
+	// stepEvents tracks the latest pipeline-level (componentName == "") step
+	// status per correlation_id for the I5 R1 (ADO #82468) reproducer. Indexed
+	// by correlationID → stepName → latest status with its visibleAt timestamp
+	// so the read path respects the same async-insert visibility window as the
+	// routing_slips path. Default zero-value: no events recorded.
+	stepEvents map[string]map[string]stepEventEntry
+}
+
+// stepEventEntry is the per-(correlation_id, step) event-log row used by
+// asyncInsertSlipStore. The status is durable as of writtenAt + insertLag,
+// matching the async-insert visibility model already applied to routing_slips.
+type stepEventEntry struct {
+	status    slippy.StepStatus
+	visibleAt time.Time
 }
 
 func newAsyncInsertSlipStore(lag time.Duration) *asyncInsertSlipStore {
 	return &asyncInsertSlipStore{
-		byCorr:    make(map[string]*slippy.Slip),
-		visibleAt: make(map[string]time.Time),
-		insertLag: lag,
+		byCorr:     make(map[string]*slippy.Slip),
+		visibleAt:  make(map[string]time.Time),
+		insertLag:  lag,
+		stepEvents: make(map[string]map[string]stepEventEntry),
+	}
+}
+
+// recordStepEvent registers a pipeline-level step status transition into the
+// in-memory event log. componentName is non-empty for aggregate steps and is
+// intentionally NOT recorded here — the I5 R1 guard only consults pipeline-level
+// events. Visibility is gated by insertLag to mirror the routing_slips path.
+//
+// Callers must already hold s.mu.
+func (s *asyncInsertSlipStore) recordStepEvent(correlationID, stepName, componentName string, status slippy.StepStatus) {
+	if componentName != "" {
+		return
+	}
+	if s.stepEvents[correlationID] == nil {
+		s.stepEvents[correlationID] = make(map[string]stepEventEntry)
+	}
+	s.stepEvents[correlationID][stepName] = stepEventEntry{
+		status:    status,
+		visibleAt: time.Now().Add(s.insertLag),
 	}
 }
 
@@ -139,7 +174,7 @@ func (s *asyncInsertSlipStore) FindAllByCommits(
 	return nil, nil
 }
 
-func (s *asyncInsertSlipStore) Update(_ context.Context, slip *slippy.Slip) error {
+func (s *asyncInsertSlipStore) Update(_ context.Context, slip *slippy.Slip, _ ...slippy.StepStatusOverride) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cp := *slip
@@ -147,14 +182,45 @@ func (s *asyncInsertSlipStore) Update(_ context.Context, slip *slippy.Slip) erro
 	return nil
 }
 
-func (s *asyncInsertSlipStore) UpdateStep(_ context.Context, _, _, _ string, _ slippy.StepStatus) error {
+func (s *asyncInsertSlipStore) UpdateStep(_ context.Context, id, step, comp string, status slippy.StepStatus) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recordStepEvent(id, step, comp, status)
 	return nil
 }
 
 func (s *asyncInsertSlipStore) UpdateStepWithHistory(
-	_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry,
+	_ context.Context, id, step, comp string, status slippy.StepStatus, _ slippy.StateHistoryEntry,
 ) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recordStepEvent(id, step, comp, status)
 	return nil
+}
+
+// LatestStepStatusFromEvents implements the R1 (ADO #82468) event-log lookup
+// against the in-memory step event store. Visibility is gated by insertLag so
+// the dedup/cross-step tests can exercise the same async-insert window the
+// routing_slips path already simulates. Returns ("", false, nil) when no event
+// has been recorded OR when the event is still inside its visibility lag.
+func (s *asyncInsertSlipStore) LatestStepStatusFromEvents(
+	_ context.Context, correlationID, step string,
+) (slippy.StepStatus, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	stepMap, ok := s.stepEvents[correlationID]
+	if !ok {
+		return "", false, nil
+	}
+	entry, ok := stepMap[step]
+	if !ok {
+		return "", false, nil
+	}
+	if time.Now().Before(entry.visibleAt) {
+		// inside the async-insert visibility window — treat as "not yet visible"
+		return "", false, nil
+	}
+	return entry.status, true, nil
 }
 
 func (s *asyncInsertSlipStore) UpdateComponentStatus(_ context.Context, _, _, _ string, _ slippy.StepStatus) error {
@@ -242,7 +308,9 @@ func buildDedupWriteServer(
 
 	locker := infrastructure.NewRedisLocker(rdb)
 	reader := storeReaderAdapter{store: store}
-	writer := infrastructure.NewSlipWriterAdapter(client, locker, reader)
+	// dedup E2E exercises the repo:sha lock path; the I5 per-corrID lock is OFF
+	// (production default) so failing to inject it does not affect this scenario.
+	writer := infrastructure.NewSlipWriterAdapter(client, locker, reader, false)
 
 	mux := http.NewServeMux()
 	apiConfig := huma.DefaultConfig("Slippy API Dedup E2E", "0.0.1")
@@ -281,7 +349,7 @@ func buildNoLockWriteServer(
 
 	// Nil locker → dedup disabled (original lock-free behavior).
 	reader := storeReaderAdapter{store: store}
-	writer := infrastructure.NewSlipWriterAdapter(client, nil, reader)
+	writer := infrastructure.NewSlipWriterAdapter(client, nil, reader, false)
 
 	mux := http.NewServeMux()
 	apiConfig := huma.DefaultConfig("Slippy API No-Lock E2E", "0.0.1")
@@ -349,7 +417,10 @@ func TestE2E_DedupLock_ConcurrentDuplicatePost(t *testing.T) {
 		out  handler.CreateSlipOutput
 	}
 	results := make([]result, 2)
-	corrIDs := []string{"corr-dup-A", "corr-dup-B"}
+	corrIDs := []string{
+		"aaaaaaaa-1111-2222-3333-444444444444",
+		"bbbbbbbb-1111-2222-3333-444444444444",
+	}
 
 	var wg sync.WaitGroup
 	start := make(chan struct{})
@@ -404,7 +475,10 @@ func TestE2E_NoLock_ConcurrentDuplicatePost_CreatesTwo(t *testing.T) {
 		out  handler.CreateSlipOutput
 	}
 	results := make([]result, 2)
-	corrIDs := []string{"corr-nolock-A", "corr-nolock-B"}
+	corrIDs := []string{
+		"cccccccc-1111-2222-3333-444444444444",
+		"dddddddd-1111-2222-3333-444444444444",
+	}
 
 	var wg sync.WaitGroup
 	start := make(chan struct{})
@@ -450,7 +524,7 @@ func TestE2E_DedupLock_SequentialDuplicate_Idempotent(t *testing.T) {
 
 	const repo, branch, sha = "org/repo", "main", "seq-sha-001"
 
-	code1, out1 := postCreateSlip(t, srv, authHeader, "seq-A", repo, branch, sha)
+	code1, out1 := postCreateSlip(t, srv, authHeader, "eeeeeeee-1111-2222-3333-444444444444", repo, branch, sha)
 	require.Equal(t, http.StatusCreated, code1)
 	require.NotNil(t, out1.Body.Slip)
 
@@ -458,7 +532,7 @@ func TestE2E_DedupLock_SequentialDuplicate_Idempotent(t *testing.T) {
 	// retry path (existing non-terminal slip) returns the same slip idempotently.
 	mr.FastForward(infrastructure.DefaultLockTTL + time.Second)
 
-	code2, out2 := postCreateSlip(t, srv, authHeader, "seq-B", repo, branch, sha)
+	code2, out2 := postCreateSlip(t, srv, authHeader, "ffffffff-1111-2222-3333-444444444444", repo, branch, sha)
 	require.Equal(t, http.StatusCreated, code2)
 	require.NotNil(t, out2.Body.Slip)
 

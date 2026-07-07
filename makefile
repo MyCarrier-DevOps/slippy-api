@@ -31,6 +31,23 @@ test:
 		fi; \
 	done
 
+# Run integration tests (requires Docker for testcontainers — CH 25.x).
+# Default `make test` stays Docker-free for fast inner loop. Use this target
+# in CI or locally to exercise the I5 async-insert reproducer (ADO #82468).
+.PHONY: test-integration
+test-integration:
+	@echo "Running integration tests (requires Docker)..."
+	@for dir in $(MODULES); do \
+		if [ -d "$$dir" ]; then \
+			if [ "$$dir" != "slippy-client" ]; then \
+				echo "Integration-testing $$dir module..."; \
+				(cd $$dir && go mod download && go test -tags=integration -race -count=1 ./...); \
+			fi; \
+		else \
+			echo "Directory $$dir not found, skipping..."; \
+		fi; \
+	done
+
 .PHONY: clean
 clean:
 	@echo "Cleaning all modules..."
