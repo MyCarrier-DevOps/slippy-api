@@ -18,34 +18,6 @@ import (
 	"github.com/MyCarrier-DevOps/slippy-api/internal/domain"
 )
 
-// slippyI5LockEnabledEnv gates per-correlationID lock acquisition for the
-// adapter's mutating methods. Plan v3 §G.1 mandates the flag default OFF so
-// PR 2 (this code) ships without behavior change, then is enabled in a
-// staged rollout only AFTER PR 3 (Slippy CLI 409 retry-with-jitter) lands —
-// otherwise legitimate same-correlationID contention surfaces as workflow
-// step failures with no Argo retry coverage (plan v3 §M.7).
-const slippyI5LockEnabledEnv = "SLIPPY_I5_LOCK_ENABLED"
-
-// ParseI5LockFlag reads SLIPPY_I5_LOCK_ENABLED from the process environment and
-// returns whether the per-correlationID write lock should be active for this
-// adapter. Pure parser — no side effects. Composition root (main.go) MUST call
-// this once at startup, log the resulting state, and pass the bool into
-// NewSlipWriterAdapter for dependency injection.
-//
-// Splitting the side-effect (the slog.Info) out of the constructor keeps the
-// adapter SRP-clean (no env or logging coupling at construction) and lets
-// tests instantiate adapters in parallel without t.Setenv races.
-//
-// Parsing uses strconv.ParseBool so the accepted truthy/falsy set is the
-// canonical Go convention (1/t/T/TRUE/true/True/0/f/F/FALSE/false/False).
-// Any other value (including empty) is treated as OFF — the plan v3 §G.1
-// default.
-func ParseI5LockFlag() (enabled bool, raw string) {
-	raw = os.Getenv(slippyI5LockEnabledEnv)
-	v, err := strconv.ParseBool(raw)
-	return err == nil && v, raw
-}
-
 // writerTracerName is the instrumentation scope for write operations.
 const writerTracerName = "slippy-api/writer"
 
@@ -142,71 +114,34 @@ func writeContext(ctx context.Context) (context.Context, context.CancelFunc) {
 // include atomic history appends.
 type SlipWriterAdapter struct {
 	client *slippy.Client
-	// locker serializes BOTH CreateSlipForPush across processes on a repo:sha
-	// key (prevents phantom-slip duplicates from GitHub push webhooks) AND step
-	// mutations across processes on a sliplock:cid:<corrID> key (prevents
-	// concurrent Load → mutate → Update races that materialize the I5 bug).
-	// A nil locker disables BOTH lock paths (cache disabled / ping failed)
+	// locker serializes CreateSlipForPush across processes on a repo:sha key to
+	// prevent duplicate GitHub push webhooks from creating two routing slips
+	// ("phantom slip"). A nil locker disables dedup (cache disabled / ping failed)
 	// and preserves the original lock-free behavior.
 	locker Locker
-	// reader is used on the dedup lock-miss path to poll for the in-flight slip
-	// so a suppressed duplicate returns the SAME slip (true idempotency). Only
-	// consulted when locker is non-nil and the lock was not acquired.
+	// reader is used on the lock-miss path to poll for the in-flight slip so a
+	// suppressed duplicate returns the SAME slip (true idempotency). Only consulted
+	// when locker is non-nil and the lock was not acquired.
 	reader domain.SlipReader
-	// lockTTL / lockWait tune the repo:sha dedup lock. Zero values fall back to
-	// defaults. The per-correlationID lock uses its own (shorter) TTL constants.
+	// lockTTL / lockWait tune the dedup lock. Zero values fall back to defaults.
 	lockTTL  time.Duration
 	lockWait time.Duration
-	// corrIDLockOn captures the SLIPPY_I5_LOCK_ENABLED state at adapter
-	// construction. Sampled once to avoid mid-flight flag flips producing a
-	// confused state (some calls under the lock, some not).
-	corrIDLockOn bool
-	// corrIDLockTTL bounds the per-correlationID lock hold. Distinct from
-	// lockTTL because the corr-id lock guards the Load+mutate+Update path
-	// (~5–30 ms typical) whereas the repo:sha lock spans the full
-	// CreateSlipForPush including ancestry resolution and async-insert
-	// visibility waits.
-	corrIDLockTTL time.Duration
-	// log is the structured logger used for fail-open warnings (corr-id lock
-	// acquire/release failures, observability seam for the LatestStepStatus
-	// query failure). Defaults to slog.Default() when not injected.
-	log *slog.Logger
 }
 
 // NewSlipWriterAdapter wraps a slippy.Client as a SlipWriter.
 //
-// locker and reader enable cross-process slip-creation deduplication AND the
-// per-correlationID write lock (plan v3 §M). Pass a nil locker to disable both
-// lock paths (the original behavior) — for example when the Dragonfly/Redis
-// cache is not configured or its startup ping failed (fail-open). reader is
-// only consulted on the dedup lock-miss path; it may be the cache-decorated
+// locker and reader enable cross-process slip-creation deduplication. Pass a nil
+// locker to disable dedup entirely (the original behavior) — for example when the
+// Dragonfly/Redis cache is not configured or its startup ping failed (fail-open).
+// reader is only consulted on the lock-miss path; it may be the cache-decorated
 // reader so the poll observes committed rows.
-//
-// i5LockEnabled is the resolved SLIPPY_I5_LOCK_ENABLED state. The composition
-// root (main.go) MUST compute it once via ParseI5LockFlag and log it once
-// alongside the other startup banner lines, then pass it here. This DI seam
-// keeps the constructor free of env / logging side effects so tests can run
-// in parallel without t.Setenv races.
-//
-// Defaults OFF (plan v3 §G.1) — production enablement BLOCKED until PR 3
-// (Slippy CLI 409 retry-with-jitter) lands, per plan v3 §M.7. Until then,
-// turning the flag on would expose legitimate lock-contention as workflow
-// step failures with no Argo retry coverage.
-func NewSlipWriterAdapter(
-	client *slippy.Client,
-	locker Locker,
-	reader domain.SlipReader,
-	i5LockEnabled bool,
-) *SlipWriterAdapter {
+func NewSlipWriterAdapter(client *slippy.Client, locker Locker, reader domain.SlipReader) *SlipWriterAdapter {
 	return &SlipWriterAdapter{
-		client:        client,
-		locker:        locker,
-		reader:        reader,
-		lockTTL:       DefaultLockTTL,
-		lockWait:      DefaultLockWait,
-		corrIDLockOn:  i5LockEnabled,
-		corrIDLockTTL: DefaultCorrIDLockTTL,
-		log:           slog.Default(),
+		client:   client,
+		locker:   locker,
+		reader:   reader,
+		lockTTL:  DefaultLockTTL,
+		lockWait: DefaultLockWait,
 	}
 }
 
@@ -296,7 +231,7 @@ func (a *SlipWriterAdapter) CreateSlipForPush(
 }
 
 func (a *SlipWriterAdapter) StartStep(ctx context.Context, correlationID, stepName, componentName string) error {
-	return a.instrumentedWrite(ctx, "writer.StartStep", correlationID,
+	return a.instrumentedWrite(ctx, "writer.StartStep",
 		[]attribute.KeyValue{
 			attribute.String("slip.correlation_id", correlationID),
 			attribute.String("slip.step_name", stepName),
@@ -334,7 +269,7 @@ func (a *SlipWriterAdapter) StartStep(ctx context.Context, correlationID, stepNa
 }
 
 func (a *SlipWriterAdapter) CompleteStep(ctx context.Context, correlationID, stepName, componentName string) error {
-	return a.instrumentedWrite(ctx, "writer.CompleteStep", correlationID,
+	return a.instrumentedWrite(ctx, "writer.CompleteStep",
 		[]attribute.KeyValue{
 			attribute.String("slip.correlation_id", correlationID),
 			attribute.String("slip.step_name", stepName),
@@ -386,7 +321,7 @@ func (a *SlipWriterAdapter) CompleteStep(ctx context.Context, correlationID, ste
 }
 
 func (a *SlipWriterAdapter) FailStep(ctx context.Context, correlationID, stepName, componentName, reason string) error {
-	return a.instrumentedWrite(ctx, "writer.FailStep", correlationID,
+	return a.instrumentedWrite(ctx, "writer.FailStep",
 		[]attribute.KeyValue{
 			attribute.String("slip.correlation_id", correlationID),
 			attribute.String("slip.step_name", stepName),
@@ -439,7 +374,7 @@ func (a *SlipWriterAdapter) FailStep(ctx context.Context, correlationID, stepNam
 }
 
 func (a *SlipWriterAdapter) SkipStep(ctx context.Context, correlationID, stepName, componentName, reason string) error {
-	return a.instrumentedWrite(ctx, "writer.SkipStep", correlationID,
+	return a.instrumentedWrite(ctx, "writer.SkipStep",
 		[]attribute.KeyValue{
 			attribute.String("slip.correlation_id", correlationID),
 			attribute.String("slip.step_name", stepName),
@@ -480,7 +415,7 @@ func (a *SlipWriterAdapter) SetComponentImageTag(
 	ctx context.Context,
 	correlationID, componentName, imageTag string,
 ) error {
-	return a.instrumentedWrite(ctx, "writer.SetComponentImageTag", correlationID,
+	return a.instrumentedWrite(ctx, "writer.SetComponentImageTag",
 		[]attribute.KeyValue{
 			attribute.String("slip.correlation_id", correlationID),
 			attribute.String("slip.component_name", componentName),
@@ -492,13 +427,8 @@ func (a *SlipWriterAdapter) SetComponentImageTag(
 	)
 }
 
-// PromoteSlip is wrapped by the per-correlationID lock (plan v3 §C.10.1, Mod 2)
-// because client.go:182 PromoteSlip executes store.Update(slip) with the full
-// slip including step columns — the same Load → mutate → Update race that
-// motivated the lock for StartStep/CompleteStep applies here. Pod-A promoting
-// could overwrite Pod-B's concurrent valid CompleteStep otherwise.
 func (a *SlipWriterAdapter) PromoteSlip(ctx context.Context, correlationID, promotedTo string) error {
-	return a.instrumentedWrite(ctx, "writer.PromoteSlip", correlationID,
+	return a.instrumentedWrite(ctx, "writer.PromoteSlip",
 		[]attribute.KeyValue{
 			attribute.String("slip.correlation_id", correlationID),
 			attribute.String("slip.promoted_to", promotedTo),
@@ -509,11 +439,8 @@ func (a *SlipWriterAdapter) PromoteSlip(ctx context.Context, correlationID, prom
 	)
 }
 
-// AbandonSlip is wrapped by the per-correlationID lock for the same reason as
-// PromoteSlip — client.go:217 AbandonSlip also performs store.Update with the
-// full slip (plan v3 §C.10.1, Mod 2).
 func (a *SlipWriterAdapter) AbandonSlip(ctx context.Context, correlationID, supersededBy string) error {
-	return a.instrumentedWrite(ctx, "writer.AbandonSlip", correlationID,
+	return a.instrumentedWrite(ctx, "writer.AbandonSlip",
 		[]attribute.KeyValue{
 			attribute.String("slip.correlation_id", correlationID),
 			attribute.String("slip.superseded_by", supersededBy),
@@ -526,22 +453,12 @@ func (a *SlipWriterAdapter) AbandonSlip(ctx context.Context, correlationID, supe
 
 // instrumentedWrite is the single entry point for durable step/terminal
 // writes. It starts a tracer span, derives a cancellation-detached write
-// context via writeContext, applies the per-correlationID lock (I5 R1 fix —
-// plan v3 §M), and invokes op with that ctx and the span. All adapter
-// methods that mutate slip state route through here, so the WithoutCancel
-// + writeOpTimeout + corrID-lock guarantees can't be silently dropped by a
+// context via writeContext, and invokes op with that ctx and the span.
+// All adapter methods that mutate slip state route through here, so the
+// WithoutCancel + writeOpTimeout guarantee can't be silently dropped by a
 // future method that forgets the wrap — adding a new write method without
-// this helper is the only way to lose the guarantees, and that omission is
+// this helper is the only way to lose the guarantee, and that omission is
 // loud in review.
-//
-// correlationID may be empty for writes that don't target a specific slip
-// (none currently — all step/terminal/dedup writes have one). When empty,
-// the lock is bypassed; the handler-boundary validator
-// handler.validateCorrelationID (slip_write_handler.go, added in commit
-// f101d77 per PR #39 review) is the first line of defense and rejects
-// malformed UUIDs with HTTP 400 before any write path runs. This bypass
-// keeps the adapter resilient if a future non-HTTP caller forwards an
-// empty corrID — the WARN log below makes the regression observable.
 //
 // The closure receives only wctx for use with the upstream client and
 // hydrateAndPersist — the caller-supplied ctx is exclusively for span
@@ -550,7 +467,6 @@ func (a *SlipWriterAdapter) AbandonSlip(ctx context.Context, correlationID, supe
 func (a *SlipWriterAdapter) instrumentedWrite(
 	ctx context.Context,
 	spanName string,
-	correlationID string,
 	attrs []attribute.KeyValue,
 	op func(wctx context.Context, span trace.Span) error,
 ) error {
@@ -563,122 +479,11 @@ func (a *SlipWriterAdapter) instrumentedWrite(
 	wctx, cancel := writeContext(ctx)
 	defer cancel()
 
-	runOp := func(opCtx context.Context) error {
-		return op(opCtx, span)
-	}
-
-	var err error
-	if correlationID == "" {
-		// Defense-in-depth: handler boundary must reject empty/invalid
-		// correlation IDs (see slip_write_handler UUID validation). If we
-		// land here with the lock flag ON it means a write path bypassed
-		// that gate — log a WARN so the regression is observable, then
-		// fall through unlocked (matches pre-lock behavior).
-		if a.corrIDLockOn {
-			a.log.WarnContext(ctx, "I5_lock_skipped_empty_corrID",
-				slog.String("span", spanName),
-			)
-		}
-		err = runOp(wctx)
-	} else {
-		err = a.withCorrIDLock(wctx, correlationID, span, runOp)
-	}
-	if err != nil {
+	if err := op(wctx, span); err != nil {
 		recordWriterError(span, err)
 		return err
 	}
 	return nil
-}
-
-// withCorrIDLock serializes mutating operations on a single correlationID
-// across processes by acquiring a Redis lock keyed on the corrID. This is the
-// second half of the I5 fix (plan v3 §M): the goLib INSERT-time gate closes
-// the slip_component_states event-log race, the per-corrID lock closes the
-// routing_slips aggregate-write-back race (Pod-A Load → Pod-B Update overwrites
-// Pod-A's mutation).
-//
-// Contract & invariants:
-//   - Nil locker → fail-open, behave exactly as before the lock was added.
-//     This matches the dedup-lock contract and keeps CI uptime independent of
-//     cache uptime (plan v3 §C.10).
-//   - SLIPPY_I5_LOCK_ENABLED=false (default) → fail-open. Until PR 3 (Slippy
-//     CLI 409 retry) lands, enabling the lock would surface contention as
-//     workflow failures (plan v3 §M.7, §G.1).
-//   - Invalid correlationID (non-UUID) → ErrInvalidCorrelationID. Validation
-//     defense-in-depth on top of the handler-boundary check (plan v3 §M.1.2,
-//     Mod 5).
-//   - TryAcquire failure (Redis transport error) → fail-open with WARN log;
-//     never block the request on cache outage (matches RedisLocker pattern).
-//     Plan v3 MISS-V2-2/MISS-V2-3 closure: ctx propagates into TryAcquire so
-//     client cancellation aborts the acquire; release uses
-//     context.WithoutCancel + 2s timeout so a cancelled request still releases.
-//   - acquired=false → ErrCorrIDWriteInProgress (HTTP 409 at handler boundary).
-//     CLI retries with backoff. No internal poll-wait (caller owns the retry).
-//   - Successful acquire → fn(ctx) runs under the lock; release runs in a defer
-//     with a fresh context so request cancellation cannot leak ghost locks.
-//
-// Rollback path (plan v3 §G.1 pre-flip checklist for PR 3): set
-// SLIPPY_I5_LOCK_ENABLED=false on the deployment, restart pods. All adapter
-// calls fall through unlocked immediately; no state migration required.
-func (a *SlipWriterAdapter) withCorrIDLock(
-	ctx context.Context,
-	correlationID string,
-	span trace.Span,
-	fn func(ctx context.Context) error,
-) error {
-	// Feature flag OFF or nil locker → behave exactly as pre-lock code path.
-	if !a.corrIDLockOn || a.locker == nil {
-		return fn(ctx)
-	}
-
-	key := CorrIDLockKey(correlationID)
-	if key == "" {
-		// Layered with handler.validateCorrelationID (slip_write_handler.go,
-		// added in commit f101d77 per PR #39 review) — the handler rejects
-		// malformed UUIDs with HTTP 400 before any write path runs. This
-		// adapter-side check is the residual safety net for non-HTTP
-		// callers (e.g. dedup-driven internal flows).
-		return domain.ErrInvalidCorrelationID
-	}
-	span.SetAttributes(attribute.String("corrid_lock.key", key))
-
-	acquired, token, lockErr := a.locker.TryAcquire(ctx, key, a.corrIDLockTTL)
-	if lockErr != nil {
-		// Fail-open: cache outage MUST NOT block CI writes. Mirrors the
-		// dedup-lock pattern. Surface via WARN log + span event so a
-		// degraded-cache window is observable in production telemetry.
-		span.AddEvent("corrid_lock_unavailable",
-			trace.WithAttributes(attribute.String("error", lockErr.Error())))
-		a.log.WarnContext(ctx,
-			"corr-id lock acquire failed; proceeding without lock (fail-open)",
-			"correlation_id", correlationID, "key", key, "error", lockErr)
-		return fn(ctx)
-	}
-	if !acquired {
-		// Lock held by a concurrent writer. The handler maps this to 409.
-		span.AddEvent("corrid_lock_held")
-		return domain.ErrCorrIDWriteInProgress
-	}
-
-	span.AddEvent("corrid_lock_acquired")
-	// Release MUST run even on context cancellation — otherwise a cancelled
-	// request leaves the lock pinned for the full TTL, 409-ing legitimate
-	// retries. context.WithoutCancel + bounded timeout keeps the release
-	// reachable while still bounding goroutine accumulation under sustained
-	// cache degradation (plan v3 §M.3 MISS-V2-3 callout).
-	defer func() {
-		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
-		defer cancel()
-		if relErr := a.locker.Release(releaseCtx, key, token); relErr != nil {
-			span.AddEvent("corrid_lock_release_failed",
-				trace.WithAttributes(attribute.String("error", relErr.Error())))
-			a.log.WarnContext(ctx,
-				"corr-id lock release failed; TTL will drain",
-				"correlation_id", correlationID, "key", key, "error", relErr)
-		}
-	}()
-
-	return fn(ctx)
 }
 
 // awaitExistingSlip polls the reader for an already-in-flight slip matching the
@@ -840,52 +645,9 @@ func (a *SlipWriterAdapter) hydrateAndPersist(
 	// Strengthens I5: routing_slips.<step>_status == event-log-derived status.
 	// Does not affect I1–I4 (those are enforced by checkPipelineCompletion inside
 	// the library, which runs before this hydration path).
-	//
-	// R1 (ADO #82468): the terminal-wins guard inside overlayPipelineStep no
-	// longer relies on the (potentially stale) in-memory CompletedAt. Instead it
-	// consults the event log via store.LatestStepStatusFromEvents — guaranteed
-	// to reflect just-written truth because the preceding library write was
-	// synchronous under wait_for_async_insert=1 (asserted at startup; see
-	// clickhouse_assertions.go).
-	// latestFn is the R1 event-log seam (ADO #82468). Wrapping the raw store call
-	// gives us a single place to emit fail-open observability when the query
-	// errors — the overlay falls back to the in-memory CompletedAt guard, but
-	// production needs to KNOW when that fallback fired so a steady stream of
-	// query failures (which would silently degrade I5 protection back to the
-	// pre-R1 in-memory guard) can be alerted on. Pattern modeled after the
-	// dedup_wait_timeout WARN+span event below.
-	latestFn := func() (slippy.StepStatus, bool, error) {
-		status, found, err := a.client.Store().LatestStepStatusFromEvents(ctx, correlationID, stepName)
-		if err != nil {
-			span.AddEvent("r1.event_log_query_failed",
-				trace.WithAttributes(attribute.String("error", err.Error())))
-			a.log.WarnContext(ctx,
-				"r1: LatestStepStatusFromEvents query failed; overlay guard falls back to in-memory CompletedAt",
-				"correlation_id", correlationID, "step", stepName, "error", err)
-		}
-		return status, found, err
-	}
-	applied, resolved := overlayPipelineStep(slip, stepName, status, writtenAt, latestFn)
+	overlayPipelineStep(slip, stepName, status, writtenAt)
 
-	// R2 Option D: when the overlay applied, pin the routing_slips.<step>_status
-	// column and the step_details.<step>.status JSON value to the RESOLVED
-	// status (NOT the original caller-supplied status). resolved equals the
-	// caller's status in the common case; in the divergent-terminal race
-	// (R2 PR #39: both writers terminal but different), resolved is the
-	// event-log status — the argMax winner — so the *_status column stays
-	// aligned with the materialized event-log row.
-	//
-	// When the overlay was dropped (event log already terminal, caller wrote
-	// non-terminal), pass no override so Update falls back to
-	// slip.Steps[name].Status — which still reflects event-log truth from
-	// Load because overlay was skipped without mutation.
-	var overrides []slippy.StepStatusOverride
-	if applied {
-		overrides = []slippy.StepStatusOverride{
-			{ColumnName: slippy.StepStatusColumnName(stepName), Status: resolved},
-		}
-	}
-	if err := a.client.Store().Update(ctx, slip, overrides...); err != nil {
+	if err := a.client.Store().Update(ctx, slip); err != nil {
 		recordWriterError(span, err)
 		return fmt.Errorf("hydrateAndPersist: update failed: %w", err)
 	}
@@ -893,181 +655,51 @@ func (a *SlipWriterAdapter) hydrateAndPersist(
 	return nil
 }
 
-// latestStepStatusFn is the callback seam used by overlayPipelineStep to consult
-// the event log (slip_component_states) for the authoritative latest status of
-// the step being written. Returning (status, true, nil) signals an event row
-// exists; ("", false, nil) signals no events yet and the in-memory guard remains
-// in effect; (_, _, err) signals a query failure and triggers the fail-open
-// fallback to the in-memory guard.
-type latestStepStatusFn func() (slippy.StepStatus, bool, error)
-
 // overlayPipelineStep applies a just-written pipeline-step state to an in-memory
 // slip, acting as a read-your-own-writes safety net for ClickHouse async-insert
-// visibility lag. Returns true when ApplyStatusTransition was called (the
-// caller's status WON), false when the overlay was dropped (event log already
-// holds a terminal status that must not be clobbered by a non-terminal write).
+// visibility lag.
 //
 // Only pipeline-level steps (componentName == "") are handled. Aggregate steps
 // are handled inside goLibMyCarrier by overlayComponentState.
 //
-// Role under Option 1 (plan v3 §C.3, defense-in-depth):
+// Overlay rule: if the step exists in slip.Steps and the writtenAt timestamp is
+// strictly after the existing CompletedAt (or CompletedAt is nil), the new status
+// wins. This is the sentinel path from goLibMyCarrier's overlayComponentState
+// (clickhouse_store.go) applied to slippy.Step rather than ComponentStepData.
 //
-// With the Option 1 INSERT-time gate (enforceTerminalMonotonicity in
-// goLibMyCarrier slippy/clickhouse_store.go) in place, the FIRST line of
-// defense against terminal regression now lives upstream: UpdateStep and
-// UpdateStepWithHistory pre-flight a same-row argMax SELECT and refuse the
-// INSERT with ErrTerminalAlreadyExists if the incoming status would violate
-// the §D matrix. The adapter sees the sentinel, mapWriteError returns 409,
-// and the bad transition never reaches the event log at all.
+// Note: ApplyStatusTransition sets CompletedAt only on the first terminal
+// transition (when CompletedAt is nil). On a re-run path (failed → running →
+// completed) where a prior CompletedAt exists, the Status is updated correctly
+// but CompletedAt retains the prior run's timestamp. This is intentional and
+// consistent with ComponentStepData.ApplyStatusTransition in goLibMyCarrier.
 //
-// This overlay remains active as the SECOND line of defense because the gate
-// SELECT and the INSERT are not atomic in ClickHouse — two same-microsecond
-// concurrent writers can both observe an empty event log, both INSERT, and
-// only post-hoc reconciliation (argMax tiebreak + this overlay) decides which
-// status materializes in routing_slips. Keeping the overlay closes that
-// residual window without depending on flag state.
-//
-// Rollback note (plan v3 §G.1): if the Option 1 gate is rolled back via
-// SLIPPY_I5_GATE_ENABLED=false on the goLib side, this overlay is the SOLE
-// I5 protection again — same as the pre-Option-1 baseline. Do not delete it
-// without ratifying §G.1 rollback. Pre-flip checklist for PR 3 (Slippy CLI
-// 409 retry-with-jitter): the per-correlationID lock can only ship enabled
-// AFTER PR 3 lands; until then, this overlay + the gate close I5 and the
-// lock defaults OFF (plan v3 §M.7 / §F.3 measurement gate).
-//
-// Event-log seam (ADO #82468): when latestStatus returns found=true with no
-// error, the event log is authoritative (w4ai=1 guarantees the caller's own
-// event is visible). For terminal status writes the overlay is pinned
-// UNCONDITIONALLY — Guard 2 (writtenAt-vs-CompletedAt) is bypassed on this
-// path. This closes the 436cc68c production mechanism: a mixed-staleness Load
-// (routing_slips FRESH, slip_component_states STALE) leaves step.CompletedAt
-// non-nil/fresh while Status is stale; Guard 2 then fails by ~1µs and returns
-// applied=false, letting Update write the stale Status wholesale. Two tables,
-// two ClickHouse consistency domains: CompletedAt (routing_slips argMax) and
-// writtenAt (adapter clock before library write) are only reliably comparable
-// when there is no fresh event-log signal to rely on.
-// Audit: standup-notes/2026/07/i5-fable-audit.md §A1/B.
-//
-// Fail-open policy: if latestStatus returns an error, OR !found (no events for
-// this step yet), fall through to the in-memory CompletedAt guard (Guard 2).
-// This preserves first-event behaviour and degrades gracefully under CH errors.
-//
-// Overlay rule (event-log-found path): unconditional pin when status.IsTerminal().
-// Overlay rule (fail-open / no-event-signal path): writtenAt-vs-CompletedAt
-// monotonicity — the new status wins iff CompletedAt is nil or writtenAt is
-// strictly after it. ApplyStatusTransition sets CompletedAt only on the first
-// terminal transition.
-//
-// Mirrors the sentinel-path logic of goLibMyCarrier's overlayComponentState.
-// Duplication is intentional: overlayComponentState is an unexported function
-// and cannot be called from this module. Both functions must stay in sync.
-// Returns (applied, resolved):
-//   - applied: true when ApplyStatusTransition ran and the step in slip.Steps
-//     reflects the just-written truth.
-//   - resolved: the status that was actually pinned. Equals the caller's
-//     `status` argument except in the divergent-terminal branch, where it
-//     equals the event-log status (the argMax winner). Callers MUST use
-//     resolved (NOT their original `status`) when building the
-//     StepStatusOverride for the *_status column, otherwise the column
-//     drifts from argMax in the divergent-terminal race window.
-//   - When applied=false, resolved is unspecified; callers MUST NOT use it.
-func overlayPipelineStep(
-	slip *slippy.Slip,
-	stepName string,
-	status slippy.StepStatus,
-	writtenAt time.Time,
-	latestStatus latestStepStatusFn,
-) (applied bool, resolved slippy.StepStatus) {
+// Mirrors the sentinel-path logic of goLibMyCarrier's overlayComponentState
+// (clickhouse_store.go:2233-2241). Duplication is intentional:
+// overlayComponentState is an unexported function and cannot be called from
+// this module. Both functions must stay in sync.
+func overlayPipelineStep(slip *slippy.Slip, stepName string, status slippy.StepStatus, writtenAt time.Time) {
 	if slip == nil {
-		return false, ""
+		return
 	}
 	if slip.Steps == nil {
-		return false, ""
+		return
 	}
 	step, ok := slip.Steps[stepName]
 	if !ok {
-		return false, ""
+		return
 	}
-
-	// R1: consult the event log. Four branches:
-	//   err != nil → fail-open; fall through to in-memory CompletedAt guard.
-	//   !found     → no event rows yet → apply overlay (first-event).
-	//   found      → if event-log terminal AND caller non-terminal → DROP.
-	//   found      → if BOTH terminal but DIFFER → pin event-log truth (R2 PR #39).
-	//
-	// The both-terminal-divergence branch closes a same-µs race where two
-	// terminal writers (e.g. completed vs failed) race the argMax tiebreak
-	// (`timestamp_micros*100 + toUInt8(status)`). The argMax resolves to one
-	// status (failed=5 > completed=4) but the OTHER writer's overlay would
-	// still pin its caller-supplied terminal status into the routing_slips
-	// *_status column, briefly disagreeing with argMax truth until the next
-	// hydrate. Pinning the event-log status here keeps the overlay aligned
-	// with argMax even in the divergent-terminal race window.
-	if latestStatus != nil {
-		eventStatus, found, err := latestStatus()
-		// eventLogOK: the event-log lookup returned a confirmed row with no error.
-		// When true, the event log is authoritative and Guard 2 is bypassed for
-		// terminal writes — see unconditional-pin block below.
-		eventLogOK := found && err == nil
-		switch {
-		case err != nil:
-			// fail-open: rely on the in-memory CompletedAt guard below
-		case !found:
-			// no events yet — overlay applies as first transition
-		case eventStatus.IsTerminal() && !status.IsTerminal():
-			// R1: event log says terminal, caller is writing non-terminal.
-			// Drop the overlay so the caller-side R2 logic also skips the override.
-			return false, ""
-		case eventStatus.IsTerminal() && status.IsTerminal() && eventStatus != status:
-			// R2: both terminal but disagree (same-µs race). Event log is
-			// authoritative (it reflects the argMax tiebreak). Substitute
-			// eventStatus for the caller's terminal so the overlay pin matches the
-			// argMax-resolved *_status column. WARN log gives operators a signal
-			// to investigate the upstream producer that emitted the losing terminal.
-			slog.Warn("I5_overlay_terminal_divergence",
-				slog.String("step", stepName),
-				slog.String("caller_status", string(status)),
-				slog.String("event_log_status", string(eventStatus)),
-				slog.Time("written_at", writtenAt),
-			)
-			status = eventStatus
-		}
-		// Unconditional pin when the event-log lookup confirmed a row. The event
-		// log is authoritative (w4ai=1 guarantees the caller's own event is
-		// visible). The in-memory snapshot may be MIXED-stale: routing_slips FRESH
-		// (step.CompletedAt non-nil/fresh) but slip_component_states STALE
-		// (step.Status still "running"). Guard 2 (writtenAt.After(*step.CompletedAt))
-		// then fails by ~1µs and returns applied=false, letting Update write the
-		// stale Status wholesale — the 436cc68c production mechanism (audit:
-		// standup-notes/2026/07/i5-fable-audit.md §A1/B). When the event log
-		// confirms the row, Guard 2 is only a heuristic for a no-event-signal state
-		// that does not apply here. Skip it for terminal status writes.
-		if eventLogOK && status.IsTerminal() {
-			step.ApplyStatusTransition(status, writtenAt)
-			slip.Steps[stepName] = step
-			return true, status
-		}
-	}
-
-	// Defensive in-memory guard (fail-open fallback: latestStatus errored, returned
-	// !found, or is nil — e.g. in older unit-test fixtures). Prevents a non-terminal
-	// write from clobbering a step whose in-memory CompletedAt already shows terminal.
+	// Never overwrite a terminal status with a non-terminal one. This handles the
+	// case where a StartStep arrives after a concurrent (or out-of-order re-trigger)
+	// terminal event has already completed and become visible to Load(). Without
+	// this guard, writtenAt = time.Now() would be after the past CompletedAt and
+	// the overlay would clobber terminal → running, violating I5 and I2.
 	if !status.IsTerminal() && step.CompletedAt != nil {
-		return false, ""
+		return
 	}
-	// Guard 2 (fail-open / no-event-signal path only): writtenAt-vs-CompletedAt
-	// monotonicity heuristic. When the event-log lookup succeeds and status is
-	// terminal, the unconditional pin above fires first and this guard is never
-	// reached for that path. When latestStatus errored, returned !found, or is nil,
-	// Guard 2 is the last heuristic. Two tables, two ClickHouse consistency domains:
-	// CompletedAt (from routing_slips argMax) and writtenAt (adapter clock before
-	// library write) are only comparable when there is no fresh event-log signal.
 	if step.CompletedAt == nil || writtenAt.After(*step.CompletedAt) {
 		step.ApplyStatusTransition(status, writtenAt)
 		slip.Steps[stepName] = step
-		return true, status
 	}
-	return false, ""
 }
 
 // recordWriterError records an error on a span, distinguishing client errors
