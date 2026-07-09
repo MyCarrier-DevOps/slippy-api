@@ -257,10 +257,10 @@ func validateCorrelationIDFormat(s string) error {
 			fmt.Sprintf("correlation_id exceeds maximum length of %d characters", correlationIDMaxLen))
 	}
 	for _, r := range s {
-		if !((r >= 'A' && r <= 'Z') ||
-			(r >= 'a' && r <= 'z') ||
-			(r >= '0' && r <= '9') ||
-			r == '.' || r == '_' || r == ':' || r == '-') {
+		if (r < 'A' || r > 'Z') &&
+			(r < 'a' || r > 'z') &&
+			(r < '0' || r > '9') &&
+			r != '.' && r != '_' && r != ':' && r != '-' {
 			return huma.NewError(http.StatusBadRequest,
 				fmt.Sprintf("correlation_id contains invalid character %q; allowed: [A-Za-z0-9._:-]", r))
 		}
@@ -594,7 +594,10 @@ func mapWriteError(err error) error {
 			"slip creation already in progress for this commit; duplicate suppressed",
 		)
 	case errors.Is(err, slippy.ErrTerminalAlreadyExists):
-		return huma.NewError(http.StatusConflict, "step already in terminal state; transition rejected (I5 freshness gate)")
+		return huma.NewError(
+			http.StatusConflict,
+			"step already in terminal state; transition rejected (I5 freshness gate)",
+		)
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		// A context deadline/cancellation that reaches mapWriteError means the
 		// AUTHORITATIVE insert (UpdateStepWithHistory / slip_component_states) did NOT
