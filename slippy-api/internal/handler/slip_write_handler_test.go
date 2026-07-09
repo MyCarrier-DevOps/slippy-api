@@ -799,6 +799,65 @@ func TestComponentCompletePath_GoLibWrapsCheckPipelineCompletion_500(t *testing.
 			"component row is durable, slip status self-heals on next event")
 }
 
+// --- validateCorrelationIDFormat tests ---
+
+// TestValidateCorrelationIDFormat_TooLong verifies that a correlation ID
+// exceeding 128 characters is rejected with HTTP 400.
+func TestValidateCorrelationIDFormat_TooLong_Returns400(t *testing.T) {
+	w := &mockWriter{
+		startStepFn: func(_ context.Context, _, _, _ string) error { return nil },
+	}
+	handler := setupWriteTestAPI(w)
+
+	longID := strings.Repeat("a", 129)
+	req := httptest.NewRequest(http.MethodPost,
+		"/slips/"+longID+"/steps/push_parsed/start", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code,
+		"correlation_id >128 chars must be rejected with 400")
+}
+
+// TestValidateCorrelationIDFormat_BadChar verifies that a correlation ID
+// containing ';' (outside [A-Za-z0-9._:-]) is rejected with HTTP 400.
+func TestValidateCorrelationIDFormat_BadChar_Returns400(t *testing.T) {
+	w := &mockWriter{
+		startStepFn: func(_ context.Context, _, _, _ string) error { return nil },
+	}
+	handler := setupWriteTestAPI(w)
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/slips/bad;id/steps/push_parsed/start", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code,
+		"correlation_id with ';' must be rejected with 400")
+}
+
+// TestValidateCorrelationIDFormat_ValidUUIDish verifies that a UUID-style
+// correlation ID (chars in [A-Za-z0-9-]) passes validation and reaches the writer.
+func TestValidateCorrelationIDFormat_ValidUUIDish_Passes(t *testing.T) {
+	var called bool
+	w := &mockWriter{
+		startStepFn: func(_ context.Context, _, _, _ string) error {
+			called = true
+			return nil
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/slips/550e8400-e29b-41d4-a716-446655440000/steps/push_parsed/start", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNoContent, rec.Code,
+		"UUID-style correlation_id must pass validation")
+	assert.True(t, called, "writer must be invoked for a valid correlation_id")
+}
+
 // TestCompleteStep_AllowsRecoveryFromFailed verifies that the handler accepts a
 // CompleteStep call after a prior FailStep — the documented `failed → completed`
 // recovery flow (STATE_MACHINE_V3.md §Recovery Rules). No step-level state is

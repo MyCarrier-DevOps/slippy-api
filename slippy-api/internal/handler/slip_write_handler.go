@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -241,9 +242,38 @@ func RegisterWriteRoutes(api huma.API, h *SlipWriteHandler) {
 	}, h.abandonSlip)
 }
 
+// --- Validation ----------------------------------------------------------
+
+// correlationIDMaxLen is the maximum permitted length for a correlation ID.
+const correlationIDMaxLen = 128
+
+// validateCorrelationIDFormat returns a 400 huma error when s exceeds
+// correlationIDMaxLen characters or contains any character outside the
+// allowed set [A-Za-z0-9._:-]. The check is intentionally NOT a UUID parse —
+// it enforces the bounded allow-list requested in code review (PR #42).
+func validateCorrelationIDFormat(s string) error {
+	if len(s) > correlationIDMaxLen {
+		return huma.NewError(http.StatusBadRequest,
+			fmt.Sprintf("correlation_id exceeds maximum length of %d characters", correlationIDMaxLen))
+	}
+	for _, r := range s {
+		if !((r >= 'A' && r <= 'Z') ||
+			(r >= 'a' && r <= 'z') ||
+			(r >= '0' && r <= '9') ||
+			r == '.' || r == '_' || r == ':' || r == '-') {
+			return huma.NewError(http.StatusBadRequest,
+				fmt.Sprintf("correlation_id contains invalid character %q; allowed: [A-Za-z0-9._:-]", r))
+		}
+	}
+	return nil
+}
+
 // --- Handlers ------------------------------------------------------------
 
 func (h *SlipWriteHandler) createSlip(ctx context.Context, input *CreateSlipInput) (*CreateSlipOutput, error) {
+	if err := validateCorrelationIDFormat(input.Body.CorrelationID); err != nil {
+		return nil, err
+	}
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.createSlip",
 		trace.WithAttributes(
 			attribute.String("slip.correlation_id", input.Body.CorrelationID),
@@ -309,6 +339,9 @@ func (h *SlipWriteHandler) createSlip(ctx context.Context, input *CreateSlipInpu
 
 //nolint:dupl // startStep and completeStep share intentional parallel structure; the operations are semantically distinct.
 func (h *SlipWriteHandler) startStep(ctx context.Context, input *StepInput) (*struct{}, error) {
+	if err := validateCorrelationIDFormat(input.CorrelationID); err != nil {
+		return nil, err
+	}
 	componentName := input.componentName()
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.startStep",
 		trace.WithAttributes(
@@ -340,6 +373,9 @@ func (h *SlipWriteHandler) startStep(ctx context.Context, input *StepInput) (*st
 
 //nolint:dupl // completeStep and startStep share intentional parallel structure; the operations are semantically distinct.
 func (h *SlipWriteHandler) completeStep(ctx context.Context, input *StepInput) (*struct{}, error) {
+	if err := validateCorrelationIDFormat(input.CorrelationID); err != nil {
+		return nil, err
+	}
 	componentName := input.componentName()
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.completeStep",
 		trace.WithAttributes(
@@ -370,6 +406,9 @@ func (h *SlipWriteHandler) completeStep(ctx context.Context, input *StepInput) (
 }
 
 func (h *SlipWriteHandler) failStep(ctx context.Context, input *FailStepInput) (*struct{}, error) {
+	if err := validateCorrelationIDFormat(input.CorrelationID); err != nil {
+		return nil, err
+	}
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.failStep",
 		trace.WithAttributes(
 			attribute.String("slip.correlation_id", input.CorrelationID),
@@ -406,6 +445,9 @@ func (h *SlipWriteHandler) failStep(ctx context.Context, input *FailStepInput) (
 }
 
 func (h *SlipWriteHandler) skipStep(ctx context.Context, input *SkipStepInput) (*struct{}, error) {
+	if err := validateCorrelationIDFormat(input.CorrelationID); err != nil {
+		return nil, err
+	}
 	componentName := input.componentName()
 	reason := input.reason()
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.skipStep",
@@ -437,6 +479,9 @@ func (h *SlipWriteHandler) skipStep(ctx context.Context, input *SkipStepInput) (
 }
 
 func (h *SlipWriteHandler) setImageTag(ctx context.Context, input *SetImageTagInput) (*struct{}, error) {
+	if err := validateCorrelationIDFormat(input.CorrelationID); err != nil {
+		return nil, err
+	}
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.setImageTag",
 		trace.WithAttributes(
 			attribute.String("slip.correlation_id", input.CorrelationID),
@@ -472,6 +517,9 @@ func (h *SlipWriteHandler) setImageTag(ctx context.Context, input *SetImageTagIn
 
 //nolint:dupl // promoteSlip and abandonSlip share intentional parallel structure; the operations are semantically distinct.
 func (h *SlipWriteHandler) promoteSlip(ctx context.Context, input *PromoteSlipInput) (*struct{}, error) {
+	if err := validateCorrelationIDFormat(input.CorrelationID); err != nil {
+		return nil, err
+	}
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.promoteSlip",
 		trace.WithAttributes(
 			attribute.String("slip.correlation_id", input.CorrelationID),
@@ -499,6 +547,9 @@ func (h *SlipWriteHandler) promoteSlip(ctx context.Context, input *PromoteSlipIn
 
 //nolint:dupl // abandonSlip and promoteSlip share intentional parallel structure; the operations are semantically distinct.
 func (h *SlipWriteHandler) abandonSlip(ctx context.Context, input *AbandonSlipInput) (*struct{}, error) {
+	if err := validateCorrelationIDFormat(input.CorrelationID); err != nil {
+		return nil, err
+	}
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.abandonSlip",
 		trace.WithAttributes(
 			attribute.String("slip.correlation_id", input.CorrelationID),
