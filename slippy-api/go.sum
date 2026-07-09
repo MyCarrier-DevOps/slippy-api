@@ -17,8 +17,8 @@ github.com/MyCarrier-DevOps/goLibMyCarrier/github v1.3.92 h1:kBRefqUQMl33MKDaGgJ
 github.com/MyCarrier-DevOps/goLibMyCarrier/github v1.3.92/go.mod h1:+g7ImJNr0ppGPJr+UeG48dONE+XLjoGr9nGbdTVmafM=
 github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.92 h1:2iAx+ftyirJrqVzkpfUjv7JTPYEwzBG/ANFA+Svcrdc=
 github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.92/go.mod h1:8ZFrEONoNfgaoY8TnAbq7ZeYDjJcW6XFk5XzwYhzdhs=
-github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.4.0-feature-83405-freshness-gate.14 h1:rvp5XZe1BAKe+JCVkHEFyms+d3odrGCDDE+6efaht0U=
-github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.4.0-feature-83405-freshness-gate.14/go.mod h1:/x57zvq5Eza27l+GwggDSteQwU8AL9SNGVVbU73Knm8=
+github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.4.0-feature-83405-freshness-gate.15 h1:r5CPhhfHvwNNHoG2GBDeXccuhXPcPcF32cCHewDeJOA=
+github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.4.0-feature-83405-freshness-gate.15/go.mod h1:/x57zvq5Eza27l+GwggDSteQwU8AL9SNGVVbU73Knm8=
 github.com/ProtonMail/go-crypto v1.4.1 h1:9RfcZHqEQUvP8RzecWEUafnZVtEvrBVL9BiF67IQOfM=
 github.com/ProtonMail/go-crypto v1.4.1/go.mod h1:e1OaTyu5SYVrO9gKOEhTc+5UcXtTUa+P3uLudwcgPqo=
 github.com/alicebob/miniredis/v2 v2.38.0 h1:nZAzCR+Lj+Vxk4ZXzm2NuKq2O33RXj1XxJ2e2uP9jiw=
