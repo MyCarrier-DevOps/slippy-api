@@ -593,6 +593,8 @@ func mapWriteError(err error) error {
 			http.StatusConflict,
 			"slip creation already in progress for this commit; duplicate suppressed",
 		)
+	case errors.Is(err, slippy.ErrTerminalAlreadyExists):
+		return huma.NewError(http.StatusConflict, "step already in terminal state; transition rejected (I5 freshness gate)")
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		// A context deadline/cancellation that reaches mapWriteError means the
 		// AUTHORITATIVE insert (UpdateStepWithHistory / slip_component_states) did NOT

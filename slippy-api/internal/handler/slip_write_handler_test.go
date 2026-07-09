@@ -684,6 +684,18 @@ func TestMapWriteError(t *testing.T) {
 			http.StatusGatewayTimeout,
 		},
 		{"generic error", errors.New("something broke"), http.StatusInternalServerError},
+		// ErrTerminalAlreadyExists is the I5 v2 freshness-gate sentinel; it must
+		// map to 409 Conflict so the CLI does not retry a genuinely terminal write.
+		{
+			"ErrTerminalAlreadyExists (direct sentinel)",
+			slippy.ErrTerminalAlreadyExists,
+			http.StatusConflict,
+		},
+		{
+			"ErrTerminalAlreadyExists (wrapped)",
+			fmt.Errorf("store.UpdateStepWithHistory: %w", slippy.ErrTerminalAlreadyExists),
+			http.StatusConflict,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
