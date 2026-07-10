@@ -813,6 +813,22 @@ func TestComponentCompletePath_GoLibWrapsCheckPipelineCompletion_500(t *testing.
 
 // --- validateCorrelationIDFormat tests ---
 
+// TestValidateCorrelationIDFormat_Empty_Returns400 verifies that an empty
+// correlation ID is rejected directly by validateCorrelationIDFormat with a
+// 400 huma error, rather than relying on downstream library behavior
+// (defense-in-depth regression guard — the prior uuid.Parse validator
+// rejected empty strings, but len("") <= max and an empty range loop would
+// otherwise return nil).
+func TestValidateCorrelationIDFormat_Empty_Returns400(t *testing.T) {
+	err := validateCorrelationIDFormat("")
+	require.Error(t, err)
+
+	var he huma.StatusError
+	require.ErrorAs(t, err, &he)
+	assert.Equal(t, http.StatusBadRequest, he.GetStatus(),
+		"empty correlation_id must be rejected with 400")
+}
+
 // TestValidateCorrelationIDFormat_TooLong verifies that a correlation ID
 // exceeding 128 characters is rejected with HTTP 400.
 func TestValidateCorrelationIDFormat_TooLong_Returns400(t *testing.T) {

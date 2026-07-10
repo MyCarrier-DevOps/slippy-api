@@ -615,6 +615,15 @@ func (a *SlipWriterAdapter) isPipelineStep(stepName, componentName string) bool 
 //
 // Errors are returned to the caller but treated as non-fatal — the step event is
 // already durably recorded in slip_component_states.
+//
+// Test coverage boundary: slippy-api's I5-v2 correctness (the goLib freshness
+// gate, the argMax-derived overlay, and D3 suppression) is owned and
+// integration-tested by goLibMyCarrier/slippy's own I5 suite, not by this
+// package. slippy-api's guarantees here are the AssertAsyncInsertEnabled
+// startup gate (clickhouse_assertions.go) plus correct wiring of this call
+// path. The mockSlipStore/mock client used by this file's local tests do not
+// simulate goLib's gate or argMax-derive semantics — those tests exercise
+// wiring and control flow only, not race behavior.
 func (a *SlipWriterAdapter) hydrateAndPersist(
 	ctx context.Context,
 	correlationID, stepName string,

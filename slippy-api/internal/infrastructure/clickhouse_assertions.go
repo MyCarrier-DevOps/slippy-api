@@ -15,8 +15,10 @@ import (
 // durable and visible to subsequent SELECTs on the connection pool.
 //
 // The slippy-api I5 fix relies on this: after a synchronous event-log INSERT,
-// SlipStore.LatestStepStatusFromEvents must observe the just-written row to
-// enforce the terminal-wins guard in overlayPipelineStep.
+// goLib's pre-INSERT freshness gate (enforceTerminalFreshnessGate's argMax
+// SELECT over slip_component_states) must observe the just-written row so the
+// terminal-wins guard is not fooled by a stale read — the same read-your-writes
+// requirement that overlayPipelineStep's argMax-derived overlay depends on.
 var expectedAsyncInsertSettings = []string{
 	"async_insert",
 	"wait_for_async_insert",
@@ -26,9 +28,10 @@ var expectedAsyncInsertSettings = []string{
 // user profile does not have async_insert=1 AND wait_for_async_insert=1. These
 // settings are load-bearing for the I5 race fix (ADO #82468): without
 // wait_for_async_insert=1, the event-log row written by appendHistoryWithOverrides
-// is not guaranteed visible to the subsequent SELECT inside
-// LatestStepStatusFromEvents, which would silently re-introduce the
-// 436cc68c-style stale-overlay regression.
+// is not guaranteed visible to the subsequent pre-INSERT SELECT inside goLib's
+// enforceTerminalFreshnessGate (and the analogous argMax derive used by
+// overlayComponentState / overlayPipelineStep), which would silently
+// re-introduce the 436cc68c-style stale-overlay regression.
 //
 // Returns an error suitable for fatal logging from main.go. The error message
 // includes the actual observed values to make on-call triage one-step.

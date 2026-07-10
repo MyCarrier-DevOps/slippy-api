@@ -247,11 +247,16 @@ func RegisterWriteRoutes(api huma.API, h *SlipWriteHandler) {
 // correlationIDMaxLen is the maximum permitted length for a correlation ID.
 const correlationIDMaxLen = 128
 
-// validateCorrelationIDFormat returns a 400 huma error when s exceeds
-// correlationIDMaxLen characters or contains any character outside the
-// allowed set [A-Za-z0-9._:-]. The check is intentionally NOT a UUID parse —
-// it enforces the bounded allow-list requested in code review (PR #42).
+// validateCorrelationIDFormat returns a 400 huma error when s is empty,
+// exceeds correlationIDMaxLen characters, or contains any character outside
+// the allowed set [A-Za-z0-9._:-]. The check is intentionally NOT a UUID
+// parse — it enforces the bounded allow-list requested in code review (PR
+// #42). Empty rejection is explicit here rather than relying on downstream
+// library behavior (defense-in-depth).
 func validateCorrelationIDFormat(s string) error {
+	if s == "" {
+		return huma.NewError(http.StatusBadRequest, "correlation_id must not be empty")
+	}
 	if len(s) > correlationIDMaxLen {
 		return huma.NewError(http.StatusBadRequest,
 			fmt.Sprintf("correlation_id exceeds maximum length of %d characters", correlationIDMaxLen))
