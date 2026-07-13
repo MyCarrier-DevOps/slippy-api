@@ -3,12 +3,12 @@ package handler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
-	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -18,19 +18,6 @@ import (
 
 	"github.com/MyCarrier-DevOps/slippy-api/internal/domain"
 )
-
-// validateCorrelationID parses correlationID as a UUID. Empty or malformed IDs
-// return domain.ErrInvalidCorrelationID which mapWriteError translates to 400.
-// Defense-in-depth at the handler boundary so logging, span attributes, and
-// downstream writer calls only ever see well-formed correlation IDs. This
-// pairs with the empty-corrID guard in SlipWriterAdapter.instrumentedWrite
-// (plan v3 §M.1.2) — that guard is a safety net; this check is the gate.
-func validateCorrelationID(correlationID string) error {
-	if _, err := uuid.Parse(correlationID); err != nil {
-		return domain.ErrInvalidCorrelationID
-	}
-	return nil
-}
 
 // SlipWriteHandler holds dependencies for write route handlers.
 type SlipWriteHandler struct {
@@ -255,11 +242,42 @@ func RegisterWriteRoutes(api huma.API, h *SlipWriteHandler) {
 	}, h.abandonSlip)
 }
 
+// --- Validation ----------------------------------------------------------
+
+// correlationIDMaxLen is the maximum permitted length for a correlation ID.
+const correlationIDMaxLen = 128
+
+// validateCorrelationIDFormat returns a 400 huma error when s is empty,
+// exceeds correlationIDMaxLen characters, or contains any character outside
+// the allowed set [A-Za-z0-9._:-]. The check is intentionally NOT a UUID
+// parse — it enforces the bounded allow-list requested in code review (PR
+// #42). Empty rejection is explicit here rather than relying on downstream
+// library behavior (defense-in-depth).
+func validateCorrelationIDFormat(s string) error {
+	if s == "" {
+		return huma.NewError(http.StatusBadRequest, "correlation_id must not be empty")
+	}
+	if len(s) > correlationIDMaxLen {
+		return huma.NewError(http.StatusBadRequest,
+			fmt.Sprintf("correlation_id exceeds maximum length of %d characters", correlationIDMaxLen))
+	}
+	for _, r := range s {
+		if (r < 'A' || r > 'Z') &&
+			(r < 'a' || r > 'z') &&
+			(r < '0' || r > '9') &&
+			r != '.' && r != '_' && r != ':' && r != '-' {
+			return huma.NewError(http.StatusBadRequest,
+				fmt.Sprintf("correlation_id contains invalid character %q; allowed: [A-Za-z0-9._:-]", r))
+		}
+	}
+	return nil
+}
+
 // --- Handlers ------------------------------------------------------------
 
 func (h *SlipWriteHandler) createSlip(ctx context.Context, input *CreateSlipInput) (*CreateSlipOutput, error) {
-	if err := validateCorrelationID(input.Body.CorrelationID); err != nil {
-		return nil, mapWriteError(err)
+	if err := validateCorrelationIDFormat(input.Body.CorrelationID); err != nil {
+		return nil, err
 	}
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.createSlip",
 		trace.WithAttributes(
@@ -326,8 +344,8 @@ func (h *SlipWriteHandler) createSlip(ctx context.Context, input *CreateSlipInpu
 
 //nolint:dupl // startStep and completeStep share intentional parallel structure; the operations are semantically distinct.
 func (h *SlipWriteHandler) startStep(ctx context.Context, input *StepInput) (*struct{}, error) {
-	if err := validateCorrelationID(input.CorrelationID); err != nil {
-		return nil, mapWriteError(err)
+	if err := validateCorrelationIDFormat(input.CorrelationID); err != nil {
+		return nil, err
 	}
 	componentName := input.componentName()
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.startStep",
@@ -360,8 +378,8 @@ func (h *SlipWriteHandler) startStep(ctx context.Context, input *StepInput) (*st
 
 //nolint:dupl // completeStep and startStep share intentional parallel structure; the operations are semantically distinct.
 func (h *SlipWriteHandler) completeStep(ctx context.Context, input *StepInput) (*struct{}, error) {
-	if err := validateCorrelationID(input.CorrelationID); err != nil {
-		return nil, mapWriteError(err)
+	if err := validateCorrelationIDFormat(input.CorrelationID); err != nil {
+		return nil, err
 	}
 	componentName := input.componentName()
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.completeStep",
@@ -393,8 +411,8 @@ func (h *SlipWriteHandler) completeStep(ctx context.Context, input *StepInput) (
 }
 
 func (h *SlipWriteHandler) failStep(ctx context.Context, input *FailStepInput) (*struct{}, error) {
-	if err := validateCorrelationID(input.CorrelationID); err != nil {
-		return nil, mapWriteError(err)
+	if err := validateCorrelationIDFormat(input.CorrelationID); err != nil {
+		return nil, err
 	}
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.failStep",
 		trace.WithAttributes(
@@ -432,8 +450,8 @@ func (h *SlipWriteHandler) failStep(ctx context.Context, input *FailStepInput) (
 }
 
 func (h *SlipWriteHandler) skipStep(ctx context.Context, input *SkipStepInput) (*struct{}, error) {
-	if err := validateCorrelationID(input.CorrelationID); err != nil {
-		return nil, mapWriteError(err)
+	if err := validateCorrelationIDFormat(input.CorrelationID); err != nil {
+		return nil, err
 	}
 	componentName := input.componentName()
 	reason := input.reason()
@@ -466,8 +484,8 @@ func (h *SlipWriteHandler) skipStep(ctx context.Context, input *SkipStepInput) (
 }
 
 func (h *SlipWriteHandler) setImageTag(ctx context.Context, input *SetImageTagInput) (*struct{}, error) {
-	if err := validateCorrelationID(input.CorrelationID); err != nil {
-		return nil, mapWriteError(err)
+	if err := validateCorrelationIDFormat(input.CorrelationID); err != nil {
+		return nil, err
 	}
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.setImageTag",
 		trace.WithAttributes(
@@ -504,8 +522,8 @@ func (h *SlipWriteHandler) setImageTag(ctx context.Context, input *SetImageTagIn
 
 //nolint:dupl // promoteSlip and abandonSlip share intentional parallel structure; the operations are semantically distinct.
 func (h *SlipWriteHandler) promoteSlip(ctx context.Context, input *PromoteSlipInput) (*struct{}, error) {
-	if err := validateCorrelationID(input.CorrelationID); err != nil {
-		return nil, mapWriteError(err)
+	if err := validateCorrelationIDFormat(input.CorrelationID); err != nil {
+		return nil, err
 	}
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.promoteSlip",
 		trace.WithAttributes(
@@ -534,8 +552,8 @@ func (h *SlipWriteHandler) promoteSlip(ctx context.Context, input *PromoteSlipIn
 
 //nolint:dupl // abandonSlip and promoteSlip share intentional parallel structure; the operations are semantically distinct.
 func (h *SlipWriteHandler) abandonSlip(ctx context.Context, input *AbandonSlipInput) (*struct{}, error) {
-	if err := validateCorrelationID(input.CorrelationID); err != nil {
-		return nil, mapWriteError(err)
+	if err := validateCorrelationIDFormat(input.CorrelationID); err != nil {
+		return nil, err
 	}
 	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.abandonSlip",
 		trace.WithAttributes(
@@ -565,20 +583,12 @@ func (h *SlipWriteHandler) abandonSlip(ctx context.Context, input *AbandonSlipIn
 // --- Error Mapping -------------------------------------------------------
 
 // mapWriteError converts domain/store errors to huma status errors for write ops.
-//
-// Sentinel ordering: ErrTerminalAlreadyExists and ErrCorrIDWriteInProgress are
-// checked BEFORE the default errors.As(*slippy.StepError) branch (plan v3
-// §C.1) so the two I5-specific 409 mappings take precedence — both sentinels
-// are wrapped in a *slippy.StepError by the library and a naive As-only
-// branch would mis-map them to 422 Unprocessable Entity.
 func mapWriteError(err error) error {
 	switch {
 	case errors.Is(err, slippy.ErrSlipNotFound):
 		return huma.NewError(http.StatusNotFound, "slip not found")
 	case errors.Is(err, slippy.ErrInvalidCorrelationID):
 		return huma.NewError(http.StatusBadRequest, "invalid correlation ID")
-	case errors.Is(err, domain.ErrInvalidCorrelationID):
-		return huma.NewError(http.StatusBadRequest, "invalid correlation_id format")
 	case errors.Is(err, slippy.ErrInvalidRepository):
 		return huma.NewError(http.StatusBadRequest, "invalid repository")
 	case errors.Is(err, slippy.ErrInvalidConfiguration):
@@ -589,23 +599,9 @@ func mapWriteError(err error) error {
 			"slip creation already in progress for this commit; duplicate suppressed",
 		)
 	case errors.Is(err, slippy.ErrTerminalAlreadyExists):
-		// Option 1 INSERT-time gate refused the transition (plan v3 §B.2, §C.1).
-		// 409 signals an idempotent retry by the caller is the right action —
-		// the prior terminal status is the durable truth and a same-or-newer
-		// terminal write would have been allowed by the §D matrix.
 		return huma.NewError(
 			http.StatusConflict,
-			"step already in terminal state; transition rejected (I5 invariant)",
-		)
-	case errors.Is(err, domain.ErrCorrIDWriteInProgress):
-		// Per-correlationID lock miss (plan v3 §M.1, §C.1). 409 is the chosen
-		// status code (plan v3 §M.7 option (a)) — Slippy CLI PR 3 will add
-		// bounded retry-with-jitter on 409 so legitimate contention does not
-		// surface as workflow failure. Until PR 3 lands, SLIPPY_I5_LOCK_ENABLED
-		// MUST stay false (plan v3 §G.1).
-		return huma.NewError(
-			http.StatusConflict,
-			"write to slip in progress; retry with backoff",
+			"step already in terminal state; transition rejected (I5 freshness gate)",
 		)
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		// A context deadline/cancellation that reaches mapWriteError means the

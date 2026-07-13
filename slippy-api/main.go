@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -230,8 +229,10 @@ func run() error {
 
 	// Startup gate: async-insert settings must be enabled. The I5 race fix
 	// (ADO #82468) requires wait_for_async_insert=1 so the event-log row
-	// written by appendHistoryWithOverrides is visible to the subsequent
-	// LatestStepStatusFromEvents SELECT. Fail fast if absent — silent
+	// written by appendHistoryWithOverrides is visible to goLib's pre-INSERT
+	// freshness gate (enforceTerminalFreshnessGate's argMax SELECT over
+	// slip_component_states, and the analogous argMax derive in
+	// overlayComponentState/overlayPipelineStep). Fail fast if absent — silent
 	// continuation would silently re-introduce the 436cc68c regression.
 	assertCtx, assertCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	if err := infrastructure.AssertAsyncInsertEnabled(assertCtx, store.Session()); err != nil {
@@ -303,20 +304,7 @@ func run() error {
 	} else {
 		log.Printf("slip-creation dedup lock disabled (no cache)")
 	}
-	// SLIPPY_I5_LOCK_ENABLED is read ONCE at the composition root. The startup
-	// banner line below is the §M.7 rollout sign-off signal: operators grep pod
-	// logs for "slippy-api per-correlationID lock" to confirm the state every
-	// pod actually came up with, independent of any subsequent flag flips.
-	i5LockEnabled, i5LockRaw := infrastructure.ParseI5LockFlag()
-	// Structured slog (matches the prior in-adapter style replaced by the DI
-	// refactor in commit cc2f15e). The human-readable "slippy-api
-	// per-correlationID lock" substring is preserved verbatim so operator
-	// log-greps (§M.7 rollout sign-off) keep working.
-	slog.Info("slippy-api per-correlationID lock state",
-		slog.Bool("enabled", i5LockEnabled),
-		slog.String("raw_env", i5LockRaw),
-	)
-	writer := infrastructure.NewSlipWriterAdapter(slippyClient, locker, reader, i5LockEnabled)
+	writer := infrastructure.NewSlipWriterAdapter(slippyClient, locker, reader)
 	log.Printf("write endpoints enabled")
 
 	// --- Admin handler ---
