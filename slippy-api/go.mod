@@ -8,7 +8,7 @@ require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.46.0
 	github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse v1.3.93
 	github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.92
-	github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.4.0-fix-mycarrier-5dv5-stale-clone-derive.2 // TODO(bd mycarrier-5dv5): ephemeral prerelease from goLib PR #78 — re-pin to stable v1.4.x after #78 merges; verify tag == merge commit (precedent: e62692e)
+	github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.96
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/danielgtaylor/huma/v2 v2.38.0
 	github.com/google/uuid v1.6.0
