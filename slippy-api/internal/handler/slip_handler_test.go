@@ -423,7 +423,9 @@ func TestGetSlipByCommit_RoutesToAncestryResolvingLoad(t *testing.T) {
 		},
 		loadByCommitExactFn: func(_ context.Context, _, _ string) (*domain.Slip, error) {
 			loadByCommitExactCalls++
-			return nil, errors.New("handler MUST NOT call the bare LoadByCommitExact method — guards R3; exact-first is an internal LoadByCommit concern")
+			return nil, errors.New(
+				"handler MUST NOT call the bare LoadByCommitExact method — guards R3; exact-first is an internal LoadByCommit concern",
+			)
 		},
 	}
 
@@ -435,8 +437,12 @@ func TestGetSlipByCommit_RoutesToAncestryResolvingLoad(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, 1, loadByCommitCalls,
 		"public GET /slips/by-commit handler MUST call LoadByCommit (ancestry-resolving) exactly once")
-	assert.Equal(t, 0, loadByCommitExactCalls,
-		"public GET /slips/by-commit handler MUST route through reader.LoadByCommit, never the bare LoadByCommitExact method — exact-first SHA handling lives inside the adapter's LoadByCommit")
+	assert.Equal(
+		t,
+		0,
+		loadByCommitExactCalls,
+		"public GET /slips/by-commit handler MUST route through reader.LoadByCommit, never the bare LoadByCommitExact method — exact-first SHA handling lives inside the adapter's LoadByCommit",
+	)
 
 	var body domain.Slip
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&body))
@@ -468,7 +474,9 @@ func TestGetSlipByCommit_FullSHA_AllowsExactFirst(t *testing.T) {
 		},
 		loadByCommitExactFn: func(_ context.Context, _, _ string) (*domain.Slip, error) {
 			loadByCommitExactCalls++
-			return nil, errors.New("handler MUST route through reader.LoadByCommit, not the bare LoadByCommitExact method")
+			return nil, errors.New(
+				"handler MUST route through reader.LoadByCommit, not the bare LoadByCommitExact method",
+			)
 		},
 	}
 
@@ -480,8 +488,12 @@ func TestGetSlipByCommit_FullSHA_AllowsExactFirst(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, 1, loadByCommitCalls,
 		"public GET /slips/by-commit handler MUST call reader.LoadByCommit exactly once, even for full-SHA refs")
-	assert.Equal(t, 0, loadByCommitExactCalls,
-		"handler must not call the bare LoadByCommitExact method; exact-first SHA handling is internal to the adapter's LoadByCommit")
+	assert.Equal(
+		t,
+		0,
+		loadByCommitExactCalls,
+		"handler must not call the bare LoadByCommitExact method; exact-first SHA handling is internal to the adapter's LoadByCommit",
+	)
 
 	var body domain.Slip
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&body))

@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - '**'
+      - '!.claude/**'
       - '!docs/**'
       - '!.github/**'
       - '!README.md'
@@ -12,6 +13,7 @@ on:
   pull_request:
     paths:
       - '**'
+      - '!.claude/**'
       - '!docs/**'
       - '!.github/**'
       - '!README.md'
@@ -21,6 +23,8 @@ on:
 env:
   GO_VERSION: '1.26.5'
 
+permissions:
+  contents: read
 jobs:
   unit-tests:
     name: unit-test-${{ matrix.module }}
@@ -33,8 +37,8 @@ jobs:
       actions: read
       pull-requests: write # needed for coverage comments
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: Test ${{ matrix.module }} module
@@ -57,8 +61,8 @@ jobs:
       matrix:
         module: [slippy-api, slippy-client]
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: Install tools
@@ -76,8 +80,8 @@ jobs:
       matrix:
         module: [slippy-api]
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: Run vulnerability scan on ${{ matrix.module }} module
@@ -173,12 +177,12 @@ jobs:
           echo "email=${id}+${slug}@users.noreply.github.com" >> "$GITHUB_OUTPUT"
 
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: main
           token: ${{ steps.app-token.outputs.token }}
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
 
@@ -216,7 +220,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 

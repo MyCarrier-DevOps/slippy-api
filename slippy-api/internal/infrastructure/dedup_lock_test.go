@@ -332,7 +332,9 @@ func TestSlipWriterAdapter_AwaitExistingSlip_UsesExactNotAncestry(t *testing.T) 
 	winner := &slippy.Slip{CorrelationID: "winner-corr", Repository: "Org/Repo", CommitSHA: "DEAD"}
 	reader := &stubReader{
 		loadByCommitFn: func(_ context.Context, _, _ string) (*slippy.Slip, error) {
-			t.Fatal("awaitExistingSlip MUST NOT call LoadByCommit — ancestry resolution returns wrong-slip on miss; must use LoadByCommitExact")
+			t.Fatal(
+				"awaitExistingSlip MUST NOT call LoadByCommit — ancestry resolution returns wrong-slip on miss; must use LoadByCommitExact",
+			)
 			return nil, nil
 		},
 		loadByCommitExactFn: func(_ context.Context, _, _ string) (*slippy.Slip, error) {

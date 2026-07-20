@@ -2,6 +2,38 @@
 
 This file provides instructions and context for AI coding agents working on the **slippy-api** repository.
 
+This repo's Go workflow — the idiomatic-Go conventions, the RED-test-first delivery loop, the security preflight, and the coverage gate — is owned by the **go-devkit** plugin (an apm dependency declared in [apm.yml](apm.yml); its machinery is installed outside the repo tree under `apm_modules/` via `apm install`). The go-devkit block below is the authoritative description of that workflow and is kept in sync by `/go-repo-init` — do not edit it by hand. The sections after it record the project-specific facts the plugin cannot know: this repo's module layout, coverage policy, and house rules.
+
+<!-- BEGIN go-devkit -->
+## Development workflow (go-devkit)
+
+This repository uses the **go-devkit** Claude Code plugin. The idiomatic Go
+conventions this project enforces (naming, error handling, package layout,
+concurrency, HTTP clients, testing, security) live in the plugin and are loaded
+by the `go-tdd` skill — read them before writing Go code.
+
+For features and bugfixes, use the **`go-tdd`** skill — it drives the full loop:
+
+1. **RED test first (code changes only).** Write a failing table-driven test
+   before the implementation, then make it pass, then refactor — confirm it
+   fails for the intended reason first. This does **not** apply to meta changes
+   (renaming the app / `APPLICATION`, config, docs, dependency bumps); make those
+   directly and verify with `/go-verify`.
+2. **Preflight before coding.** Run `/go-preflight` (`make check-sec`) after
+   planning and before implementing. If `govulncheck` flags a Go standard-library
+   CVE, upgrade the toolchain (`brew upgrade go`, or `mise use -g go@latest`)
+   before continuing; if it flags a dependency, `make bump`.
+3. **Verify after.** Run `/go-verify` when the task is done — it runs `make fmt`,
+   `make lint`, `make test`, and the plugin's coverage gate (which reads the CI
+   `threshold-total` live so local and CI never drift).
+
+**Pin the Go version to a full patch release, and keep it in sync.** The `go`
+directive in the module's `go.mod` (e.g. `go 1.26.5`, not `go 1.26`) and the
+builder image in the Dockerfile (`golang:1.26.5`) must name the same patch. CI
+intentionally floats on the patch level (`go-version: "1.26"`); bump it by hand
+for a new minor or major.
+<!-- END go-devkit -->
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
 ## Beads Issue Tracker
 

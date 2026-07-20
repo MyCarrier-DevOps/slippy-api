@@ -282,9 +282,19 @@ func TestAdapter_LoadByCommit_FullSHA_TerminalStatusExactMiss_FallsBackToAncestr
 	slip, err := adapter.LoadByCommit(context.Background(), "org/repo", fullSHA)
 
 	require.NoError(t, err)
-	assert.Equal(t, expected, slip, "must return the ancestry resolver's live-lineage slip, not the filtered terminal slip")
+	assert.Equal(
+		t,
+		expected,
+		slip,
+		"must return the ancestry resolver's live-lineage slip, not the filtered terminal slip",
+	)
 	assert.Equal(t, 1, exactCalls, "exact read must be attempted exactly once before ancestry fallback")
-	assert.Equal(t, 1, resolverCalls, "ancestry resolver MUST be invoked when the exact slip is terminal-status-filtered")
+	assert.Equal(
+		t,
+		1,
+		resolverCalls,
+		"ancestry resolver MUST be invoked when the exact slip is terminal-status-filtered",
+	)
 }
 
 // TestAdapter_LoadByCommit_BranchRef_SkipsExact asserts a non-full-SHA ref (a

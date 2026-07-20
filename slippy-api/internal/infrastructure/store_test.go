@@ -16,12 +16,12 @@ import (
 // --- mockSlipStore implements slippy.SlipStore for testing the adapter ---
 
 type mockSlipStore struct {
-	loadFn              func(ctx context.Context, id string) (*slippy.Slip, error)
-	loadByCommitFn      func(ctx context.Context, repo, sha string) (*slippy.Slip, error)
-	loadLiveByCommitFn  func(ctx context.Context, repo, sha string) (*slippy.Slip, error)
-	findByCommitsFn     func(ctx context.Context, repo string, commits []string) (*slippy.Slip, string, error)
-	findAllByCommitsFn  func(ctx context.Context, repo string, commits []string) ([]slippy.SlipWithCommit, error)
-	closeFn             func() error
+	loadFn             func(ctx context.Context, id string) (*slippy.Slip, error)
+	loadByCommitFn     func(ctx context.Context, repo, sha string) (*slippy.Slip, error)
+	loadLiveByCommitFn func(ctx context.Context, repo, sha string) (*slippy.Slip, error)
+	findByCommitsFn    func(ctx context.Context, repo string, commits []string) (*slippy.Slip, string, error)
+	findAllByCommitsFn func(ctx context.Context, repo string, commits []string) ([]slippy.SlipWithCommit, error)
+	closeFn            func() error
 
 	// Write methods (unused by adapter, but required by the interface)
 	createFn                func(ctx context.Context, slip *slippy.Slip) error
