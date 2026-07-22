@@ -17,6 +17,7 @@ import (
 
 	"github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse"
 	"github.com/MyCarrier-DevOps/goLibMyCarrier/logger"
+	"github.com/MyCarrier-DevOps/goLibMyCarrier/postgres"
 	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
 
 	"github.com/MyCarrier-DevOps/slippy-api/internal/config"
@@ -201,48 +202,49 @@ func run() error {
 	}
 	log.Printf("pipeline config loaded (%s, %d steps)", pipelineCfg.Name, len(pipelineCfg.Steps))
 
-	// --- ClickHouse store ---
+	// --- Postgres slip store (command + query path) ---
+	// Slips live in Postgres: writes and read-modify-write reads go directly to PG
+	// (atomic under MVCC), and the query path reads PG directly too. Schema is owned
+	// by the migrator Job (PreSync hook); slippy-api never migrates.
+	pgCfg, err := postgres.PostgresLoadConfig()
+	if err != nil {
+		return fmt.Errorf("postgres config: %w", err)
+	}
+	pgSession, err := postgres.NewPostgresSession(context.Background(), pgCfg)
+	if err != nil {
+		return fmt.Errorf("postgres session: %w", err)
+	}
+	defer func() {
+		if closeErr := pgSession.Close(); closeErr != nil {
+			log.Printf("warning: postgres session close: %v", closeErr)
+		}
+	}()
+	store, err := slippy.NewPostgresStore(pgSession.Pool(), pipelineCfg, libLogger)
+	if err != nil {
+		return fmt.Errorf("postgres slip store: %w", err)
+	}
+	log.Printf("postgres slip store connected")
+
+	// --- Standalone ClickHouse session (non-slip readers only) ---
+	// ci.buildinfo / ci.repoproperties, observability.ciJob, and autotest_results.*
+	// stay in ClickHouse. The slip store no longer provides a CH session, so these
+	// readers get their own.
 	chCfg, err := clickhouse.ClickhouseLoadConfig()
 	if err != nil {
 		return fmt.Errorf("clickhouse config: %w", err)
 	}
-	if cfg.SkipMigrations {
-		log.Printf("clickhouse migrations disabled via SLIPPY_SKIP_MIGRATIONS")
-	} else {
-		log.Printf("clickhouse migrations: starting")
-	}
-	store, err := slippy.NewClickHouseStoreFromConfig(chCfg, slippy.ClickHouseStoreOptions{
-		SkipMigrations: cfg.SkipMigrations,
-		PipelineConfig: pipelineCfg,
-		Database:       cfg.SlipDatabase,
-		Logger:         libLogger,
-	})
+	chSession, err := clickhouse.NewClickhouseSession(chCfg, context.Background())
 	if err != nil {
-		return fmt.Errorf("clickhouse store: %w", err)
+		return fmt.Errorf("clickhouse session: %w", err)
 	}
 	defer func() {
-		if closeErr := store.Close(); closeErr != nil {
-			log.Printf("warning: clickhouse store close: %v", closeErr)
+		if closeErr := chSession.Close(); closeErr != nil {
+			log.Printf("warning: clickhouse session close: %v", closeErr)
 		}
 	}()
-	log.Printf("clickhouse store connected")
+	log.Printf("clickhouse session connected (non-slip readers)")
 
-	// Startup gate: async-insert settings must be enabled. The I5 race fix
-	// (ADO #82468) requires wait_for_async_insert=1 so the event-log row
-	// written by appendHistoryWithOverrides is visible to goLib's pre-INSERT
-	// freshness gate (enforceTerminalFreshnessGate's argMax SELECT over
-	// slip_component_states, and the analogous argMax derive in
-	// overlayComponentState/overlayPipelineStep). Fail fast if absent — silent
-	// continuation would silently re-introduce the 436cc68c regression.
-	assertCtx, assertCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	if err := infrastructure.AssertAsyncInsertEnabled(assertCtx, store.Session()); err != nil {
-		assertCancel()
-		return fmt.Errorf("clickhouse async-insert assertion: %w", err)
-	}
-	assertCancel()
-	log.Printf("clickhouse async-insert assertion passed (async_insert=1, wait_for_async_insert=1)")
-
-	// Adapt the read+write store to our read-only interface.
+	// Adapt the read+write store to our read-only interface (PG-direct query path).
 	adapter := infrastructure.NewSlipStoreAdapter(store)
 
 	// --- GitHub ancestry resolution ---
@@ -274,19 +276,19 @@ func run() error {
 	// --- BuildInfo reader for image tag resolution ---
 	// Uses the same ClickHouse session as the slip store to query ci.buildinfo
 	// and ci.repoproperties without opening a second connection.
-	imageTagReader := infrastructure.NewBuildInfoReader(store.Session(), reader)
+	imageTagReader := infrastructure.NewBuildInfoReader(chSession, reader)
 
 	// --- CI Job Log reader ---
 	// Uses the same ClickHouse session to query observability.ciJob.
-	ciJobLogReader := infrastructure.NewCIJobLogStore(store.Session())
+	ciJobLogReader := infrastructure.NewCIJobLogStore(chSession)
 
 	// --- Automation test results reader ---
 	// Uses the same ClickHouse session to query autotest_results.RunResults.
-	automationTestResultsReader := infrastructure.NewAutomationTestResultsStore(store.Session())
+	automationTestResultsReader := infrastructure.NewAutomationTestResultsStore(chSession)
 
 	// --- Automation tests (per-test) reader ---
 	// Uses the same ClickHouse session to query autotest_results.TestResults.
-	automationTestsReader := infrastructure.NewAutomationTestsStore(store.Session())
+	automationTestsReader := infrastructure.NewAutomationTestsStore(chSession)
 
 	// --- Write support ---
 	// SLIPPY_WRITE_API_KEY is required; config.Load() already validated it.
@@ -308,7 +310,7 @@ func run() error {
 	log.Printf("write endpoints enabled")
 
 	// --- Admin handler ---
-	adminH := handler.NewAdminHandler(store.Session(), cfg.SlipDatabase, pipelineCfg)
+	adminH := handler.NewAdminHandler(chSession, cfg.SlipDatabase, pipelineCfg)
 
 	// --- HTTP Server ---
 	otelHandler := buildHandler(
