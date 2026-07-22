@@ -2,8 +2,8 @@ SHELL:=/bin/bash
 
 GOOS ?= $(shell go env GOOS)
 GOARCH ?= $(shell go env GOARCH)
-MODULES  := slippy-api slippy-client
-BINARIES := slippy-api
+MODULES  := slippy-api slippy-client slippy-migrator
+BINARIES := slippy-api slippy-migrator
 
 .PHONY: lint
 lint: install-tools

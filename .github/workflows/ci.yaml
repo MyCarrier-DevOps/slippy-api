@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        module: [slippy-api]
+        module: [slippy-api, slippy-migrator]
     permissions:
       contents: read
       actions: read
@@ -59,7 +59,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        module: [slippy-api, slippy-client]
+        module: [slippy-api, slippy-client, slippy-migrator]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -78,7 +78,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        module: [slippy-api]
+        module: [slippy-api, slippy-migrator]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
