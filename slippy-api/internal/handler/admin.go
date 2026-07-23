@@ -34,7 +34,7 @@ func NewAdminHandler(
 // SchemaVersionOutput is the response body for GET /v1/admin/schema-version.
 type SchemaVersionOutput struct {
 	Body struct {
-		Current int `json:"current" doc:"Current ClickHouse schema version"`
+		Current int `json:"current" doc:"Current version of the LEGACY ClickHouse slip schema. Slip data now lives in Postgres, whose schema is owned by the slippy-migrator Job and is NOT reported here."`
 		Target  int `json:"target"  doc:"Target schema version derived from the pipeline config"`
 	}
 }
@@ -45,7 +45,7 @@ func RegisterAdminRoutes(api huma.API, h *AdminHandler) {
 		OperationID: "get-schema-version",
 		Method:      http.MethodGet,
 		Path:        "/admin/schema-version",
-		Summary:     "Get current and target ClickHouse schema versions",
+		Summary:     "Get the legacy ClickHouse slip schema version (diagnostic; PG schema is owned by the migrator Job)",
 		Tags:        []string{"v1"},
 	}, h.getSchemaVersion)
 }
@@ -58,6 +58,10 @@ func (h *AdminHandler) getSchemaVersion(ctx context.Context, _ *struct{}) (*Sche
 
 	slog.InfoContext(ctx, "admin: reading schema version", "database", h.database)
 
+	// NOTE: this reports the LEGACY ClickHouse slip schema version. Post-Postgres-cutover
+	// the operational slip schema lives in Postgres and is owned by the slippy-migrator Job;
+	// this endpoint intentionally does not track it (repointing at the PG schema version is a
+	// separate change). The returned number reflects the now-frozen ClickHouse slip schema.
 	current, err := slippy.GetCurrentSchemaVersion(ctx, h.session.Conn(), h.database)
 	if err != nil {
 		recordHandlerError(span, err)

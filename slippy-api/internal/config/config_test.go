@@ -18,7 +18,6 @@ func clearEnv(t *testing.T) {
 		"CACHE_TTL",
 		"SLIPPY_GITHUB_APP_ID", "SLIPPY_GITHUB_APP_PRIVATE_KEY",
 		"SLIPPY_GITHUB_ENTERPRISE_URL", "SLIPPY_ANCESTRY_DEPTH",
-		"SLIPPY_SKIP_MIGRATIONS",
 		"K8S_NAMESPACE",
 	} {
 		t.Setenv(key, "")
@@ -58,7 +57,6 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, "", cfg.GitHubEnterpriseURL)
 	assert.Equal(t, 25, cfg.AncestryDepth)
 	assert.Equal(t, "ci", cfg.SlipDatabase)
-	assert.False(t, cfg.SkipMigrations)
 }
 
 func TestLoad_SlipDatabase_DerivedFromNamespace(t *testing.T) {
@@ -264,47 +262,3 @@ func TestLoad_MissingWriteAPIKey(t *testing.T) {
 	assert.ErrorContains(t, err, "SLIPPY_WRITE_API_KEY is required")
 }
 
-func TestLoad_SkipMigrations(t *testing.T) {
-	tests := []struct {
-		name     string
-		envVal   string
-		expected bool
-	}{
-		{"default (absent)", "", false},
-		{"explicit true", "true", true},
-		{"explicit TRUE", "TRUE", true},
-		{"explicit 1", "1", true},
-		{"explicit false", "false", false},
-		{"explicit FALSE", "FALSE", false},
-		{"explicit 0", "0", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			clearEnv(t)
-			t.Setenv("SLIPPY_API_KEY", "key")
-			t.Setenv("SLIPPY_WRITE_API_KEY", "write-key")
-			t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
-			t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
-			if tt.envVal != "" {
-				t.Setenv("SLIPPY_SKIP_MIGRATIONS", tt.envVal)
-			}
-
-			cfg, err := Load()
-			require.NoError(t, err)
-			assert.Equal(t, tt.expected, cfg.SkipMigrations)
-		})
-	}
-}
-
-func TestLoad_SkipMigrations_Invalid(t *testing.T) {
-	clearEnv(t)
-	t.Setenv("SLIPPY_API_KEY", "key")
-	t.Setenv("SLIPPY_WRITE_API_KEY", "write-key")
-	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
-	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
-	t.Setenv("SLIPPY_SKIP_MIGRATIONS", "yes")
-
-	cfg, err := Load()
-	assert.Nil(t, cfg)
-	assert.ErrorContains(t, err, "SLIPPY_SKIP_MIGRATIONS must be a valid boolean")
-}

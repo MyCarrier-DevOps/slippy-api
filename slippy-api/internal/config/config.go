@@ -48,17 +48,13 @@ type Config struct {
 
 	// WriteAPIKey is the bearer token for write endpoints (required).
 	WriteAPIKey string
-
-	// SkipMigrations controls whether ClickHouse schema migrations run at startup (default: false).
-	// Set SLIPPY_SKIP_MIGRATIONS=true to disable migrations — useful when running multiple replicas.
-	SkipMigrations bool
 }
 
 // Load reads configuration from environment variables.
 // Required: SLIPPY_API_KEY, SLIPPY_WRITE_API_KEY, SLIPPY_GITHUB_APP_ID, SLIPPY_GITHUB_APP_PRIVATE_KEY
 // Optional: PORT, DRAGONFLY_HOST, DRAGONFLY_PORT, DRAGONFLY_PASSWORD, CACHE_TTL,
 //
-//	SLIPPY_GITHUB_ENTERPRISE_URL, SLIPPY_ANCESTRY_DEPTH, SLIPPY_SKIP_MIGRATIONS
+//	SLIPPY_GITHUB_ENTERPRISE_URL, SLIPPY_ANCESTRY_DEPTH
 func Load() (*Config, error) {
 	cfg := &Config{
 		Port:          8080,
@@ -145,15 +141,6 @@ func Load() (*Config, error) {
 	cfg.WriteAPIKey = os.Getenv("SLIPPY_WRITE_API_KEY")
 	if cfg.WriteAPIKey == "" {
 		return nil, fmt.Errorf("SLIPPY_WRITE_API_KEY is required")
-	}
-
-	// Optional: SLIPPY_SKIP_MIGRATIONS (default: true for backward compatibility)
-	if v := os.Getenv("SLIPPY_SKIP_MIGRATIONS"); v != "" {
-		b, err := strconv.ParseBool(v)
-		if err != nil {
-			return nil, fmt.Errorf("SLIPPY_SKIP_MIGRATIONS must be a valid boolean: %w", err)
-		}
-		cfg.SkipMigrations = b
 	}
 
 	return cfg, nil

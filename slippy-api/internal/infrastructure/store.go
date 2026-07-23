@@ -15,7 +15,9 @@ import (
 	"github.com/MyCarrier-DevOps/slippy-api/internal/domain"
 )
 
-// storeTracerName is the instrumentation scope for ClickHouse store operations.
+// storeTracerName is the instrumentation scope for slip-store operations. These now execute
+// against Postgres (the slip store is PostgresStore); ClickHouse is used elsewhere in the
+// process only by the non-slip readers.
 const storeTracerName = "slippy-api/store"
 
 // SlipStoreAdapter adapts the upstream slippy.SlipStore (read+write) to the
@@ -34,10 +36,10 @@ func NewSlipStoreAdapter(store slippy.SlipStore) *SlipStoreAdapter {
 var _ domain.SlipReader = (*SlipStoreAdapter)(nil)
 
 func (a *SlipStoreAdapter) Load(ctx context.Context, correlationID string) (*domain.Slip, error) {
-	ctx, span := otel.Tracer(storeTracerName).Start(ctx, "clickhouse.Load",
+	ctx, span := otel.Tracer(storeTracerName).Start(ctx, "postgres.Load",
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(
-			attribute.String("db.system", "clickhouse"),
+			attribute.String("db.system", "postgresql"),
 			attribute.String("db.operation", "Load"),
 			attribute.String("slip.correlation_id", correlationID),
 		),
@@ -53,10 +55,10 @@ func (a *SlipStoreAdapter) Load(ctx context.Context, correlationID string) (*dom
 }
 
 func (a *SlipStoreAdapter) LoadByCommit(ctx context.Context, repository, commitSHA string) (*domain.Slip, error) {
-	ctx, span := otel.Tracer(storeTracerName).Start(ctx, "clickhouse.LoadByCommit",
+	ctx, span := otel.Tracer(storeTracerName).Start(ctx, "postgres.LoadByCommit",
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(
-			attribute.String("db.system", "clickhouse"),
+			attribute.String("db.system", "postgresql"),
 			attribute.String("db.operation", "LoadByCommit"),
 			attribute.String("slip.repository", repository),
 			attribute.String("slip.commit_sha", commitSHA),
@@ -76,16 +78,15 @@ func (a *SlipStoreAdapter) LoadByCommit(ctx context.Context, repository, commitS
 // returns the most recent LIVE (non-terminal) slip for the exact (repository, commitSHA).
 // Returns slippy.ErrSlipNotFound when no live slip exists. Bypasses ancestry resolution.
 func (a *SlipStoreAdapter) LoadByCommitExact(ctx context.Context, repository, commitSHA string) (*domain.Slip, error) {
-	// Span name and db.operation are both "LoadLiveByCommit" — the actual SQL
-	// operation invoked on the underlying store. The adapter method is named
+	// Span name and db.operation are both "LoadLiveByCommit" — the actual query
+	// invoked on the underlying Postgres store. The adapter method is named
 	// LoadByCommitExact (the domain-side semantic: bypass ancestry resolution),
 	// but the span identifies the executed work, not the caller-facing name, so
-	// trace consumers correlate it directly with the goLibMyCarrier store-level
-	// LoadLiveByCommit instrumentation.
-	ctx, span := otel.Tracer(storeTracerName).Start(ctx, "clickhouse.LoadLiveByCommit",
+	// trace consumers correlate it directly with the store-level LoadLiveByCommit query.
+	ctx, span := otel.Tracer(storeTracerName).Start(ctx, "postgres.LoadLiveByCommit",
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(
-			attribute.String("db.system", "clickhouse"),
+			attribute.String("db.system", "postgresql"),
 			attribute.String("db.operation", "LoadLiveByCommit"),
 			attribute.String("slip.repository", repository),
 			attribute.String("slip.commit_sha", commitSHA),
@@ -106,10 +107,10 @@ func (a *SlipStoreAdapter) FindByCommits(
 	repository string,
 	commits []string,
 ) (foundSlip *domain.Slip, matchedCommit string, err error) {
-	ctx, span := otel.Tracer(storeTracerName).Start(ctx, "clickhouse.FindByCommits",
+	ctx, span := otel.Tracer(storeTracerName).Start(ctx, "postgres.FindByCommits",
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(
-			attribute.String("db.system", "clickhouse"),
+			attribute.String("db.system", "postgresql"),
 			attribute.String("db.operation", "FindByCommits"),
 			attribute.String("slip.repository", repository),
 			attribute.Int("slip.commits_count", len(commits)),
@@ -131,10 +132,10 @@ func (a *SlipStoreAdapter) FindAllByCommits(
 	repository string,
 	commits []string,
 ) ([]domain.SlipWithCommit, error) {
-	ctx, span := otel.Tracer(storeTracerName).Start(ctx, "clickhouse.FindAllByCommits",
+	ctx, span := otel.Tracer(storeTracerName).Start(ctx, "postgres.FindAllByCommits",
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(
-			attribute.String("db.system", "clickhouse"),
+			attribute.String("db.system", "postgresql"),
 			attribute.String("db.operation", "FindAllByCommits"),
 			attribute.String("slip.repository", repository),
 			attribute.Int("slip.commits_count", len(commits)),
@@ -166,7 +167,7 @@ func recordStoreError(span trace.Span, err error) {
 	case isClientError(err):
 		span.SetStatus(codes.Unset, err.Error())
 	default:
-		span.SetStatus(codes.Error, fmt.Sprintf("clickhouse query failed: %v", err))
+		span.SetStatus(codes.Error, fmt.Sprintf("slip store query failed: %v", err))
 	}
 }
 

@@ -216,8 +216,10 @@ func (a *SlipWriterAdapter) CreateSlipForPush(
 			return nil, err
 		}
 		// SUCCESS: do NOT release. Let the TTL expire so a near-simultaneous
-		// duplicate stays blocked through the ClickHouse async-insert visibility
-		// window. The lib's handlePushRetry is idempotent once the slip is visible.
+		// duplicate stays blocked through the window between the winner acquiring the
+		// lock and committing its Postgres transaction — until that commit, the loser's
+		// LoadByCommitExact sees no row under MVCC read-committed. The lib's
+		// handlePushRetry is idempotent once the slip is visible (right after commit).
 		return result, nil
 	}
 
@@ -401,9 +403,9 @@ func (a *SlipWriterAdapter) awaitExistingSlip(
 
 	deadline := time.Now().Add(a.lockWait)
 	// Start small (50ms) so the common near-simultaneous-duplicate case — where the
-	// winner's slip becomes visible almost immediately — resolves with minimal added
-	// latency. The backoff still doubles up to maxBackoff for the slower async-insert
-	// visibility window.
+	// winner's slip becomes visible almost immediately after its transaction commits —
+	// resolves with minimal added latency. The backoff still doubles up to maxBackoff to
+	// cover a slower winner (a longer pre-commit window).
 	backoff := 50 * time.Millisecond
 	const maxBackoff = time.Second
 	attempts := 0
@@ -447,8 +449,8 @@ func (a *SlipWriterAdapter) awaitExistingSlip(
 	// slip — return a retryable error so the duplicate is not materialized.
 	//
 	// Observability: WARN log on deadline-exhaust acts as the early-warning signal
-	// for a class-of-bug regression (e.g. winner crashing pre-insert, async-insert
-	// window blown past lockWait, or ancestry-resolution drift causing the await
+	// for a class-of-bug regression (e.g. winner crashing pre-commit, its transaction
+	// staying open past lockWait, or ancestry-resolution drift causing the await
 	// path to miss a slip that does exist). If this fires steadily, investigate
 	// before adjusting lockWait — increasing the wait masks the underlying issue.
 	deadlineMs := a.lockWait.Milliseconds()

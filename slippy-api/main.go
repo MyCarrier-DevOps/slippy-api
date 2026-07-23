@@ -183,8 +183,8 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
-	log.Printf("config loaded (port=%d, cache=%v, db=%s, skip_migrations=%v)",
-		cfg.Port, cfg.CacheEnabled(), cfg.SlipDatabase, cfg.SkipMigrations)
+	log.Printf("config loaded (port=%d, cache=%v, db=%s)",
+		cfg.Port, cfg.CacheEnabled(), cfg.SlipDatabase)
 
 	// --- Library logger ---
 	// Single shared logger for the slippy library, ClickHouse store, migrations,
@@ -274,20 +274,20 @@ func run() error {
 	reader, rdb := connectCache(cfg, slipReader, redisDial)
 
 	// --- BuildInfo reader for image tag resolution ---
-	// Uses the same ClickHouse session as the slip store to query ci.buildinfo
-	// and ci.repoproperties without opening a second connection.
+	// Uses the standalone ClickHouse session (the slip store is Postgres now and no longer
+	// provides a ClickHouse session) to query ci.buildinfo and ci.repoproperties.
 	imageTagReader := infrastructure.NewBuildInfoReader(chSession, reader)
 
 	// --- CI Job Log reader ---
-	// Uses the same ClickHouse session to query observability.ciJob.
+	// Uses the standalone ClickHouse session to query observability.ciJob.
 	ciJobLogReader := infrastructure.NewCIJobLogStore(chSession)
 
 	// --- Automation test results reader ---
-	// Uses the same ClickHouse session to query autotest_results.RunResults.
+	// Uses the standalone ClickHouse session to query autotest_results.RunResults.
 	automationTestResultsReader := infrastructure.NewAutomationTestResultsStore(chSession)
 
 	// --- Automation tests (per-test) reader ---
-	// Uses the same ClickHouse session to query autotest_results.TestResults.
+	// Uses the standalone ClickHouse session to query autotest_results.TestResults.
 	automationTestsReader := infrastructure.NewAutomationTestsStore(chSession)
 
 	// --- Write support ---
