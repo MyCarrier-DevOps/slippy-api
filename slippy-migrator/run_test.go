@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -56,6 +57,11 @@ func TestParseArgs(t *testing.T) {
 		assert.True(t, o.dryRun)
 		assert.Equal(t, 3, o.targetVersion)
 	})
+	t.Run("verbose flag", func(t *testing.T) {
+		o, err := parseArgs([]string{"-verbose"})
+		require.NoError(t, err)
+		assert.True(t, o.verbose)
+	})
 	t.Run("negative target rejected", func(t *testing.T) {
 		_, err := parseArgs([]string{"-target-version", "-1"})
 		require.Error(t, err)
@@ -63,7 +69,18 @@ func TestParseArgs(t *testing.T) {
 	t.Run("unknown flag rejected", func(t *testing.T) {
 		_, err := parseArgs([]string{"-nope"})
 		require.Error(t, err)
+		assert.NotErrorIs(t, err, flag.ErrHelp, "a bad flag is not a help request")
 	})
+	t.Run("help requested returns ErrHelp", func(t *testing.T) {
+		_, err := parseArgs([]string{"-h"})
+		require.ErrorIs(t, err, flag.ErrHelp)
+	})
+}
+
+func TestRun_HelpRequestedExitsClean(t *testing.T) {
+	// -h is a clean exit (0), not a failure — even before any dependency is touched.
+	err := run(context.Background(), []string{"-h"}, deps{})
+	require.NoError(t, err)
 }
 
 func TestRun_AppliesMigration(t *testing.T) {

@@ -19,6 +19,10 @@ import (
 )
 
 func main() {
+	// A one-shot schema Job: overall runtime is bounded by the Kubernetes Job's
+	// activeDeadlineSeconds (set in the Helm chart), not by a client-side context deadline.
+	// A per-migration client timeout is deliberately avoided — severing an in-flight DDL or
+	// lock wait mid-statement is worse than letting the Job deadline stop it.
 	if err := run(context.Background(), os.Args[1:], realDeps()); err != nil {
 		log.Fatalf("slippy-migrator: %v", err)
 	}

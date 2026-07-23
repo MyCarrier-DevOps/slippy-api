@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"os"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -15,6 +18,7 @@ import (
 type options struct {
 	dryRun        bool
 	targetVersion int
+	verbose       bool
 }
 
 // deps are the injectable dependencies of run, so the orchestration is unit-testable
@@ -37,11 +41,22 @@ func closeAndLog(name string, closeFn func() error, logf func(string, ...any)) {
 // parseArgs parses the migrator's flags.
 func parseArgs(args []string) (options, error) {
 	fs := flag.NewFlagSet("slippy-migrator", flag.ContinueOnError)
+	// Own all flag output. By default flag writes the error AND usage to stderr, which the
+	// caller (main -> log.Fatalf) would then re-print — a double report. Suppress it and
+	// surface a single wrapped error instead.
+	fs.SetOutput(io.Discard)
 	var o options
 	fs.BoolVar(&o.dryRun, "dry-run", false, "report the pending migration without applying it")
 	fs.IntVar(&o.targetVersion, "target-version", 0, "schema version to migrate to (0 = latest)")
+	fs.BoolVar(&o.verbose, "verbose", false, "enable slippy debug/trace logging")
 	if err := fs.Parse(args); err != nil {
-		return options{}, err
+		if errors.Is(err, flag.ErrHelp) {
+			// -h/-help is a help request, not an error: print usage and let the caller exit 0.
+			fs.SetOutput(os.Stdout)
+			fs.Usage()
+			return options{}, flag.ErrHelp
+		}
+		return options{}, fmt.Errorf("invalid arguments: %w", err)
 	}
 	if o.targetVersion < 0 {
 		return options{}, fmt.Errorf("target-version must be >= 0, got %d", o.targetVersion)
@@ -56,6 +71,9 @@ func parseArgs(args []string) (options, error) {
 func run(ctx context.Context, args []string, d deps) error {
 	opts, err := parseArgs(args)
 	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil // help requested; usage already printed, exit 0
+		}
 		return err
 	}
 
@@ -85,7 +103,7 @@ func run(ctx context.Context, args []string, d deps) error {
 		PipelineConfig: pipelineCfg,
 		TargetVersion:  opts.targetVersion,
 		DryRun:         opts.dryRun,
-		Logger:         slippy.NewStdLogger(false),
+		Logger:         slippy.NewStdLogger(opts.verbose),
 	})
 	if err != nil {
 		return fmt.Errorf("migrate-schema: %w", err)
