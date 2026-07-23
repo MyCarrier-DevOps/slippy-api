@@ -113,14 +113,14 @@ But **final gate before commit MUST be `make lint && make test`** — CI compare
 
 ## Architecture Overview
 
-**slippy-api** is an HTTP API service that exposes read and write operations on Slippy routing slips. It acts as the persistence layer between CI/CD pipeline agents (Slippy CLI) and ClickHouse storage.
+**slippy-api** is an HTTP API service that exposes read and write operations on Slippy routing slips. It is the persistence layer between CI/CD pipeline agents (Slippy CLI) and **Postgres** (the operational slip store); ClickHouse is retained only for the non-slip readers and federated reporting.
 
 ```
 slippy-api/          — main HTTP service (port 8080)
   internal/
     domain/          — interfaces (SlipReader, SlipWriter) + type aliases from goLibMyCarrier/slippy
     handler/         — Huma v2 HTTP handlers (read: slip_handler, write: slip_write_handler)
-    infrastructure/  — adapters: ClickHouse store, Redis cache, SlipWriterAdapter, AncestryAdapter
+    infrastructure/  — adapters: Postgres slip store, Redis cache, SlipWriterAdapter, AncestryAdapter
     config/          — env-based config loading
     middleware/      — auth, tracing
     telemetry/       — OTel setup
@@ -128,7 +128,7 @@ slippy-api/          — main HTTP service (port 8080)
 slippy-client/       — generated OpenAPI Go client (oapi-codegen)
 ```
 
-Key design: the `SlipWriterAdapter` wraps `slippy.Client` from `goLibMyCarrier/slippy`. After step mutations, it calls `hydrateAndPersist` for non-aggregate pipeline steps to flush computed `*_status` columns to ClickHouse. Aggregate steps skip this because the library handles their `Load + Update` path internally.
+Key design: the `SlipWriterAdapter` wraps `slippy.Client` from `goLibMyCarrier/slippy`, whose `SlipStore` is now the `PostgresStore` (pgx, direct). Step writes are **atomic** — the library writes the `*_status` column in the same transaction as the component-state upsert and history append — so slippy-api performs no post-write read-modify-write. The ClickHouse-era `hydrateAndPersist`/overlay machinery was removed in the Postgres migration (DEVOPS-127).
 
 ## Slippy Library Dependency
 
@@ -153,24 +153,27 @@ When bumping `goLibMyCarrier/slippy` to a new version:
 ### Behavioral Notes (v1.3.77+)
 
 - `checkPipelineCompletion` short-circuits on `Completed`, `Abandoned`, `Promoted` (was `Completed` only before v1.3.77). Post-`PromoteSlip`/`AbandonSlip` terminal step events no longer overwrite `slip.status`.
-- `UpdateStepWithStatus` now calls `checkPipelineCompletion` for terminal pipeline-level step events. This means `store.Load` is called from within the library even for aggregate steps — the adapter's `hydrateAndPersist` (which calls `Update`) is still correctly skipped, but `Load` itself is not.
+- `UpdateStepWithStatus` calls `checkPipelineCompletion` for terminal pipeline-level step events, so `store.Load` is invoked from within the library. Under Postgres that is a normal atomic read; slippy-api no longer wraps writes in a post-write `Load + Update` (the ClickHouse-era adapter path was removed).
 - `slippy.SlipStore` gained `UpdateSlipStatus(ctx, correlationID, status)` — an atomic INSERT SELECT that avoids a full `Load + Update` round-trip when updating only `slip.status`.
 
 ## Conventions & Patterns
 
 - Domain interfaces (`SlipReader`, `SlipWriter`) are defined in `internal/domain/` and backed by infrastructure adapters.
 - Type aliases in `domain/slip.go` keep handlers decoupled from direct `goLibMyCarrier/slippy` imports.
-- Hydration (`hydrateAndPersist`) is non-fatal — step events are durable in `slip_component_states` even if the post-write hydration fails.
+- Step writes are atomic under Postgres — the library persists the status column, component state, and history in one transaction — so slippy-api performs no post-write hydration/overlay (removed with the ClickHouse backend).
 - Mock implementations of `slippy.SlipStore` live in `internal/infrastructure/store_test.go`. The compile-time check `var _ slippy.SlipStore = (*mockSlipStore)(nil)` in `z_slipstore_interface_test.go` will catch interface drift on every build.
 
-### Critical Design Pattern: Read-Your-Own-Writes Overlay
+### Removed: Read-Your-Own-Writes Overlay (ClickHouse-era)
 
-**Problem:** With ClickHouse `async_insert=1`, a row inserted by a library call (e.g. `CompleteStep`) may not be visible to the immediately following `SELECT` inside `Load()`. If `hydrateAndPersist` calls `Load` and then `Update`, it can write a stale `running` status back to `routing_slips`, permanently violating I5 (materialization consistency invariant).
+The `overlayPipelineStep` / `hydrateAndPersist` read-your-own-writes overlay was **removed** in
+the Postgres migration (DEVOPS-127). It existed only to work around ClickHouse `async_insert`
+visibility: a row inserted by a library call might not be visible to the immediately following
+`SELECT`, so a `Load + Update` could write back a stale status and violate I5 (materialization
+consistency).
 
-**Fix pattern (`overlayPipelineStep` in `slip_writer.go`):** Capture `writtenAt := time.Now()` before the library INSERT call. After `Load()` returns in `hydrateAndPersist`, overlay the just-written `(stepName, status, writtenAt)` into `slip.Steps[stepName]` before `Update()`. The overlay wins if `CompletedAt == nil || writtenAt.After(*CompletedAt)`.
-
-**When to use:** Any new code path that calls `hydrateAndPersist` (or any equivalent Load+Update pattern) immediately after a library INSERT must apply this overlay. The event log row is the truth; the overlay makes the in-memory slip consistent with it before the write-back.
-
-**Aggregate steps:** Do NOT apply this pattern for aggregate steps in slippy-api — those are handled inside goLibMyCarrier by `overlayComponentState` (PR #59). The `isPipelineStep()` guard ensures `hydrateAndPersist` is never called for aggregate or component steps.
-
-**Reference:** goLibMyCarrier PR #59 (`overlayComponentState` in `slippy/clickhouse_store.go`) is the sibling fix for aggregate steps. `STATE_MACHINE_V3.md` §I5 documents the invariant.
+Under Postgres this cannot happen — a committed write is immediately visible (MVCC) and the
+library writes the status column atomically in the same transaction as the component-state
+upsert. **Do NOT reintroduce a post-INSERT `Load + Update` (or any equivalent overlay) in
+slippy-api.** The sibling aggregate-step fix (`overlayComponentState` in goLibMyCarrier) is
+likewise unnecessary for the Postgres store. `STATE_MACHINE_V3.md` §I5 still documents the
+invariant itself; only the ClickHouse-specific workaround is gone.
