@@ -58,6 +58,13 @@ func parseArgs(args []string) (options, error) {
 		}
 		return options{}, fmt.Errorf("invalid arguments: %w", err)
 	}
+	// Reject stray positionals: Go's flag package stops at the first non-flag token and
+	// leaves the rest in Args(). For a one-shot Job whose flags pick what it does, silently
+	// dropping `slippy-migrator 3` (meant as -target-version 3) would run the wrong thing.
+	if fs.NArg() > 0 {
+		return options{}, fmt.Errorf(
+			"unexpected positional argument(s) %v; use flags such as -target-version N", fs.Args())
+	}
 	if o.targetVersion < 0 {
 		return options{}, fmt.Errorf("target-version must be >= 0, got %d", o.targetVersion)
 	}
@@ -83,6 +90,15 @@ func run(ctx context.Context, args []string, d deps) error {
 	}
 	d.logf("pipeline config loaded (%s, %d steps)", pipelineCfg.Name, len(pipelineCfg.Steps))
 
+	// Reject a target above the latest registered version. RunPostgresMigrations would
+	// otherwise no-op and exit 0, so an operator would think they reached a version that
+	// doesn't exist. (0 = latest, so only guard explicit positive targets.)
+	if opts.targetVersion > 0 {
+		if latest := slippy.GetPostgresDynamicMigrationVersion(pipelineCfg); opts.targetVersion > latest {
+			return fmt.Errorf("target-version %d exceeds the latest schema version %d", opts.targetVersion, latest)
+		}
+	}
+
 	pgCfg, err := d.loadPGConfig()
 	if err != nil {
 		return fmt.Errorf("postgres config: %w", err)
@@ -96,7 +112,13 @@ func run(ctx context.Context, args []string, d deps) error {
 	d.logf("postgres connected")
 
 	if opts.dryRun {
-		d.logf("[dry-run] reporting pending migration; no changes will be applied")
+		// DryRun reports pending *versioned* migrations only. Per-step columns on
+		// routing_slips are added by unversioned ensurers, which run on a real apply but not
+		// in dry-run — so surface their count here, or the most common change (a new pipeline
+		// step needing a new column) would show up as "no change".
+		ensurers := slippy.GetPostgresDynamicEnsurers(pipelineCfg, slippy.NewStdLogger(opts.verbose))
+		d.logf("[dry-run] reporting pending migration; no changes will be applied "+
+			"(%d idempotent ensurers would also run on a real apply)", len(ensurers))
 	}
 
 	res, err := d.migrate(ctx, pool, slippy.PostgresMigrateOptions{
@@ -111,5 +133,14 @@ func run(ctx context.Context, args []string, d deps) error {
 
 	d.logf("migrate-schema complete: direction=%s from=v%d to=v%d applied=%d",
 		res.Direction, res.StartVersion, res.EndVersion, res.MigrationsApplied)
+
+	// A down-migration reverts versioned DownSQL but NOT the unversioned ensurer columns on
+	// routing_slips (ensurers only run on the up path), so the DB can retain columns from a
+	// newer version than it now reports. Surface that rather than leaving it silent.
+	if res.Direction == "down" {
+		d.logf("WARNING: downgrade v%d -> v%d applied; ensurer-added columns on routing_slips are "+
+			"NOT reverted by a down-migration, so the schema may retain columns from newer versions",
+			res.StartVersion, res.EndVersion)
+	}
 	return nil
 }

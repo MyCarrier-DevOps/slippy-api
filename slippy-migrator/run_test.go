@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -161,4 +163,40 @@ func TestRealDeps(t *testing.T) {
 	assert.NotNil(t, d.openPool)
 	assert.NotNil(t, d.migrate)
 	assert.NotNil(t, d.logf)
+}
+
+func TestParseArgs_StrayPositionalRejected(t *testing.T) {
+	// `slippy-migrator 3` (meant as -target-version 3) must error, not silently run defaults.
+	_, err := parseArgs([]string{"3"})
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, flag.ErrHelp)
+	assert.Contains(t, err.Error(), "positional")
+}
+
+func TestRun_TargetVersionAboveLatestRejected(t *testing.T) {
+	d := okDeps(t, new(bool), new(slippy.PostgresMigrateOptions))
+	err := run(context.Background(), []string{"-target-version", "9999"}, d)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds the latest schema version")
+}
+
+func TestRun_DowngradeLogsWarning(t *testing.T) {
+	var logs []string
+	d := okDeps(t, new(bool), new(slippy.PostgresMigrateOptions))
+	d.logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+	d.migrate = func(context.Context, *pgxpool.Pool, slippy.PostgresMigrateOptions) (*slippy.MigrateResult, error) {
+		return &slippy.MigrateResult{Direction: "down", StartVersion: 2, EndVersion: 1}, nil
+	}
+	require.NoError(t, run(context.Background(), []string{"-target-version", "1"}, d))
+	joined := strings.Join(logs, "\n")
+	assert.Contains(t, joined, "WARNING: downgrade")
+	assert.Contains(t, joined, "NOT reverted")
+}
+
+func TestRun_DryRunLogsEnsurerCount(t *testing.T) {
+	var logs []string
+	d := okDeps(t, new(bool), new(slippy.PostgresMigrateOptions))
+	d.logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+	require.NoError(t, run(context.Background(), []string{"-dry-run"}, d))
+	assert.Contains(t, strings.Join(logs, "\n"), "ensurers would also run")
 }
