@@ -3,10 +3,12 @@ package infrastructure
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
@@ -445,45 +447,6 @@ func TestSlipWriterAdapter_SkipStep_NotFound(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestSlipWriterAdapter_SkipStep_PipelineStep_TriggersHydration(t *testing.T) {
-	hydrationSlip := &slippy.Slip{CorrelationID: "abc-123"}
-	var updateCalled bool
-	store := &mockSlipStore{
-		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
-			return nil
-		},
-		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
-			return hydrationSlip, nil
-		},
-		updateFn: func(_ context.Context, _ *slippy.Slip) error {
-			updateCalled = true
-			return nil
-		},
-	}
-	adapter := newTestWriterAdapter(store)
-
-	err := adapter.SkipStep(context.Background(), "abc-123", "push_parsed", "", "not needed")
-	require.NoError(t, err)
-	assert.True(t, updateCalled, "expected hydrateAndPersist to call Update for pipeline step")
-}
-
-func TestSlipWriterAdapter_SkipStep_HydrationError_NonFatal(t *testing.T) {
-	store := &mockSlipStore{
-		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
-			return nil
-		},
-		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
-			return nil, errors.New("clickhouse unavailable")
-		},
-	}
-	adapter := newTestWriterAdapter(store)
-
-	err := adapter.SkipStep(context.Background(), "abc-123", "push_parsed", "", "skip")
-	require.NoError(t, err)
-}
-
-// --- SetComponentImageTag ---
-
 func TestSlipWriterAdapter_SetComponentImageTag_Success(t *testing.T) {
 	var called bool
 	store := &mockSlipStore{
@@ -526,199 +489,10 @@ func TestSlipWriterAdapter_SetComponentImageTag_NoPipelineConfig(t *testing.T) {
 	assert.Contains(t, err.Error(), "no pipeline config")
 }
 
-// --- Hydration (hydrateAndPersist) ---
-//
-// "push_parsed" is a plain pipeline step in testPipelineConfigJSON (no aggregates field).
-// "builds_completed" is an aggregate step (aggregates "build").
-
-func TestSlipWriterAdapter_StartStep_PipelineStep_TriggersHydration(t *testing.T) {
-	hydrationSlip := &slippy.Slip{CorrelationID: "abc-123"}
-	var updateCalled bool
-	store := &mockSlipStore{
-		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
-			return nil
-		},
-		loadFn: func(_ context.Context, id string) (*slippy.Slip, error) {
-			assert.Equal(t, "abc-123", id)
-			return hydrationSlip, nil
-		},
-		updateFn: func(_ context.Context, slip *slippy.Slip) error {
-			updateCalled = true
-			assert.Equal(t, hydrationSlip, slip)
-			return nil
-		},
-	}
-	adapter := newTestWriterAdapter(store)
-
-	err := adapter.StartStep(context.Background(), "abc-123", "push_parsed", "")
-	require.NoError(t, err)
-	assert.True(t, updateCalled, "expected hydrateAndPersist to call Update for pipeline step")
-}
-
-func TestSlipWriterAdapter_CompleteStep_PipelineStep_TriggersHydration(t *testing.T) {
-	hydrationSlip := &slippy.Slip{CorrelationID: "abc-123"}
-	var updateCalled bool
-	store := &mockSlipStore{
-		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
-			return nil
-		},
-		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
-			return hydrationSlip, nil
-		},
-		updateFn: func(_ context.Context, _ *slippy.Slip) error {
-			updateCalled = true
-			return nil
-		},
-	}
-	adapter := newTestWriterAdapter(store)
-
-	err := adapter.CompleteStep(context.Background(), "abc-123", "push_parsed", "")
-	require.NoError(t, err)
-	assert.True(t, updateCalled, "expected hydrateAndPersist to call Update for pipeline step")
-}
-
-func TestSlipWriterAdapter_FailStep_PipelineStep_TriggersHydration(t *testing.T) {
-	hydrationSlip := &slippy.Slip{CorrelationID: "abc-123"}
-	var updateCalled bool
-	store := &mockSlipStore{
-		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
-			return nil
-		},
-		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
-			return hydrationSlip, nil
-		},
-		updateFn: func(_ context.Context, _ *slippy.Slip) error {
-			updateCalled = true
-			return nil
-		},
-	}
-	adapter := newTestWriterAdapter(store)
-
-	err := adapter.FailStep(context.Background(), "abc-123", "push_parsed", "", "test failure")
-	require.NoError(t, err)
-	assert.True(t, updateCalled, "expected hydrateAndPersist to call Update for pipeline step")
-}
-
-func TestSlipWriterAdapter_StartStep_ComponentStep_SkipsHydration(t *testing.T) {
-	store := &mockSlipStore{
-		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
-			return nil
-		},
-		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
-			t.Fatal("Load should not be called for component steps")
-			return nil, nil
-		},
-		updateFn: func(_ context.Context, _ *slippy.Slip) error {
-			t.Fatal("Update should not be called for component steps")
-			return nil
-		},
-	}
-	adapter := newTestWriterAdapter(store)
-
-	// componentName != "" → hydration must be skipped.
-	err := adapter.StartStep(context.Background(), "abc-123", "builds_completed", "api")
-	require.NoError(t, err)
-}
-
-func TestSlipWriterAdapter_CompleteStep_AggregateStep_SkipsHydration(t *testing.T) {
-	// In v1.3.77+, checkPipelineCompletion always calls Load to evaluate pipeline
-	// terminal state before deciding whether to write. The adapter's hydrateAndPersist
-	// (which would call Load then Update) must still be skipped for aggregate steps.
-	// We verify the real invariant: Update is never called by the adapter layer.
-	store := &mockSlipStore{
-		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
-			return nil
-		},
-		// Load is called by checkPipelineCompletion inside the library (non-aggregate
-		// terminal step path). Return an in-progress slip to exercise the non-terminal
-		// short-circuit path.
-		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
-			return &slippy.Slip{
-				CorrelationID: "abc-123",
-				Status:        slippy.SlipStatusInProgress,
-			}, nil
-		},
-		updateFn: func(_ context.Context, _ *slippy.Slip) error {
-			t.Fatal("Update should not be called: adapter must not double-hydrate aggregate steps")
-			return nil
-		},
-	}
-	adapter := newTestWriterAdapter(store)
-
-	// builds_completed is an aggregate step; the adapter's hydrateAndPersist path
-	// (Load + Update) must be skipped. Load may be called by the library's
-	// checkPipelineCompletion, but Update must not be called by the adapter.
-	err := adapter.CompleteStep(context.Background(), "abc-123", "builds_completed", "")
-	require.NoError(t, err)
-}
-
-func TestSlipWriterAdapter_HydrationError_NonFatal(t *testing.T) {
-	// For a pipeline step (empty componentName), the direct CompleteStep path calls
-	// checkPipelineCompletion once (from UpdateStepWithStatus), and hydrateAndPersist
-	// calls Load a second time. Only the second (hydrateAndPersist) may fail non-fatally.
-	var loadCalls int
-	store := &mockSlipStore{
-		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
-			return nil
-		},
-		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
-			loadCalls++
-			if loadCalls <= 1 {
-				return &slippy.Slip{CorrelationID: "abc-123", Status: slippy.SlipStatusInProgress}, nil
-			}
-			return nil, errors.New("clickhouse unavailable")
-		},
-	}
-	adapter := newTestWriterAdapter(store)
-
-	// The step write succeeded; hydration failing must not propagate as an error.
-	err := adapter.CompleteStep(context.Background(), "abc-123", "push_parsed", "")
-	require.NoError(t, err)
-}
-
-func TestSlipWriterAdapter_StartStep_HydrationError_NonFatal(t *testing.T) {
-	store := &mockSlipStore{
-		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
-			return nil
-		},
-		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
-			return nil, errors.New("clickhouse unavailable")
-		},
-	}
-	adapter := newTestWriterAdapter(store)
-
-	err := adapter.StartStep(context.Background(), "abc-123", "push_parsed", "")
-	require.NoError(t, err)
-}
-
-func TestSlipWriterAdapter_FailStep_HydrationError_NonFatal(t *testing.T) {
-	// For a pipeline step (empty componentName), the direct FailStep path calls
-	// checkPipelineCompletion once (from UpdateStepWithStatus), and hydrateAndPersist
-	// calls Load a second time. Only the second (hydrateAndPersist) may fail non-fatally.
-	var loadCalls int
-	store := &mockSlipStore{
-		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
-			return nil
-		},
-		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
-			loadCalls++
-			if loadCalls <= 1 {
-				return &slippy.Slip{CorrelationID: "abc-123", Status: slippy.SlipStatusInProgress}, nil
-			}
-			return nil, errors.New("clickhouse unavailable")
-		},
-	}
-	adapter := newTestWriterAdapter(store)
-
-	err := adapter.FailStep(context.Background(), "abc-123", "push_parsed", "", "oops")
-	require.NoError(t, err)
-}
-
-// TestWriteOpTimeout_DefaultIs240s verifies that the package-level default
-// write timeout is 240 s (not the former 15 s). This is a regression guard:
-// if the constant reverts, this test catches it before the timeout can kill
-// in-flight ClickHouse writes in production.
-func TestWriteOpTimeout_DefaultIs240s(t *testing.T) {
+// TestWriteOpTimeout_Default verifies the package-level default write timeout.
+// Postgres writes commit in milliseconds, so the bound is small; this guards
+// against an accidental revert to a large ClickHouse-era value.
+func TestWriteOpTimeout_Default(t *testing.T) {
 	// Skip if SLIPPY_WRITE_OP_TIMEOUT is set in the environment: the package-init
 	// var will reflect the overridden value, not the compile-time default, making
 	// the live-var assertion spuriously fail. The constant assertion still holds.
@@ -728,12 +502,12 @@ func TestWriteOpTimeout_DefaultIs240s(t *testing.T) {
 	// writeOpTimeout is set at package init from initWriteOpTimeout(). In the
 	// test environment SLIPPY_WRITE_OP_TIMEOUT is unset, so it must equal the
 	// compile-time default.
-	assert.Equal(t, defaultWriteOpTimeout, 240*time.Second,
-		"defaultWriteOpTimeout constant must be 240s")
+	assert.Equal(t, defaultWriteOpTimeout, 30*time.Second,
+		"defaultWriteOpTimeout constant must be 30s")
 	// The live var should also match the default when the env is absent.
 	// (Tests that shorten it via withTestWriteOpTimeout restore it in t.Cleanup.)
-	assert.GreaterOrEqual(t, writeOpTimeout, 240*time.Second,
-		"writeOpTimeout must be at least 240s in a clean test environment")
+	assert.GreaterOrEqual(t, writeOpTimeout, 30*time.Second,
+		"writeOpTimeout must be at least 30s in a clean test environment")
 }
 
 // TestInitWriteOpTimeout_ZeroFallsBackToDefault verifies that
@@ -783,156 +557,6 @@ func TestInitWriteOpTimeout_UnsetReturnsDefault(t *testing.T) {
 	assert.Equal(t, defaultWriteOpTimeout, got,
 		"unset SLIPPY_WRITE_OP_TIMEOUT must return defaultWriteOpTimeout")
 }
-
-// TestSlipWriterAdapter_HydrateAndPersist_TimeoutNonFatal_AfterClientWrite
-// verifies that a slow/timing-out hydrateAndPersist (simulated by shortening
-// writeOpTimeout and having the Load block longer than the timeout) does NOT
-// cause the overall write to return an error. The authoritative client write
-// has already succeeded; the cache writeback is best-effort.
-//
-// This is the key regression guard for the fix: previously the 15 s timeout
-// would fire and kill the whole context, which surfaced as an error to the
-// handler and caused a 504 (now 202). With a 240 s timeout this fires less
-// often in production, but the non-fatal semantics must hold regardless.
-func TestSlipWriterAdapter_HydrateAndPersist_TimeoutNonFatal_AfterClientWrite(t *testing.T) {
-	withTestWriteOpTimeout(t, 30*time.Millisecond)
-
-	clientWritten := false
-	store := &mockSlipStore{
-		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
-			clientWritten = true
-			return nil
-		},
-		// Load is called by hydrateAndPersist. Block until the write-context
-		// deadline fires to simulate a slow CH query during the cache writeback.
-		loadFn: func(ctx context.Context, _ string) (*slippy.Slip, error) {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(200 * time.Millisecond):
-				return &slippy.Slip{CorrelationID: "abc-123"}, nil
-			}
-		},
-	}
-	adapter := newTestWriterAdapter(store)
-
-	// push_parsed is a plain pipeline step → hydrateAndPersist fires.
-	err := adapter.StartStep(context.Background(), "abc-123", "push_parsed", "")
-	require.NoError(t, err,
-		"a timing-out hydrateAndPersist must NOT propagate as an error after a successful client write")
-	assert.True(t, clientWritten,
-		"the authoritative client write must have completed before the timeout fires")
-}
-
-// TestSlipWriterAdapter_HydrateAndPersist_UpdateError exercises hydrateAndPersist's
-// Update error path: Load returns a slip, but Store().Update fails. The write path
-// still succeeds because hydration errors are non-fatal.
-func TestSlipWriterAdapter_HydrateAndPersist_UpdateError(t *testing.T) {
-	store := &mockSlipStore{
-		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
-			return nil
-		},
-		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
-			return &slippy.Slip{CorrelationID: "abc-123"}, nil
-		},
-		updateFn: func(_ context.Context, _ *slippy.Slip) error {
-			return errors.New("update failed")
-		},
-	}
-	adapter := newTestWriterAdapter(store)
-
-	err := adapter.CompleteStep(context.Background(), "abc-123", "push_parsed", "")
-	require.NoError(t, err, "hydration update errors must not propagate")
-}
-
-// TestSlipWriterAdapter_IsPipelineStep_NilPipelineConfig exercises the fallback
-// branch where the client has no pipeline config — isPipelineStep returns true,
-// so hydration still runs.
-func TestSlipWriterAdapter_IsPipelineStep_NilPipelineConfig(t *testing.T) {
-	store := &mockSlipStore{
-		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
-			return nil
-		},
-		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
-			return &slippy.Slip{CorrelationID: "abc-123"}, nil
-		},
-		updateFn: func(_ context.Context, _ *slippy.Slip) error {
-			return nil
-		},
-	}
-	// Construct a client with no pipeline config so PipelineConfig() returns nil.
-	client := slippy.NewClientWithDependencies(store, &mockGitHubAPI{}, slippy.Config{})
-	adapter := NewSlipWriterAdapter(client, nil, nil)
-
-	// componentName empty and pipelineCfg nil → isPipelineStep returns true →
-	// hydrateAndPersist is invoked. Both Load and Update must be called.
-	err := adapter.CompleteStep(context.Background(), "abc-123", "anything", "")
-	require.NoError(t, err)
-}
-
-// TestSlipWriterAdapter_CompleteStep_PipelineStep_DoesNotDoubleCheckCompletion asserts
-// that for a pipeline step (componentName == ""), the direct CompleteStep path fires
-// checkPipelineCompletion (one Load) and hydrateAndPersist fires one more Load.
-// Total: exactly 2 Load calls.
-func TestSlipWriterAdapter_CompleteStep_PipelineStep_DoesNotDoubleCheckCompletion(t *testing.T) {
-	var loadCalls int
-	store := &mockSlipStore{
-		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
-			return nil
-		},
-		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
-			loadCalls++
-			return &slippy.Slip{CorrelationID: "abc-123", Status: slippy.SlipStatusInProgress}, nil
-		},
-		updateFn: func(_ context.Context, _ *slippy.Slip) error {
-			return nil
-		},
-	}
-	adapter := newTestWriterAdapter(store)
-
-	err := adapter.CompleteStep(context.Background(), "abc-123", "push_parsed", "")
-	require.NoError(t, err)
-	// checkPipelineCompletion (1 Load) + hydrateAndPersist (1 Load) = 2 total.
-	assert.Equal(
-		t,
-		2,
-		loadCalls,
-		"expected exactly 2 Load calls: one from checkPipelineCompletion, one from hydrateAndPersist",
-	)
-}
-
-// TestSlipWriterAdapter_FailStep_PipelineStep_DoesNotDoubleCheckCompletion asserts
-// that for a pipeline step (componentName == ""), the direct FailStep path fires
-// checkPipelineCompletion (one Load) and hydrateAndPersist fires one more Load.
-// Total: exactly 2 Load calls.
-func TestSlipWriterAdapter_FailStep_PipelineStep_DoesNotDoubleCheckCompletion(t *testing.T) {
-	var loadCalls int
-	store := &mockSlipStore{
-		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
-			return nil
-		},
-		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
-			loadCalls++
-			return &slippy.Slip{CorrelationID: "abc-123", Status: slippy.SlipStatusInProgress}, nil
-		},
-		updateFn: func(_ context.Context, _ *slippy.Slip) error {
-			return nil
-		},
-	}
-	adapter := newTestWriterAdapter(store)
-
-	err := adapter.FailStep(context.Background(), "abc-123", "push_parsed", "", "test failure")
-	require.NoError(t, err)
-	// checkPipelineCompletion (1 Load) + hydrateAndPersist (1 Load) = 2 total.
-	assert.Equal(
-		t,
-		2,
-		loadCalls,
-		"expected exactly 2 Load calls: one from checkPipelineCompletion, one from hydrateAndPersist",
-	)
-}
-
-// --- C2: updateSlipStatusFn migration tests ---
 
 // TestSlipWriterAdapter_FailStep_ComponentStep_UpdatesSlipStatus verifies that
 // completing a component step with a failure captures the slip status transition
@@ -1093,295 +717,79 @@ func TestSlipWriterAdapter_CompleteStep_FromFailed_Recovery(t *testing.T) {
 	assert.Equal(t, slippy.StepStatusCompleted, writtenStatus)
 }
 
-// --- Read-your-own-writes overlay regression tests ---
-//
-// These tests verify that hydrateAndPersist overlays the just-written step status
-// into the in-memory slip before calling Update, even when Load returns a stale
-// value (simulating ClickHouse async-insert visibility lag). Without the overlay,
-// the stale running status would be written back to routing_slips — permanently
-// violating I5. Mirror of TestOverlayUpdatesStepsStatus_T1Regression in goLibMyCarrier.
+func TestIsLockTimeout(t *testing.T) {
+	assert.True(t, isLockTimeout(&pgconn.PgError{Code: "55P03"}))
+	assert.True(t, isLockTimeout(fmt.Errorf("failed to lock slip: %w", &pgconn.PgError{Code: "55P03"})))
+	assert.False(t, isLockTimeout(&pgconn.PgError{Code: "57014"}), "statement timeout is not a lock timeout")
+	assert.False(t, isLockTimeout(errors.New("boom")))
+	assert.False(t, isLockTimeout(nil))
+}
 
-// TestHydrateAndPersist_AsyncInsertRace_CompleteStep verifies that when Load returns
-// a stale running status for a pipeline step (simulating async-insert lag), CompleteStep
-// overlays completed before Update so routing_slips is not permanently stuck.
-func TestHydrateAndPersist_AsyncInsertRace_CompleteStep(t *testing.T) {
-	const id = "b058127d-fe0a-497d-81e6-08edc7ea71b2"
-	const stepName = "dev_tests"
-
-	// Slip returned by Load has the step still running — simulates async-insert lag
-	// where the just-inserted completed event is not yet visible to the SELECT.
-	staleSlip := &slippy.Slip{
-		CorrelationID: id,
-		Status:        slippy.SlipStatusInProgress,
-		Steps: map[string]slippy.Step{
-			stepName: {Status: slippy.StepStatusRunning},
-		},
+func TestWriteWithLockRetry(t *testing.T) {
+	a := &SlipWriterAdapter{}
+	lockErr := &pgconn.PgError{Code: "55P03"}
+	newSpan := func() trace.Span {
+		_, span := otel.Tracer("test").Start(context.Background(), "t")
+		return span
 	}
 
-	var persistedSlip *slippy.Slip
-	store := &mockSlipStore{
-		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
-			return nil
-		},
-		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
-			// Return a copy to prevent the overlay from modifying the original.
-			copy := *staleSlip
-			steps := make(map[string]slippy.Step, len(staleSlip.Steps))
-			for k, v := range staleSlip.Steps {
-				steps[k] = v
+	t.Run("retries lock timeout then succeeds", func(t *testing.T) {
+		calls := 0
+		err := a.writeWithLockRetry(context.Background(), newSpan(), func(context.Context, trace.Span) error {
+			calls++
+			if calls < 2 {
+				return lockErr
 			}
-			copy.Steps = steps
-			return &copy, nil
-		},
-		updateFn: func(_ context.Context, s *slippy.Slip) error {
-			persistedSlip = s
 			return nil
-		},
-	}
-	adapter := newTestWriterAdapter(store)
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 2, calls)
+	})
 
-	err := adapter.CompleteStep(context.Background(), id, stepName, "")
-	require.NoError(t, err)
-	require.NotNil(t, persistedSlip, "Update must be called")
+	t.Run("non-lock error is not retried", func(t *testing.T) {
+		boom := errors.New("boom")
+		calls := 0
+		err := a.writeWithLockRetry(context.Background(), newSpan(), func(context.Context, trace.Span) error {
+			calls++
+			return boom
+		})
+		require.ErrorIs(t, err, boom)
+		assert.Equal(t, 1, calls)
+	})
 
-	// Core assertion: despite Load returning running (stale), the persisted step
-	// must show completed — the overlay won. This is the I5 invariant.
-	require.Contains(t, persistedSlip.Steps, stepName, "step must be present in persisted slip")
-	assert.Equal(
-		t,
-		slippy.StepStatusCompleted,
-		persistedSlip.Steps[stepName].Status,
-		"overlay must write completed status even when Load returns stale running: I5 regression",
-	)
+	t.Run("gives up after maxLockRetries", func(t *testing.T) {
+		calls := 0
+		err := a.writeWithLockRetry(context.Background(), newSpan(), func(context.Context, trace.Span) error {
+			calls++
+			return lockErr
+		})
+		require.Error(t, err)
+		assert.True(t, isLockTimeout(err))
+		assert.Equal(t, maxLockRetries+1, calls)
+	})
 }
 
-// TestHydrateAndPersist_AsyncInsertRace_FailStep verifies the overlay for FailStep
-// on a pipeline step when Load returns a stale running status.
-func TestHydrateAndPersist_AsyncInsertRace_FailStep(t *testing.T) {
-	const id = "abc-fail-overlay"
-	const stepName = "dev_tests"
+func TestTranslateStoreError(t *testing.T) {
+	assert.ErrorIs(t, translateStoreError(&pgconn.PgError{Code: "55P03"}), domain.ErrWriteContended)
+	assert.ErrorIs(t,
+		translateStoreError(fmt.Errorf("failed to lock slip: %w", &pgconn.PgError{Code: "55P03"})),
+		domain.ErrWriteContended)
+	assert.ErrorIs(t, translateStoreError(&pgconn.PgError{Code: "57014"}), domain.ErrStatementTimeout)
 
-	staleSlip := &slippy.Slip{
-		CorrelationID: id,
-		Status:        slippy.SlipStatusInProgress,
-		Steps: map[string]slippy.Step{
-			stepName: {Status: slippy.StepStatusRunning},
-		},
-	}
-
-	var persistedSlip *slippy.Slip
-	var loadCalls int
-	store := &mockSlipStore{
-		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
-			return nil
-		},
-		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
-			loadCalls++
-			copy := *staleSlip
-			steps := make(map[string]slippy.Step, len(staleSlip.Steps))
-			for k, v := range staleSlip.Steps {
-				steps[k] = v
-			}
-			copy.Steps = steps
-			return &copy, nil
-		},
-		updateFn: func(_ context.Context, s *slippy.Slip) error {
-			persistedSlip = s
-			return nil
-		},
-	}
-	adapter := newTestWriterAdapter(store)
-
-	err := adapter.FailStep(context.Background(), id, stepName, "", "test engine timeout")
-	require.NoError(t, err)
-	require.NotNil(t, persistedSlip, "Update must be called")
-	assert.Equal(
-		t,
-		slippy.StepStatusFailed,
-		persistedSlip.Steps[stepName].Status,
-		"overlay must write failed status even when Load returns stale running: I5 regression",
-	)
+	boom := errors.New("boom") // unrecognized errors pass through unchanged
+	assert.Equal(t, boom, translateStoreError(boom))
+	assert.NoError(t, translateStoreError(nil))
 }
 
-// TestHydrateAndPersist_OverlaySkipsNewerStatus verifies the guard condition: if the
-// slip returned by Load already has a newer CompletedAt (e.g. from a concurrent
-// terminal event), the overlay must leave the newer status untouched.
-func TestHydrateAndPersist_OverlaySkipsNewerStatus(t *testing.T) {
-	const id = "abc-newer-guard"
-	const stepName = "dev_tests"
+// assumedLockTimeout documents the goLibMyCarrier/postgres server-side lock_timeout that a
+// single lock wait can consume; used only to guard the retry budget below.
+const assumedLockTimeout = 10 * time.Second
 
-	futureTime := time.Now().Add(time.Hour) // Load returns a step completed in the future
-
-	slipWithNewerStatus := &slippy.Slip{
-		CorrelationID: id,
-		Status:        slippy.SlipStatusInProgress,
-		Steps: map[string]slippy.Step{
-			stepName: {Status: slippy.StepStatusCompleted, CompletedAt: &futureTime},
-		},
-	}
-
-	var persistedSlip *slippy.Slip
-	store := &mockSlipStore{
-		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
-			return nil
-		},
-		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
-			copy := *slipWithNewerStatus
-			steps := make(map[string]slippy.Step, len(slipWithNewerStatus.Steps))
-			for k, v := range slipWithNewerStatus.Steps {
-				steps[k] = v
-			}
-			copy.Steps = steps
-			return &copy, nil
-		},
-		updateFn: func(_ context.Context, s *slippy.Slip) error {
-			persistedSlip = s
-			return nil
-		},
-	}
-	adapter := newTestWriterAdapter(store)
-
-	// CompleteStep for dev_tests — writtenAt will be time.Now() which is < futureTime.
-	err := adapter.CompleteStep(context.Background(), id, stepName, "")
-	require.NoError(t, err)
-	require.NotNil(t, persistedSlip, "Update must be called")
-
-	// The overlay must NOT overwrite the newer CompletedAt from Load.
-	assert.Equal(
-		t,
-		&futureTime,
-		persistedSlip.Steps[stepName].CompletedAt,
-		"overlay must preserve newer CompletedAt from Load (defensive guard)",
-	)
-}
-
-// TestOverlayPipelineStep_NilSlip verifies that overlayPipelineStep is a no-op when
-// called with a nil slip (defensive guard, mirrors overlayComponentState nil check).
-func TestOverlayPipelineStep_NilSlip(t *testing.T) {
-	// Must not panic.
-	overlayPipelineStep(nil, "dev_tests", slippy.StepStatusCompleted, time.Now())
-}
-
-// TestOverlayPipelineStep_MissingStep verifies that overlayPipelineStep is a no-op
-// when the stepName is not present in slip.Steps.
-func TestOverlayPipelineStep_MissingStep(t *testing.T) {
-	slip := &slippy.Slip{
-		Steps: map[string]slippy.Step{},
-	}
-	overlayPipelineStep(slip, "nonexistent_step", slippy.StepStatusCompleted, time.Now())
-	// No panic, no entry added.
-	assert.Empty(t, slip.Steps)
-}
-
-// TestOverlayPipelineStep_NilCompletedAt verifies that an overlay always wins when
-// the existing step has no CompletedAt (i.e. it is still running / pending).
-func TestOverlayPipelineStep_NilCompletedAt(t *testing.T) {
-	slip := &slippy.Slip{
-		Steps: map[string]slippy.Step{
-			"dev_tests": {Status: slippy.StepStatusRunning, CompletedAt: nil},
-		},
-	}
-	now := time.Now()
-	overlayPipelineStep(slip, "dev_tests", slippy.StepStatusCompleted, now)
-	assert.Equal(t, slippy.StepStatusCompleted, slip.Steps["dev_tests"].Status)
-	require.NotNil(t, slip.Steps["dev_tests"].CompletedAt)
-}
-
-// TestOverlayPipelineStep_OlderCompletedAt verifies that an overlay wins when
-// writtenAt is strictly after the existing CompletedAt.
-func TestOverlayPipelineStep_OlderCompletedAt(t *testing.T) {
-	past := time.Now().Add(-time.Hour)
-	slip := &slippy.Slip{
-		Steps: map[string]slippy.Step{
-			"dev_tests": {Status: slippy.StepStatusFailed, CompletedAt: &past},
-		},
-	}
-	now := time.Now()
-	overlayPipelineStep(slip, "dev_tests", slippy.StepStatusCompleted, now)
-	assert.Equal(t, slippy.StepStatusCompleted, slip.Steps["dev_tests"].Status)
-}
-
-// TestOverlayPipelineStep_RunningDoesNotClobberTerminal is the F1 unit regression test.
-// Verifies that a non-terminal (running) overlay is silently dropped when the step
-// already has a terminal status with a past CompletedAt. This is the exact scenario
-// from slip b058127d where a second StartStep at 17:01 arrived after CompleteStep at
-// 16:58, and the overlay clobbered "completed" with "running".
-func TestOverlayPipelineStep_RunningDoesNotClobberTerminal(t *testing.T) {
-	past := time.Now().Add(-3 * time.Minute) // CompleteStep fired 3 min ago
-	slip := &slippy.Slip{
-		Steps: map[string]slippy.Step{
-			"dev_tests": {Status: slippy.StepStatusCompleted, CompletedAt: &past},
-		},
-	}
-	// writtenAt is time.Now() — after past, so the old timestamp guard would have let this through.
-	overlayPipelineStep(slip, "dev_tests", slippy.StepStatusRunning, time.Now())
-	assert.Equal(
-		t,
-		slippy.StepStatusCompleted,
-		slip.Steps["dev_tests"].Status,
-		"running must not clobber completed: F1 guard regression",
-	)
-	assert.Equal(
-		t,
-		&past,
-		slip.Steps["dev_tests"].CompletedAt,
-		"CompletedAt must be preserved when overlay is rejected",
-	)
-}
-
-// TestHydrateAndPersist_StartStep_DoesNotClobberTerminalStatus is the F1 end-to-end
-// regression test via the real hydrateAndPersist path. Reproduces the production
-// scenario from slip b058127d where a second StartStep arrived 3 minutes after
-// CompleteStep, and the overlay clobbered "completed" with "running".
-func TestHydrateAndPersist_StartStep_DoesNotClobberTerminalStatus(t *testing.T) {
-	const id = "b058127d-fe0a-497d-81e6-08edc7ea71b2"
-	const stepName = "push_parsed"
-
-	// Load returns a slip whose step is already terminal (completed 3 min ago).
-	// This simulates the scenario where CompleteStep already flushed and the
-	// second StartStep fires (out-of-order re-trigger).
-	completedAt := time.Now().Add(-3 * time.Minute)
-	terminalSlip := &slippy.Slip{
-		CorrelationID: id,
-		Status:        slippy.SlipStatusInProgress,
-		Steps: map[string]slippy.Step{
-			stepName: {Status: slippy.StepStatusCompleted, CompletedAt: &completedAt},
-		},
-	}
-
-	var persistedSlip *slippy.Slip
-	store := &mockSlipStore{
-		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry) error {
-			return nil
-		},
-		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
-			// Return a copy so the overlay operates on a fresh value each call.
-			cp := *terminalSlip
-			steps := make(map[string]slippy.Step, len(terminalSlip.Steps))
-			for k, v := range terminalSlip.Steps {
-				steps[k] = v
-			}
-			cp.Steps = steps
-			return &cp, nil
-		},
-		updateFn: func(_ context.Context, s *slippy.Slip) error {
-			persistedSlip = s
-			return nil
-		},
-	}
-	adapter := newTestWriterAdapter(store)
-
-	// StartStep on a pipeline step (componentName == "") triggers hydrateAndPersist
-	// with StepStatusRunning. The F1 guard must prevent the running overlay from
-	// clobbering the terminal completed status already visible in Load.
-	err := adapter.StartStep(context.Background(), id, stepName, "")
-	require.NoError(t, err)
-	require.NotNil(t, persistedSlip, "Update must still be called (hydration runs)")
-
-	assert.Equal(
-		t,
-		slippy.StepStatusCompleted,
-		persistedSlip.Steps[stepName].Status,
-		"StartStep must not clobber terminal completed status: F1 regression (slip b058127d)",
-	)
+func TestLockRetryBudgetFitsWriteTimeout(t *testing.T) {
+	// (maxLockRetries+1) attempts, each able to wait up to a lock_timeout, must finish inside
+	// the write-op budget — else the outer context expires first and the write surfaces as a
+	// generic 504 instead of the retryable 503 (domain.ErrWriteContended).
+	worst := time.Duration(maxLockRetries+1) * assumedLockTimeout
+	assert.Less(t, worst, defaultWriteOpTimeout,
+		"lock-retry worst case %s must stay under writeOpTimeout %s", worst, defaultWriteOpTimeout)
 }

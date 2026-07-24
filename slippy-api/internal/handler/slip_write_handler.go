@@ -603,6 +603,18 @@ func mapWriteError(err error) error {
 			http.StatusConflict,
 			"step already in terminal state; transition rejected (I5 freshness gate)",
 		)
+	case errors.Is(err, domain.ErrWriteContended):
+		// Per-slip write-lock contention that outlasted the DB lock_timeout and the
+		// in-adapter retries (translated from the driver error at the adapter boundary).
+		// The transaction rolled back with nothing applied, so it is safe to retry —
+		// surface it as retryable rather than a generic 500.
+		return huma.NewError(
+			http.StatusServiceUnavailable,
+			"write contended on the per-slip lock and did not complete; safe to retry",
+		)
+	case errors.Is(err, domain.ErrStatementTimeout):
+		// Server-side statement_timeout fired — a slow query, not a client cancel.
+		return huma.NewError(http.StatusGatewayTimeout, "database statement timeout")
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		// A context deadline/cancellation that reaches mapWriteError means the
 		// AUTHORITATIVE insert (UpdateStepWithHistory / slip_component_states) did NOT

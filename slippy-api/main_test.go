@@ -562,6 +562,9 @@ func clearRunEnv(t *testing.T) {
 		"SLIPPY_GITHUB_ENTERPRISE_URL", "SLIPPY_ANCESTRY_DEPTH",
 		"CLICKHOUSE_HOSTNAME", "CLICKHOUSE_PORT", "CLICKHOUSE_USERNAME",
 		"CLICKHOUSE_PASSWORD", "CLICKHOUSE_DATABASE", "CLICKHOUSE_SKIP_VERIFY",
+		"POSTGRES_HOSTNAME", "POSTGRES_USERNAME", "POSTGRES_PASSWORD",
+		"POSTGRES_DATABASE", "POSTGRES_PORT", "POSTGRES_SSLMODE",
+		"POSTGRES_MAX_CONNS", "POSTGRES_MIN_CONNS", "POSTGRES_CONN_MAX_LIFETIME",
 		"SLIPPY_PIPELINE_CONFIG",
 	} {
 		t.Setenv(key, "")
@@ -591,21 +594,41 @@ func TestRun_MissingPipelineConfig(t *testing.T) {
 	assert.Contains(t, err.Error(), "pipeline config:")
 }
 
-func TestRun_MissingClickhouseConfig(t *testing.T) {
+func TestRun_MissingPostgresConfig(t *testing.T) {
 	clearRunEnv(t)
 	t.Setenv("SLIPPY_API_KEY", "test-key")
 	t.Setenv("SLIPPY_WRITE_API_KEY", "write-key")
 	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
 	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
-	// Provide a valid inline pipeline config so we get past the pipeline step
+	// Provide a valid inline pipeline config so we get past the pipeline step.
 	t.Setenv(
 		"SLIPPY_PIPELINE_CONFIG",
 		`{"version":"1.0","name":"test","steps":[{"name":"build","description":"build"}]}`,
 	)
 
-	// config.Load() and pipeline config succeed, but ClickhouseLoadConfig() will fail
-	// because CLICKHOUSE_HOSTNAME is required
+	// config.Load() and pipeline config succeed, but PostgresLoadConfig() fails because
+	// POSTGRES_HOSTNAME is required. Postgres (the slip store) is now validated before the
+	// ClickHouse session used by the non-slip readers.
 	err := run()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "clickhouse")
+	assert.Contains(t, err.Error(), "postgres config")
+}
+
+func TestIsEncryptingSSLMode(t *testing.T) {
+	for _, tc := range []struct {
+		mode string
+		want bool
+	}{
+		{"verify-full", true},
+		{"verify-ca", true},
+		{"require", true},
+		{"prefer", false},
+		{"allow", false},
+		{"disable", false},
+		{"", false},
+	} {
+		if got := isEncryptingSSLMode(tc.mode); got != tc.want {
+			t.Errorf("isEncryptingSSLMode(%q) = %v, want %v", tc.mode, got, tc.want)
+		}
+	}
 }

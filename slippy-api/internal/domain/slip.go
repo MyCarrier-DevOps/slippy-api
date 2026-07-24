@@ -13,6 +13,18 @@ import (
 // (HTTP 409), not a server fault (HTTP 500).
 var ErrCreationInProgress = errors.New("slip creation in progress")
 
+// ErrWriteContended is the storage-agnostic signal that a slip write lost the per-slip
+// write-lock race and did not complete (the transaction rolled back with nothing applied).
+// The infrastructure adapter translates the backend-specific error (Postgres SQLSTATE
+// 55P03) into this sentinel so the transport layer maps it (→ HTTP 503, retryable) without
+// importing driver types.
+var ErrWriteContended = errors.New("slip write contended on the per-slip lock")
+
+// ErrStatementTimeout is the storage-agnostic signal that a slip write exceeded the
+// database's server-side statement timeout (Postgres SQLSTATE 57014). Translated by the
+// adapter so the transport layer maps it (→ HTTP 504) without importing driver types.
+var ErrStatementTimeout = errors.New("slip write exceeded the database statement timeout")
+
 // Slip is an alias for the upstream slippy.Slip type.
 // This keeps domain consumers decoupled from direct import of the library package,
 // while avoiding unnecessary type duplication (DRY).

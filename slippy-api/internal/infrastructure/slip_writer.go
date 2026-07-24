@@ -2,12 +2,14 @@ package infrastructure
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"strconv"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -21,14 +23,12 @@ import (
 // writerTracerName is the instrumentation scope for write operations.
 const writerTracerName = "slippy-api/writer"
 
-// defaultWriteOpTimeout is the default bound for a single ClickHouse write
-// (insert + hydrate). Sized to be safely above observed CH async-insert
-// wait (≈120 s) plus merge time (200–500 s), while remaining below the
-// goLib CH max_execution_time (300 s set by the goLib fix). 240 s gives
-// headroom for transient CH slowness without tying up the request indefinitely.
-const defaultWriteOpTimeout = 240 * time.Second
+// defaultWriteOpTimeout bounds a single Postgres slip write. Writes commit in
+// milliseconds under MVCC, so a small bound is ample; it exists only to cap a
+// stuck connection or failover, not to accommodate ClickHouse merge lag.
+const defaultWriteOpTimeout = 30 * time.Second
 
-// writeOpTimeout bounds a single ClickHouse write (insert + hydrate). The
+// writeOpTimeout bounds a single Postgres slip write. The
 // derived context detaches from the HTTP request ctx so a client disconnect
 // or LB idle-timeout mid-request does not abort an in-flight write — the
 // authoritative `slip_component_states` row must land regardless of whether
@@ -42,7 +42,7 @@ var writeOpTimeout = initWriteOpTimeout()
 // minWriteOpTimeout is the minimum accepted value for SLIPPY_WRITE_OP_TIMEOUT.
 // Any parsed value below this floor (including 0 and negatives) is rejected:
 // a zero-or-negative timeout makes context.WithTimeout expire instantly,
-// causing every write to fail before the ClickHouse driver even sends the query.
+// causing every write to fail before the Postgres driver even sends the query.
 const minWriteOpTimeout = 1 * time.Second
 
 // maxWriteOpTimeout is the ceiling for SLIPPY_WRITE_OP_TIMEOUT. Values above
@@ -218,8 +218,10 @@ func (a *SlipWriterAdapter) CreateSlipForPush(
 			return nil, err
 		}
 		// SUCCESS: do NOT release. Let the TTL expire so a near-simultaneous
-		// duplicate stays blocked through the ClickHouse async-insert visibility
-		// window. The lib's handlePushRetry is idempotent once the slip is visible.
+		// duplicate stays blocked through the window between the winner acquiring the
+		// lock and committing its Postgres transaction — until that commit, the loser's
+		// LoadByCommitExact sees no row under MVCC read-committed. The lib's
+		// handlePushRetry is idempotent once the slip is visible (right after commit).
 		return result, nil
 	}
 
@@ -237,33 +239,9 @@ func (a *SlipWriterAdapter) StartStep(ctx context.Context, correlationID, stepNa
 			attribute.String("slip.step_name", stepName),
 			attribute.String("slip.component_name", componentName),
 		},
-		func(wctx context.Context, span trace.Span) error {
-			writtenAt := time.Now()
-			if err := a.client.StartStep(wctx, correlationID, stepName, componentName); err != nil {
-				return err
-			}
-			if a.isPipelineStep(stepName, componentName) {
-				if err := a.hydrateAndPersist(
-					wctx, correlationID, stepName, slippy.StepStatusRunning, writtenAt,
-				); err != nil {
-					span.AddEvent("hydration failed", trace.WithAttributes(attribute.String("error", err.Error())))
-					// STATUS self-heals on next Load (hydrateSlip recomputes from event log).
-					// state_history is NOT reconstructed — this transition's audit entry is lost.
-					slog.WarnContext(
-						wctx,
-						"writer: cache writeback failed (non-fatal); status self-heals, state_history lost",
-						"op",
-						"StartStep",
-						"correlation_id",
-						correlationID,
-						"step_name",
-						stepName,
-						"error",
-						err,
-					)
-				}
-			}
-			return nil
+		func(wctx context.Context, _ trace.Span) error {
+			// Postgres writes the step-status column atomically; no post-write hydration.
+			return a.client.StartStep(wctx, correlationID, stepName, componentName)
 		},
 	)
 }
@@ -275,47 +253,21 @@ func (a *SlipWriterAdapter) CompleteStep(ctx context.Context, correlationID, ste
 			attribute.String("slip.step_name", stepName),
 			attribute.String("slip.component_name", componentName),
 		},
-		func(wctx context.Context, span trace.Span) error {
+		func(wctx context.Context, _ trace.Span) error {
 			// Pipeline-level terminal events route directly: steps.go:101 guard fires
-			// checkPipelineCompletion automatically, saving a redundant Load.
-			// Component events MUST go through RunPostExecution to drive aggregate recomputation.
-			writtenAt := time.Now()
+			// checkPipelineCompletion automatically. Component events MUST go through
+			// RunPostExecution to drive aggregate recomputation. Postgres writes the
+			// status column atomically, so no post-write hydration is needed.
 			if componentName != "" {
-				if _, err := a.client.RunPostExecution(wctx, slippy.PostExecutionOptions{
+				_, err := a.client.RunPostExecution(wctx, slippy.PostExecutionOptions{
 					CorrelationID:     correlationID,
 					StepName:          stepName,
 					ComponentName:     componentName,
 					WorkflowSucceeded: true,
-				}); err != nil {
-					return err
-				}
-			} else {
-				if err := a.client.CompleteStep(wctx, correlationID, stepName, componentName); err != nil {
-					return err
-				}
+				})
+				return err
 			}
-			if a.isPipelineStep(stepName, componentName) {
-				if err := a.hydrateAndPersist(
-					wctx, correlationID, stepName, slippy.StepStatusCompleted, writtenAt,
-				); err != nil {
-					span.AddEvent("hydration failed", trace.WithAttributes(attribute.String("error", err.Error())))
-					// STATUS self-heals on next Load (hydrateSlip recomputes from event log).
-					// state_history is NOT reconstructed — this transition's audit entry is lost.
-					slog.WarnContext(
-						wctx,
-						"writer: cache writeback failed (non-fatal); status self-heals, state_history lost",
-						"op",
-						"CompleteStep",
-						"correlation_id",
-						correlationID,
-						"step_name",
-						stepName,
-						"error",
-						err,
-					)
-				}
-			}
-			return nil
+			return a.client.CompleteStep(wctx, correlationID, stepName, componentName)
 		},
 	)
 }
@@ -327,48 +279,21 @@ func (a *SlipWriterAdapter) FailStep(ctx context.Context, correlationID, stepNam
 			attribute.String("slip.step_name", stepName),
 			attribute.String("slip.component_name", componentName),
 		},
-		func(wctx context.Context, span trace.Span) error {
-			// Pipeline-level terminal events route directly: steps.go:101 guard fires
-			// checkPipelineCompletion automatically, saving a redundant Load.
-			// Component events MUST go through RunPostExecution to drive aggregate recomputation.
-			writtenAt := time.Now()
+		func(wctx context.Context, _ trace.Span) error {
+			// Pipeline-level terminal events route directly; component events go through
+			// RunPostExecution to drive aggregate recomputation. Postgres writes the status
+			// column atomically, so no post-write hydration is needed.
 			if componentName != "" {
-				if _, err := a.client.RunPostExecution(wctx, slippy.PostExecutionOptions{
+				_, err := a.client.RunPostExecution(wctx, slippy.PostExecutionOptions{
 					CorrelationID:     correlationID,
 					StepName:          stepName,
 					ComponentName:     componentName,
 					WorkflowSucceeded: false,
 					FailureMessage:    reason,
-				}); err != nil {
-					return err
-				}
-			} else {
-				if err := a.client.FailStep(wctx, correlationID, stepName, componentName, reason); err != nil {
-					return err
-				}
+				})
+				return err
 			}
-			if a.isPipelineStep(stepName, componentName) {
-				if err := a.hydrateAndPersist(
-					wctx, correlationID, stepName, slippy.StepStatusFailed, writtenAt,
-				); err != nil {
-					span.AddEvent("hydration failed", trace.WithAttributes(attribute.String("error", err.Error())))
-					// STATUS self-heals on next Load (hydrateSlip recomputes from event log).
-					// state_history is NOT reconstructed — this transition's audit entry is lost.
-					slog.WarnContext(
-						wctx,
-						"writer: cache writeback failed (non-fatal); status self-heals, state_history lost",
-						"op",
-						"FailStep",
-						"correlation_id",
-						correlationID,
-						"step_name",
-						stepName,
-						"error",
-						err,
-					)
-				}
-			}
-			return nil
+			return a.client.FailStep(wctx, correlationID, stepName, componentName, reason)
 		},
 	)
 }
@@ -380,33 +305,9 @@ func (a *SlipWriterAdapter) SkipStep(ctx context.Context, correlationID, stepNam
 			attribute.String("slip.step_name", stepName),
 			attribute.String("slip.component_name", componentName),
 		},
-		func(wctx context.Context, span trace.Span) error {
-			writtenAt := time.Now()
-			if err := a.client.SkipStep(wctx, correlationID, stepName, componentName, reason); err != nil {
-				return err
-			}
-			if a.isPipelineStep(stepName, componentName) {
-				if err := a.hydrateAndPersist(
-					wctx, correlationID, stepName, slippy.StepStatusSkipped, writtenAt,
-				); err != nil {
-					span.AddEvent("hydration failed", trace.WithAttributes(attribute.String("error", err.Error())))
-					// STATUS self-heals on next Load (hydrateSlip recomputes from event log).
-					// state_history is NOT reconstructed — this transition's audit entry is lost.
-					slog.WarnContext(
-						wctx,
-						"writer: cache writeback failed (non-fatal); status self-heals, state_history lost",
-						"op",
-						"SkipStep",
-						"correlation_id",
-						correlationID,
-						"step_name",
-						stepName,
-						"error",
-						err,
-					)
-				}
-			}
-			return nil
+		func(wctx context.Context, _ trace.Span) error {
+			// Postgres writes the step-status column atomically; no post-write hydration.
+			return a.client.SkipStep(wctx, correlationID, stepName, componentName, reason)
 		},
 	)
 }
@@ -460,10 +361,9 @@ func (a *SlipWriterAdapter) AbandonSlip(ctx context.Context, correlationID, supe
 // this helper is the only way to lose the guarantee, and that omission is
 // loud in review.
 //
-// The closure receives only wctx for use with the upstream client and
-// hydrateAndPersist — the caller-supplied ctx is exclusively for span
-// scoping. Do NOT pass the outer ctx to client.* calls; that would defeat
-// the point of this indirection.
+// The closure receives only wctx for use with the upstream client — the
+// caller-supplied ctx is exclusively for span scoping. Do NOT pass the outer
+// ctx to client.* calls; that would defeat the point of this indirection.
 func (a *SlipWriterAdapter) instrumentedWrite(
 	ctx context.Context,
 	spanName string,
@@ -479,11 +379,76 @@ func (a *SlipWriterAdapter) instrumentedWrite(
 	wctx, cancel := writeContext(ctx)
 	defer cancel()
 
-	if err := op(wctx, span); err != nil {
+	if err := a.writeWithLockRetry(wctx, span, op); err != nil {
+		// Translate backend-specific errors into storage-agnostic domain sentinels here, at
+		// the adapter boundary, so the transport layer never imports driver types.
+		err = translateStoreError(err)
 		recordWriterError(span, err)
 		return err
 	}
 	return nil
+}
+
+// maxLockRetries bounds the retry loop for a write that lost the per-slip FOR UPDATE lock
+// race (SQLSTATE 55P03: the transaction rolled back with nothing applied, so a retry is
+// safe and idempotent). It is deliberately small so the worst case stays inside the
+// write-op budget: (maxLockRetries+1) attempts — each of which may wait up to the server
+// lock_timeout — must finish before writeOpTimeout, or the outer context expires first and
+// the write surfaces as a generic 504 instead of the retryable 503. Guarded by
+// TestLockRetryBudgetFitsWriteTimeout.
+const maxLockRetries = 1
+
+// lockRetryBaseBackoff is the first inter-retry sleep; it grows linearly per attempt.
+const lockRetryBaseBackoff = 100 * time.Millisecond
+
+// writeWithLockRetry runs op, retrying on a Postgres lock_timeout (55P03) with bounded
+// linear backoff. Any other error (or success) returns immediately.
+func (a *SlipWriterAdapter) writeWithLockRetry(
+	wctx context.Context,
+	span trace.Span,
+	op func(wctx context.Context, span trace.Span) error,
+) error {
+	var err error
+	for attempt := 0; ; attempt++ {
+		err = op(wctx, span)
+		if err == nil || attempt >= maxLockRetries || !isLockTimeout(err) {
+			return err
+		}
+		span.AddEvent("pg_lock_contention_retry",
+			trace.WithAttributes(attribute.Int("attempt", attempt+1)))
+		select {
+		case <-wctx.Done():
+			return err
+		case <-time.After(time.Duration(attempt+1) * lockRetryBaseBackoff):
+		}
+	}
+}
+
+// pgErrorCode returns the SQLSTATE of the (possibly wrapped) *pgconn.PgError in err, or "".
+func pgErrorCode(err error) string {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code
+	}
+	return ""
+}
+
+// isLockTimeout reports whether err is a Postgres lock_timeout abort (SQLSTATE 55P03),
+// which the per-slip FOR UPDATE serialization can produce under high fan-in.
+func isLockTimeout(err error) bool { return pgErrorCode(err) == "55P03" }
+
+// translateStoreError maps a backend-specific store error onto a storage-agnostic domain
+// sentinel so the transport layer maps HTTP status without knowing about pgconn/SQLSTATE.
+// Unrecognized errors pass through unchanged.
+func translateStoreError(err error) error {
+	switch pgErrorCode(err) {
+	case "55P03": // lock_timeout on the per-slip FOR UPDATE
+		return fmt.Errorf("%w: %w", domain.ErrWriteContended, err)
+	case "57014": // statement_timeout
+		return fmt.Errorf("%w: %w", domain.ErrStatementTimeout, err)
+	default:
+		return err
+	}
 }
 
 // awaitExistingSlip polls the reader for an already-in-flight slip matching the
@@ -505,9 +470,9 @@ func (a *SlipWriterAdapter) awaitExistingSlip(
 
 	deadline := time.Now().Add(a.lockWait)
 	// Start small (50ms) so the common near-simultaneous-duplicate case — where the
-	// winner's slip becomes visible almost immediately — resolves with minimal added
-	// latency. The backoff still doubles up to maxBackoff for the slower async-insert
-	// visibility window.
+	// winner's slip becomes visible almost immediately after its transaction commits —
+	// resolves with minimal added latency. The backoff still doubles up to maxBackoff to
+	// cover a slower winner (a longer pre-commit window).
 	backoff := 50 * time.Millisecond
 	const maxBackoff = time.Second
 	attempts := 0
@@ -551,8 +516,8 @@ func (a *SlipWriterAdapter) awaitExistingSlip(
 	// slip — return a retryable error so the duplicate is not materialized.
 	//
 	// Observability: WARN log on deadline-exhaust acts as the early-warning signal
-	// for a class-of-bug regression (e.g. winner crashing pre-insert, async-insert
-	// window blown past lockWait, or ancestry-resolution drift causing the await
+	// for a class-of-bug regression (e.g. winner crashing pre-commit, its transaction
+	// staying open past lockWait, or ancestry-resolution drift causing the await
 	// path to miss a slip that does exist). If this fires steadily, investigate
 	// before adjusting lockWait — increasing the wait masks the underlying issue.
 	deadlineMs := a.lockWait.Milliseconds()
@@ -571,144 +536,6 @@ func (a *SlipWriterAdapter) awaitExistingSlip(
 		"dedup_key", key,
 	)
 	return nil, fmt.Errorf("dedup: slip for %s creation in progress, retry: %w", key, domain.ErrCreationInProgress)
-}
-
-// isPipelineStep reports whether a step transition should trigger a post-write
-// hydration. Returns true only when componentName is empty (not a component-level
-// event) and the step is not an aggregate step (aggregate steps invoke
-// updateAggregateStatusFromComponentStatesWithHistory internally, which already
-// calls Load + Update, so we must not duplicate that work).
-func (a *SlipWriterAdapter) isPipelineStep(stepName, componentName string) bool {
-	if componentName != "" {
-		return false
-	}
-	if pipelineCfg := a.client.PipelineConfig(); pipelineCfg != nil {
-		return !pipelineCfg.IsAggregateStep(stepName)
-	}
-	return true
-}
-
-// hydrateAndPersist reads the current slip state from ClickHouse (which invokes
-// hydrateSlip to recompute all *_status columns from slip_component_states), then
-// persists the hydrated row back via Update. This flushes correct *_status values
-// for pipeline steps, whose AppendHistory path copies columns verbatim and would
-// otherwise leave *_status stale until the next aggregate write.
-//
-// Read-your-own-writes overlay (I5 safety net):
-// With ClickHouse async_insert=1 active server-side, the INSERT emitted by the
-// preceding client call (StartStep / CompleteStep / FailStep / SkipStep) may not
-// be visible to the SELECT inside Load's hydrateSlip. That would cause the
-// just-written status to be overwritten with the pre-insert stale value, leaving
-// routing_slips permanently stuck (I5 violation). To close this window, after
-// Load returns we overlay the just-written step state directly into the in-memory
-// slip before calling Update. This mirrors the overlayComponentState pattern from
-// goLibMyCarrier PR #59, applied here to pipeline-level steps.
-//
-// Only pipeline-level steps are handled here (callers are guarded by
-// isPipelineStep which filters out aggregate and component steps). The aggregate
-// race is handled inside goLibMyCarrier by overlayComponentState in the
-// updateAggregateStatusFromComponentStates* functions.
-//
-// Update is called directly on the store rather than through Client because Client
-// does not expose an Update method. This intentionally bypasses any future
-// Client-level hooks around Update; revisit if Client gains such hooks.
-//
-// Errors are returned to the caller but treated as non-fatal — the step event is
-// already durably recorded in slip_component_states.
-//
-// Test coverage boundary: slippy-api's I5-v2 correctness (the goLib freshness
-// gate, the argMax-derived overlay, and D3 suppression) is owned and
-// integration-tested by goLibMyCarrier/slippy's own I5 suite, not by this
-// package. slippy-api's guarantees here are the AssertAsyncInsertEnabled
-// startup gate (clickhouse_assertions.go) plus correct wiring of this call
-// path. The mockSlipStore/mock client used by this file's local tests do not
-// simulate goLib's gate or argMax-derive semantics — those tests exercise
-// wiring and control flow only, not race behavior.
-func (a *SlipWriterAdapter) hydrateAndPersist(
-	ctx context.Context,
-	correlationID, stepName string,
-	status slippy.StepStatus,
-	writtenAt time.Time,
-) error {
-	ctx, span := otel.Tracer(writerTracerName).Start(ctx, "writer.hydrateAndPersist",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(
-			attribute.String("slip.correlation_id", correlationID),
-			attribute.String("slip.step_name", stepName),
-			attribute.String("slip.status", string(status)),
-		),
-	)
-	defer span.End()
-
-	slip, err := a.client.Load(ctx, correlationID)
-	if err != nil {
-		recordWriterError(span, err)
-		return fmt.Errorf("hydrateAndPersist: load failed: %w", err)
-	}
-
-	// Read-your-own-writes overlay: merge the just-written step state into the
-	// in-memory slip so Update writes the authoritative value even when the
-	// async-insert buffer has not yet flushed. This directly addresses the I5
-	// materialization race for pipeline-level steps (componentName == "").
-	//
-	// Strengthens I5: routing_slips.<step>_status == event-log-derived status.
-	// Does not affect I1–I4 (those are enforced by checkPipelineCompletion inside
-	// the library, which runs before this hydration path).
-	overlayPipelineStep(slip, stepName, status, writtenAt)
-
-	if err := a.client.Store().Update(ctx, slip); err != nil {
-		recordWriterError(span, err)
-		return fmt.Errorf("hydrateAndPersist: update failed: %w", err)
-	}
-
-	return nil
-}
-
-// overlayPipelineStep applies a just-written pipeline-step state to an in-memory
-// slip, acting as a read-your-own-writes safety net for ClickHouse async-insert
-// visibility lag.
-//
-// Only pipeline-level steps (componentName == "") are handled. Aggregate steps
-// are handled inside goLibMyCarrier by overlayComponentState.
-//
-// Overlay rule: if the step exists in slip.Steps and the writtenAt timestamp is
-// strictly after the existing CompletedAt (or CompletedAt is nil), the new status
-// wins. This is the sentinel path from goLibMyCarrier's overlayComponentState
-// (clickhouse_store.go) applied to slippy.Step rather than ComponentStepData.
-//
-// Note: ApplyStatusTransition sets CompletedAt only on the first terminal
-// transition (when CompletedAt is nil). On a re-run path (failed → running →
-// completed) where a prior CompletedAt exists, the Status is updated correctly
-// but CompletedAt retains the prior run's timestamp. This is intentional and
-// consistent with ComponentStepData.ApplyStatusTransition in goLibMyCarrier.
-//
-// Mirrors the sentinel-path logic of goLibMyCarrier's overlayComponentState
-// (clickhouse_store.go:2233-2241). Duplication is intentional:
-// overlayComponentState is an unexported function and cannot be called from
-// this module. Both functions must stay in sync.
-func overlayPipelineStep(slip *slippy.Slip, stepName string, status slippy.StepStatus, writtenAt time.Time) {
-	if slip == nil {
-		return
-	}
-	if slip.Steps == nil {
-		return
-	}
-	step, ok := slip.Steps[stepName]
-	if !ok {
-		return
-	}
-	// Never overwrite a terminal status with a non-terminal one. This handles the
-	// case where a StartStep arrives after a concurrent (or out-of-order re-trigger)
-	// terminal event has already completed and become visible to Load(). Without
-	// this guard, writtenAt = time.Now() would be after the past CompletedAt and
-	// the overlay would clobber terminal → running, violating I5 and I2.
-	if !status.IsTerminal() && step.CompletedAt != nil {
-		return
-	}
-	if step.CompletedAt == nil || writtenAt.After(*step.CompletedAt) {
-		step.ApplyStatusTransition(status, writtenAt)
-		slip.Steps[stepName] = step
-	}
 }
 
 // recordWriterError records an error on a span, distinguishing client errors

@@ -647,6 +647,13 @@ func TestMapWriteError(t *testing.T) {
 		{"invalid repository", slippy.ErrInvalidRepository, http.StatusBadRequest},
 		{"invalid configuration", slippy.ErrInvalidConfiguration, http.StatusBadRequest},
 		{"invalid push options", errors.New("invalid push options: missing field"), http.StatusBadRequest},
+		{"write contended (domain sentinel)", domain.ErrWriteContended, http.StatusServiceUnavailable},
+		{
+			"write contended (wrapped)",
+			fmt.Errorf("writer.StartStep: %w", domain.ErrWriteContended),
+			http.StatusServiceUnavailable,
+		},
+		{"statement timeout (domain sentinel)", domain.ErrStatementTimeout, http.StatusGatewayTimeout},
 		{
 			"step error",
 			slippy.NewStepError("update", "id", "step", "comp", errors.New("fail")),

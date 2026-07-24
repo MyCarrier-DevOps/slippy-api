@@ -38,9 +38,9 @@ func TestSlipStoreAdapter_Load_CreatesSpan(t *testing.T) {
 	require.Len(t, spans, 1, "expected exactly one span")
 
 	span := spans[0]
-	assert.Equal(t, "clickhouse.Load", span.Name())
+	assert.Equal(t, "postgres.Load", span.Name())
 	assert.Equal(t, trace.SpanKindClient, span.SpanKind())
-	assertAttr(t, span.Attributes(), "db.system", "clickhouse")
+	assertAttr(t, span.Attributes(), "db.system", "postgresql")
 	assertAttr(t, span.Attributes(), "db.operation", "Load")
 	assertAttr(t, span.Attributes(), "slip.correlation_id", "abc-123")
 }
@@ -63,7 +63,7 @@ func TestSlipStoreAdapter_Load_ErrorRecordsSpan(t *testing.T) {
 	require.Len(t, spans, 1)
 
 	span := spans[0]
-	assert.Equal(t, "clickhouse.Load", span.Name())
+	assert.Equal(t, "postgres.Load", span.Name())
 	// Not-found is a client error — span status should be Unset, not Error.
 	assert.Equal(t, codes.Unset, span.Status().Code)
 	// The error should be recorded as an event.
@@ -88,7 +88,7 @@ func TestSlipStoreAdapter_LoadByCommit_CreatesSpan(t *testing.T) {
 	require.Len(t, spans, 1)
 
 	span := spans[0]
-	assert.Equal(t, "clickhouse.LoadByCommit", span.Name())
+	assert.Equal(t, "postgres.LoadByCommit", span.Name())
 	assert.Equal(t, trace.SpanKindClient, span.SpanKind())
 	assertAttr(t, span.Attributes(), "slip.repository", "org/repo")
 	assertAttr(t, span.Attributes(), "slip.commit_sha", "sha123")
@@ -113,7 +113,7 @@ func TestSlipStoreAdapter_FindByCommits_CreatesSpan(t *testing.T) {
 	require.Len(t, spans, 1)
 
 	span := spans[0]
-	assert.Equal(t, "clickhouse.FindByCommits", span.Name())
+	assert.Equal(t, "postgres.FindByCommits", span.Name())
 	assertAttr(t, span.Attributes(), "slip.repository", "org/repo")
 	assertIntAttr(t, span.Attributes(), "slip.commits_count", 2)
 	assertAttr(t, span.Attributes(), "slip.matched_commit", "c1")
@@ -140,7 +140,7 @@ func TestSlipStoreAdapter_FindAllByCommits_CreatesSpan(t *testing.T) {
 	require.Len(t, spans, 1)
 
 	span := spans[0]
-	assert.Equal(t, "clickhouse.FindAllByCommits", span.Name())
+	assert.Equal(t, "postgres.FindAllByCommits", span.Name())
 	assertIntAttr(t, span.Attributes(), "slip.results_count", 1)
 }
 
@@ -297,7 +297,7 @@ func TestSpan_Waterfall_CacheCallsStore(t *testing.T) {
 	// The first span to end is the inner (store) span.
 	storeSpan := spans[0]
 	cacheSpan := spans[1]
-	assert.Equal(t, "clickhouse.Load", storeSpan.Name())
+	assert.Equal(t, "postgres.Load", storeSpan.Name())
 	assert.Equal(t, "cache.Load", cacheSpan.Name())
 
 	// Verify parent-child relationship — the store span's parent should be the cache span.
