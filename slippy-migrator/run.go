@@ -6,7 +6,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"os"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -28,7 +30,38 @@ type deps struct {
 	loadPGConfig       func() (*postgres.PostgresConfig, error)
 	openPool           func(context.Context, *postgres.PostgresConfig) (*pgxpool.Pool, func(), error)
 	migrate            func(context.Context, *pgxpool.Pool, slippy.PostgresMigrateOptions) (*slippy.MigrateResult, error)
-	logf               func(string, ...any)
+	// lock serializes concurrent migrator runs; it returns a release func. Injected so tests
+	// run without a real pool (realDeps wires acquireMigrationLock).
+	lock func(context.Context, *pgxpool.Pool) (func(), error)
+	logf func(string, ...any)
+}
+
+// migrationLockKey is a fixed application-defined key for the session-level advisory lock
+// that serializes concurrent slippy-migrator runs against one database.
+const migrationLockKey int64 = 0x736C6970 // "slip"
+
+// acquireMigrationLock takes a session-level pg_advisory_lock on a dedicated pooled
+// connection so only one migrator applies DDL at a time; it blocks (bounded by ctx) until
+// the lock is free. The returned func releases the lock and the connection.
+func acquireMigrationLock(ctx context.Context, pool *pgxpool.Pool) (func(), error) {
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire connection: %w", err)
+	}
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", migrationLockKey); err != nil {
+		conn.Release()
+		return nil, fmt.Errorf("pg_advisory_lock: %w", err)
+	}
+	return func() {
+		// Returning the connection to the pool does NOT drop a session-level advisory lock,
+		// so unlock explicitly first (best-effort, on an independent short context).
+		unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := conn.Exec(unlockCtx, "SELECT pg_advisory_unlock($1)", migrationLockKey); err != nil {
+			log.Printf("slippy-migrator: pg_advisory_unlock: %v", err)
+		}
+		conn.Release()
+	}, nil
 }
 
 // closeAndLog runs a close function and logs a non-nil error under name (best-effort).
@@ -111,6 +144,15 @@ func run(ctx context.Context, args []string, d deps) error {
 	defer closePool()
 	d.logf("postgres connected")
 
+	// Serialize concurrent migrator runs (a manual re-trigger racing an ArgoCD retry, or a
+	// second PreSync Job) behind a session-level advisory lock so their DDL can't interleave.
+	// The DDL is idempotent, but this turns a possible interleave into a clean wait.
+	unlock, err := d.lock(ctx, pool)
+	if err != nil {
+		return fmt.Errorf("acquire migration lock: %w", err)
+	}
+	defer unlock()
+
 	if opts.dryRun {
 		// DryRun reports pending *versioned* migrations only. Per-step columns on
 		// routing_slips are added by unversioned ensurers, which run on a real apply but not
@@ -136,8 +178,10 @@ func run(ctx context.Context, args []string, d deps) error {
 
 	// A down-migration reverts versioned DownSQL but NOT the unversioned ensurer columns on
 	// routing_slips (ensurers only run on the up path), so the DB can retain columns from a
-	// newer version than it now reports. Surface that rather than leaving it silent.
-	if res.Direction == "down" {
+	// newer version than it now reports. Surface that rather than leaving it silent — but not
+	// on a dry run, where Direction is "down" for a lower target yet EndVersion == StartVersion
+	// and nothing was applied (a false "downgrade applied" line would trigger needless alarm).
+	if res.Direction == "down" && !opts.dryRun {
 		d.logf("WARNING: downgrade v%d -> v%d applied; ensurer-added columns on routing_slips are "+
 			"NOT reverted by a down-migration, so the schema may retain columns from newer versions",
 			res.StartVersion, res.EndVersion)

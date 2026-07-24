@@ -1,9 +1,9 @@
 FROM harbor.mycarrier.tech/proxy-cache/golang:1.26.5 AS builder
 WORKDIR /app
 COPY ./go.mod ./go.sum ./
-RUN go mod download
+RUN go mod download && go mod verify
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o /slippy-migrator
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /slippy-migrator
 
 FROM harbor.mycarrier.tech/proxy-cache/alpine:3.23.0
 RUN apk add --no-cache ca-certificates \

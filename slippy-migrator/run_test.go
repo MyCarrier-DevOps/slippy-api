@@ -42,6 +42,7 @@ func okDeps(t *testing.T, closed *bool, captured *slippy.PostgresMigrateOptions)
 			*captured = opts
 			return &slippy.MigrateResult{Direction: "up", StartVersion: 0, EndVersion: 4, MigrationsApplied: 4}, nil
 		},
+		lock: func(context.Context, *pgxpool.Pool) (func(), error) { return func() {}, nil },
 		logf: func(string, ...any) {},
 	}
 }
@@ -162,6 +163,7 @@ func TestRealDeps(t *testing.T) {
 	assert.NotNil(t, d.loadPGConfig)
 	assert.NotNil(t, d.openPool)
 	assert.NotNil(t, d.migrate)
+	assert.NotNil(t, d.lock)
 	assert.NotNil(t, d.logf)
 }
 
@@ -199,4 +201,42 @@ func TestRun_DryRunLogsEnsurerCount(t *testing.T) {
 	d.logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
 	require.NoError(t, run(context.Background(), []string{"-dry-run"}, d))
 	assert.Contains(t, strings.Join(logs, "\n"), "ensurers would also run")
+}
+
+func TestRun_DryRunDowngradeDoesNotWarn(t *testing.T) {
+	var logs []string
+	d := okDeps(t, new(bool), new(slippy.PostgresMigrateOptions))
+	d.logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+	// Dry-run reports Direction "down" for a lower target, but EndVersion == StartVersion and
+	// nothing is applied — the warning must NOT fire.
+	d.migrate = func(context.Context, *pgxpool.Pool, slippy.PostgresMigrateOptions) (*slippy.MigrateResult, error) {
+		return &slippy.MigrateResult{Direction: "down", StartVersion: 4, EndVersion: 4}, nil
+	}
+	require.NoError(t, run(context.Background(), []string{"-dry-run", "-target-version", "1"}, d))
+	assert.NotContains(t, strings.Join(logs, "\n"), "WARNING: downgrade")
+}
+
+func TestRun_LockFailureAborts(t *testing.T) {
+	migrated := false
+	d := okDeps(t, new(bool), new(slippy.PostgresMigrateOptions))
+	d.migrate = func(context.Context, *pgxpool.Pool, slippy.PostgresMigrateOptions) (*slippy.MigrateResult, error) {
+		migrated = true
+		return &slippy.MigrateResult{Direction: "up"}, nil
+	}
+	d.lock = func(context.Context, *pgxpool.Pool) (func(), error) { return nil, errors.New("lock busy") }
+
+	err := run(context.Background(), nil, d)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "acquire migration lock")
+	assert.False(t, migrated, "migrate must not run when the lock isn't held")
+}
+
+func TestRun_LockReleasedAfterRun(t *testing.T) {
+	unlocked := false
+	d := okDeps(t, new(bool), new(slippy.PostgresMigrateOptions))
+	d.lock = func(context.Context, *pgxpool.Pool) (func(), error) {
+		return func() { unlocked = true }, nil
+	}
+	require.NoError(t, run(context.Background(), nil, d))
+	assert.True(t, unlocked, "the migration lock must be released")
 }
