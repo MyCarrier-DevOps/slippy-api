@@ -12,7 +12,6 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -648,13 +647,13 @@ func TestMapWriteError(t *testing.T) {
 		{"invalid repository", slippy.ErrInvalidRepository, http.StatusBadRequest},
 		{"invalid configuration", slippy.ErrInvalidConfiguration, http.StatusBadRequest},
 		{"invalid push options", errors.New("invalid push options: missing field"), http.StatusBadRequest},
-		{"pg lock timeout (55P03)", &pgconn.PgError{Code: "55P03"}, http.StatusServiceUnavailable},
+		{"write contended (domain sentinel)", domain.ErrWriteContended, http.StatusServiceUnavailable},
 		{
-			"pg lock timeout wrapped",
-			fmt.Errorf("failed to lock slip: %w", &pgconn.PgError{Code: "55P03"}),
+			"write contended (wrapped)",
+			fmt.Errorf("writer.StartStep: %w", domain.ErrWriteContended),
 			http.StatusServiceUnavailable,
 		},
-		{"pg statement timeout (57014)", &pgconn.PgError{Code: "57014"}, http.StatusGatewayTimeout},
+		{"statement timeout (domain sentinel)", domain.ErrStatementTimeout, http.StatusGatewayTimeout},
 		{
 			"step error",
 			slippy.NewStepError("update", "id", "step", "comp", errors.New("fail")),

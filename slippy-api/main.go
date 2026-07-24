@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -159,14 +161,26 @@ func connectCache(
 	defer cancel()
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		log.Printf("warning: dragonfly ping failed, caching disabled: %v", err)
+		closeRedis(rdb) // don't leak the dialed client on the failure path
 		return reader, nil
 	}
 	return infrastructure.NewCachedSlipReader(reader, rdb, cfg.CacheTTL), rdb
 }
 
-// postgresConnectTimeout bounds the initial Postgres connect+ping at startup so a stalled
-// network surfaces as a clean readiness failure rather than a hung, green-but-not-ready pod.
-const postgresConnectTimeout = 8 * time.Second
+// closeRedis closes a redis.Cmdable when it is backed by an io.Closer (*redis.Client is).
+// nil-safe: a nil Cmdable interface fails the type assertion and is a no-op.
+func closeRedis(rdb redis.Cmdable) {
+	if c, ok := rdb.(io.Closer); ok {
+		if err := c.Close(); err != nil {
+			log.Printf("warning: redis client close: %v", err)
+		}
+	}
+}
+
+// startupConnectTimeout bounds an initial datastore connect+ping at startup (Postgres and
+// ClickHouse) so a stalled network surfaces as a clean readiness failure rather than a hung,
+// green-but-not-ready pod.
+const startupConnectTimeout = 8 * time.Second
 
 // isEncryptingSSLMode reports whether a libpq sslmode guarantees encryption in transit.
 // disable/allow/prefer do not (prefer downgrades to plaintext if the server refuses TLS);
@@ -260,7 +274,7 @@ func run() error {
 	// Bound the initial connect+ping so a DNS/network stall at boot surfaces as a clean
 	// readiness failure instead of a hung, green-but-not-ready pod (every sibling startup
 	// dependency — Redis, otel, HTTP — fails fast the same way).
-	pgConnectCtx, pgConnectCancel := context.WithTimeout(context.Background(), postgresConnectTimeout)
+	pgConnectCtx, pgConnectCancel := context.WithTimeout(context.Background(), startupConnectTimeout)
 	defer pgConnectCancel()
 	pgSession, err := postgres.NewPostgresSession(pgConnectCtx, pgCfg)
 	if err != nil {
@@ -281,6 +295,16 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("postgres slip store: %w", err)
 	}
+	// verifyPostgresSchema only proves the tables exist; the per-step {step}_status and
+	// aggregate columns are config-derived (added by ensurers), so a config-only step change
+	// can leave the DB lagging even with the tables present. Probe the full column set the
+	// store actually selects via a Load of the nil-UUID sentinel: ErrSlipNotFound means the
+	// schema is complete, anything else (e.g. Postgres 42703 undefined_column) means it lags
+	// the config and the migrator Job needs to re-run.
+	if _, probeErr := store.Load(pgConnectCtx, "00000000-0000-0000-0000-000000000000"); probeErr != nil &&
+		!errors.Is(probeErr, slippy.ErrSlipNotFound) {
+		return fmt.Errorf("postgres schema lags the pipeline config (re-run the slippy-migrator Job): %w", probeErr)
+	}
 	log.Printf("postgres slip store connected")
 
 	// --- Standalone ClickHouse session (non-slip readers only) ---
@@ -295,7 +319,9 @@ func run() error {
 	// diagnostic — the slip path is 100% Postgres. So a ClickHouse outage must NOT gate
 	// startup of a healthy slip API: log a warning and run degraded (those routes are left
 	// unregistered → 404) while the Postgres slip endpoints serve normally.
-	chSession, chErr := clickhouse.NewClickhouseSession(chCfg, context.Background())
+	chConnectCtx, chConnectCancel := context.WithTimeout(context.Background(), startupConnectTimeout)
+	defer chConnectCancel()
+	chSession, chErr := clickhouse.NewClickhouseSession(chCfg, chConnectCtx)
 	if chErr != nil {
 		log.Printf("warning: clickhouse session unavailable — non-slip readers + admin run degraded: %v", chErr)
 		chSession = nil
@@ -336,6 +362,7 @@ func run() error {
 	// startup ping failed); it is reused below to build the slip-creation dedup
 	// Locker so we never open a second Redis connection (TLS/options stay aligned).
 	reader, rdb := connectCache(cfg, slipReader, redisDial)
+	defer closeRedis(rdb) // released at shutdown (no-op when caching is disabled / ping failed)
 
 	// --- ClickHouse-backed non-slip readers + admin (nil ⇒ routes skipped in degraded mode) ---
 	// All of these query ClickHouse via the standalone session. When that session is

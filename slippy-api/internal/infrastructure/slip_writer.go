@@ -380,6 +380,9 @@ func (a *SlipWriterAdapter) instrumentedWrite(
 	defer cancel()
 
 	if err := a.writeWithLockRetry(wctx, span, op); err != nil {
+		// Translate backend-specific errors into storage-agnostic domain sentinels here, at
+		// the adapter boundary, so the transport layer never imports driver types.
+		err = translateStoreError(err)
 		recordWriterError(span, err)
 		return err
 	}
@@ -387,11 +390,13 @@ func (a *SlipWriterAdapter) instrumentedWrite(
 }
 
 // maxLockRetries bounds the retry loop for a write that lost the per-slip FOR UPDATE lock
-// race. Postgres serializes same-slip writes on that row lock; under high fan-in a queued
-// write can be aborted at lock_timeout with SQLSTATE 55P03. Such an abort rolls back with
-// nothing applied, so retrying is safe and idempotent. All retries share the single
-// write-op context, so the total is still bounded by writeOpTimeout.
-const maxLockRetries = 3
+// race (SQLSTATE 55P03: the transaction rolled back with nothing applied, so a retry is
+// safe and idempotent). It is deliberately small so the worst case stays inside the
+// write-op budget: (maxLockRetries+1) attempts — each of which may wait up to the server
+// lock_timeout — must finish before writeOpTimeout, or the outer context expires first and
+// the write surfaces as a generic 504 instead of the retryable 503. Guarded by
+// TestLockRetryBudgetFitsWriteTimeout.
+const maxLockRetries = 1
 
 // lockRetryBaseBackoff is the first inter-retry sleep; it grows linearly per attempt.
 const lockRetryBaseBackoff = 100 * time.Millisecond
@@ -419,11 +424,31 @@ func (a *SlipWriterAdapter) writeWithLockRetry(
 	}
 }
 
+// pgErrorCode returns the SQLSTATE of the (possibly wrapped) *pgconn.PgError in err, or "".
+func pgErrorCode(err error) string {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code
+	}
+	return ""
+}
+
 // isLockTimeout reports whether err is a Postgres lock_timeout abort (SQLSTATE 55P03),
 // which the per-slip FOR UPDATE serialization can produce under high fan-in.
-func isLockTimeout(err error) bool {
-	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == "55P03"
+func isLockTimeout(err error) bool { return pgErrorCode(err) == "55P03" }
+
+// translateStoreError maps a backend-specific store error onto a storage-agnostic domain
+// sentinel so the transport layer maps HTTP status without knowing about pgconn/SQLSTATE.
+// Unrecognized errors pass through unchanged.
+func translateStoreError(err error) error {
+	switch pgErrorCode(err) {
+	case "55P03": // lock_timeout on the per-slip FOR UPDATE
+		return fmt.Errorf("%w: %w", domain.ErrWriteContended, err)
+	case "57014": // statement_timeout
+		return fmt.Errorf("%w: %w", domain.ErrStatementTimeout, err)
+	default:
+		return err
+	}
 }
 
 // awaitExistingSlip polls the reader for an already-in-flight slip matching the

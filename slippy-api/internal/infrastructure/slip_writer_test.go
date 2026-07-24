@@ -768,3 +768,28 @@ func TestWriteWithLockRetry(t *testing.T) {
 		assert.Equal(t, maxLockRetries+1, calls)
 	})
 }
+
+func TestTranslateStoreError(t *testing.T) {
+	assert.ErrorIs(t, translateStoreError(&pgconn.PgError{Code: "55P03"}), domain.ErrWriteContended)
+	assert.ErrorIs(t,
+		translateStoreError(fmt.Errorf("failed to lock slip: %w", &pgconn.PgError{Code: "55P03"})),
+		domain.ErrWriteContended)
+	assert.ErrorIs(t, translateStoreError(&pgconn.PgError{Code: "57014"}), domain.ErrStatementTimeout)
+
+	boom := errors.New("boom") // unrecognized errors pass through unchanged
+	assert.Equal(t, boom, translateStoreError(boom))
+	assert.NoError(t, translateStoreError(nil))
+}
+
+// assumedLockTimeout documents the goLibMyCarrier/postgres server-side lock_timeout that a
+// single lock wait can consume; used only to guard the retry budget below.
+const assumedLockTimeout = 10 * time.Second
+
+func TestLockRetryBudgetFitsWriteTimeout(t *testing.T) {
+	// (maxLockRetries+1) attempts, each able to wait up to a lock_timeout, must finish inside
+	// the write-op budget — else the outer context expires first and the write surfaces as a
+	// generic 504 instead of the retryable 503 (domain.ErrWriteContended).
+	worst := time.Duration(maxLockRetries+1) * assumedLockTimeout
+	assert.Less(t, worst, defaultWriteOpTimeout,
+		"lock-retry worst case %s must stay under writeOpTimeout %s", worst, defaultWriteOpTimeout)
+}
