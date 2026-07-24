@@ -3,10 +3,12 @@ package infrastructure
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
@@ -713,4 +715,56 @@ func TestSlipWriterAdapter_CompleteStep_FromFailed_Recovery(t *testing.T) {
 	require.NoError(t, err, "failed → completed recovery must be permitted")
 	assert.True(t, writeCalled, "underlying write must run for recovery transition")
 	assert.Equal(t, slippy.StepStatusCompleted, writtenStatus)
+}
+
+func TestIsLockTimeout(t *testing.T) {
+	assert.True(t, isLockTimeout(&pgconn.PgError{Code: "55P03"}))
+	assert.True(t, isLockTimeout(fmt.Errorf("failed to lock slip: %w", &pgconn.PgError{Code: "55P03"})))
+	assert.False(t, isLockTimeout(&pgconn.PgError{Code: "57014"}), "statement timeout is not a lock timeout")
+	assert.False(t, isLockTimeout(errors.New("boom")))
+	assert.False(t, isLockTimeout(nil))
+}
+
+func TestWriteWithLockRetry(t *testing.T) {
+	a := &SlipWriterAdapter{}
+	lockErr := &pgconn.PgError{Code: "55P03"}
+	newSpan := func() trace.Span {
+		_, span := otel.Tracer("test").Start(context.Background(), "t")
+		return span
+	}
+
+	t.Run("retries lock timeout then succeeds", func(t *testing.T) {
+		calls := 0
+		err := a.writeWithLockRetry(context.Background(), newSpan(), func(context.Context, trace.Span) error {
+			calls++
+			if calls < 2 {
+				return lockErr
+			}
+			return nil
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 2, calls)
+	})
+
+	t.Run("non-lock error is not retried", func(t *testing.T) {
+		boom := errors.New("boom")
+		calls := 0
+		err := a.writeWithLockRetry(context.Background(), newSpan(), func(context.Context, trace.Span) error {
+			calls++
+			return boom
+		})
+		require.ErrorIs(t, err, boom)
+		assert.Equal(t, 1, calls)
+	})
+
+	t.Run("gives up after maxLockRetries", func(t *testing.T) {
+		calls := 0
+		err := a.writeWithLockRetry(context.Background(), newSpan(), func(context.Context, trace.Span) error {
+			calls++
+			return lockErr
+		})
+		require.Error(t, err)
+		assert.True(t, isLockTimeout(err))
+		assert.Equal(t, maxLockRetries+1, calls)
+	})
 }

@@ -261,4 +261,3 @@ func TestLoad_MissingWriteAPIKey(t *testing.T) {
 	assert.Nil(t, cfg)
 	assert.ErrorContains(t, err, "SLIPPY_WRITE_API_KEY is required")
 }
-

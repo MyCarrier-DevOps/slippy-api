@@ -12,6 +12,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
@@ -163,6 +164,41 @@ func connectCache(
 	return infrastructure.NewCachedSlipReader(reader, rdb, cfg.CacheTTL), rdb
 }
 
+// postgresConnectTimeout bounds the initial Postgres connect+ping at startup so a stalled
+// network surfaces as a clean readiness failure rather than a hung, green-but-not-ready pod.
+const postgresConnectTimeout = 8 * time.Second
+
+// isEncryptingSSLMode reports whether a libpq sslmode guarantees encryption in transit.
+// disable/allow/prefer do not (prefer downgrades to plaintext if the server refuses TLS);
+// require/verify-ca/verify-full do. verify-full is the library default and recommended.
+func isEncryptingSSLMode(mode string) bool {
+	switch mode {
+	case "require", "verify-ca", "verify-full":
+		return true
+	default:
+		return false
+	}
+}
+
+// verifyPostgresSchema fails fast when the operational tables are absent. A ping succeeds
+// against an un-migrated database and slippy-api no longer runs migrations (the
+// slippy-migrator Job owns the schema), so this is a cheap startup readiness gate.
+func verifyPostgresSchema(ctx context.Context, pool *pgxpool.Pool) error {
+	for _, tbl := range []string{"routing_slips", "slip_component_states", "slip_ancestry"} {
+		var reg *string
+		if err := pool.QueryRow(ctx, "SELECT to_regclass($1)::text", tbl).Scan(&reg); err != nil {
+			return fmt.Errorf("postgres schema check (%s): %w", tbl, err)
+		}
+		if reg == nil {
+			return fmt.Errorf(
+				"postgres schema not initialized: table %q is missing — has the slippy-migrator Job run?",
+				tbl,
+			)
+		}
+	}
+	return nil
+}
+
 // run wires up all components and starts the HTTP server with graceful shutdown.
 func run() error {
 	// --- OpenTelemetry ---
@@ -210,7 +246,23 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("postgres config: %w", err)
 	}
-	pgSession, err := postgres.NewPostgresSession(context.Background(), pgCfg)
+	// Refuse to start on a non-encrypting sslmode. The library default is verify-full, but
+	// PostgresValidateConfig also accepts disable/allow/prefer; this floor stops a
+	// misconfigured POSTGRES_SSLMODE from silently sending DB credentials + slip data in
+	// cleartext. require is kept as the library's documented last-resort (encrypted, server
+	// not authenticated).
+	if !isEncryptingSSLMode(pgCfg.PgSSLMode) {
+		return fmt.Errorf(
+			"refusing to start: POSTGRES_SSLMODE=%q does not guarantee TLS; use verify-full (default), verify-ca, or require",
+			pgCfg.PgSSLMode,
+		)
+	}
+	// Bound the initial connect+ping so a DNS/network stall at boot surfaces as a clean
+	// readiness failure instead of a hung, green-but-not-ready pod (every sibling startup
+	// dependency — Redis, otel, HTTP — fails fast the same way).
+	pgConnectCtx, pgConnectCancel := context.WithTimeout(context.Background(), postgresConnectTimeout)
+	defer pgConnectCancel()
+	pgSession, err := postgres.NewPostgresSession(pgConnectCtx, pgCfg)
 	if err != nil {
 		return fmt.Errorf("postgres session: %w", err)
 	}
@@ -219,6 +271,12 @@ func run() error {
 			log.Printf("warning: postgres session close: %v", closeErr)
 		}
 	}()
+	// A ping succeeds against a database that has no schema yet, and slippy-api no longer
+	// migrates (the slippy-migrator Job owns the schema via a PreSync hook). Fail fast if the
+	// tables aren't there rather than booting green and face-planting on the first request.
+	if err := verifyPostgresSchema(pgConnectCtx, pgSession.Pool()); err != nil {
+		return err
+	}
 	store, err := slippy.NewPostgresStore(pgSession.Pool(), pipelineCfg, libLogger)
 	if err != nil {
 		return fmt.Errorf("postgres slip store: %w", err)
@@ -233,16 +291,22 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("clickhouse config: %w", err)
 	}
-	chSession, err := clickhouse.NewClickhouseSession(chCfg, context.Background())
-	if err != nil {
-		return fmt.Errorf("clickhouse session: %w", err)
+	// ClickHouse now backs only the non-slip readers (buildinfo/ciJob/autotest) and the admin
+	// diagnostic — the slip path is 100% Postgres. So a ClickHouse outage must NOT gate
+	// startup of a healthy slip API: log a warning and run degraded (those routes are left
+	// unregistered → 404) while the Postgres slip endpoints serve normally.
+	chSession, chErr := clickhouse.NewClickhouseSession(chCfg, context.Background())
+	if chErr != nil {
+		log.Printf("warning: clickhouse session unavailable — non-slip readers + admin run degraded: %v", chErr)
+		chSession = nil
+	} else {
+		defer func() {
+			if closeErr := chSession.Close(); closeErr != nil {
+				log.Printf("warning: clickhouse session close: %v", closeErr)
+			}
+		}()
+		log.Printf("clickhouse session connected (non-slip readers)")
 	}
-	defer func() {
-		if closeErr := chSession.Close(); closeErr != nil {
-			log.Printf("warning: clickhouse session close: %v", closeErr)
-		}
-	}()
-	log.Printf("clickhouse session connected (non-slip readers)")
 
 	// Adapt the read+write store to our read-only interface (PG-direct query path).
 	adapter := infrastructure.NewSlipStoreAdapter(store)
@@ -273,22 +337,34 @@ func run() error {
 	// Locker so we never open a second Redis connection (TLS/options stay aligned).
 	reader, rdb := connectCache(cfg, slipReader, redisDial)
 
-	// --- BuildInfo reader for image tag resolution ---
-	// Uses the standalone ClickHouse session (the slip store is Postgres now and no longer
-	// provides a ClickHouse session) to query ci.buildinfo and ci.repoproperties.
-	imageTagReader := infrastructure.NewBuildInfoReader(chSession, reader)
-
-	// --- CI Job Log reader ---
-	// Uses the standalone ClickHouse session to query observability.ciJob.
-	ciJobLogReader := infrastructure.NewCIJobLogStore(chSession)
-
-	// --- Automation test results reader ---
-	// Uses the standalone ClickHouse session to query autotest_results.RunResults.
-	automationTestResultsReader := infrastructure.NewAutomationTestResultsStore(chSession)
-
-	// --- Automation tests (per-test) reader ---
-	// Uses the standalone ClickHouse session to query autotest_results.TestResults.
-	automationTestsReader := infrastructure.NewAutomationTestsStore(chSession)
+	// --- ClickHouse-backed non-slip readers + admin (nil ⇒ routes skipped in degraded mode) ---
+	// All of these query ClickHouse via the standalone session. When that session is
+	// unavailable (above), they stay nil and buildHandler leaves their routes unregistered,
+	// so the Postgres slip API keeps serving.
+	var (
+		imageTagReader              domain.ImageTagReader
+		ciJobLogReader              domain.CIJobLogReader
+		automationTestResultsReader domain.AutomationTestResultsReader
+		automationTestsReader       domain.AutomationTestsReader
+		adminH                      *handler.AdminHandler
+	)
+	if chSession != nil {
+		imageTagReader = infrastructure.NewBuildInfoReader(
+			chSession,
+			reader,
+		) // ci.buildinfo / ci.repoproperties
+		ciJobLogReader = infrastructure.NewCIJobLogStore(chSession) // observability.ciJob
+		automationTestResultsReader = infrastructure.NewAutomationTestResultsStore(
+			chSession,
+		) // autotest_results.RunResults
+		automationTestsReader = infrastructure.NewAutomationTestsStore(
+			chSession,
+		) // autotest_results.TestResults
+		adminH = handler.NewAdminHandler(
+			chSession,
+			cfg.SlipDatabase,
+		) // legacy CH schema-version diagnostic
+	}
 
 	// --- Write support ---
 	// SLIPPY_WRITE_API_KEY is required; config.Load() already validated it.
@@ -308,9 +384,6 @@ func run() error {
 	}
 	writer := infrastructure.NewSlipWriterAdapter(slippyClient, locker, reader)
 	log.Printf("write endpoints enabled")
-
-	// --- Admin handler ---
-	adminH := handler.NewAdminHandler(chSession, cfg.SlipDatabase, pipelineCfg)
 
 	// --- HTTP Server ---
 	otelHandler := buildHandler(

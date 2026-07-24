@@ -613,3 +613,22 @@ func TestRun_MissingPostgresConfig(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "postgres config")
 }
+
+func TestIsEncryptingSSLMode(t *testing.T) {
+	for _, tc := range []struct {
+		mode string
+		want bool
+	}{
+		{"verify-full", true},
+		{"verify-ca", true},
+		{"require", true},
+		{"prefer", false},
+		{"allow", false},
+		{"disable", false},
+		{"", false},
+	} {
+		if got := isEncryptingSSLMode(tc.mode); got != tc.want {
+			t.Errorf("isEncryptingSSLMode(%q) = %v, want %v", tc.mode, got, tc.want)
+		}
+	}
+}

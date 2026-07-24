@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/jackc/pgx/v5/pgconn"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -603,6 +604,18 @@ func mapWriteError(err error) error {
 			http.StatusConflict,
 			"step already in terminal state; transition rejected (I5 freshness gate)",
 		)
+	case isPgErrorCode(err, pgLockTimeoutCode):
+		// Per-slip FOR UPDATE lock contention that outlasted lock_timeout (10s) and the
+		// in-adapter retries. The transaction rolled back with nothing applied, so it is
+		// safe to retry — surface it as retryable rather than a generic 500, and keep it
+		// distinguishable from a real internal error.
+		return huma.NewError(
+			http.StatusServiceUnavailable,
+			"write contended on the per-slip lock and did not complete; safe to retry",
+		)
+	case isPgErrorCode(err, pgStatementTimeoutCode):
+		// statement_timeout (30s) fired server-side — a slow query, not a client cancel.
+		return huma.NewError(http.StatusGatewayTimeout, "database statement timeout")
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		// A context deadline/cancellation that reaches mapWriteError means the
 		// AUTHORITATIVE insert (UpdateStepWithHistory / slip_component_states) did NOT
@@ -645,4 +658,16 @@ func mapWriteError(err error) error {
 		}
 		return huma.NewError(http.StatusInternalServerError, "internal error")
 	}
+}
+
+// Postgres SQLSTATE codes surfaced by the per-slip write path.
+const (
+	pgLockTimeoutCode      = "55P03" // lock_not_available (lock_timeout on FOR UPDATE)
+	pgStatementTimeoutCode = "57014" // query_canceled (statement_timeout)
+)
+
+// isPgErrorCode reports whether err unwraps to a *pgconn.PgError with the given SQLSTATE.
+func isPgErrorCode(err error, code string) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == code
 }

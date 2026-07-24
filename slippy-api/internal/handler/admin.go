@@ -19,23 +19,20 @@ import (
 type AdminHandler struct {
 	session  ch.ClickhouseSessionInterface
 	database string
-	pipeline *slippy.PipelineConfig
 }
 
 // NewAdminHandler creates an AdminHandler backed by the given session.
 func NewAdminHandler(
 	session ch.ClickhouseSessionInterface,
 	database string,
-	pipeline *slippy.PipelineConfig,
 ) *AdminHandler {
-	return &AdminHandler{session: session, database: database, pipeline: pipeline}
+	return &AdminHandler{session: session, database: database}
 }
 
 // SchemaVersionOutput is the response body for GET /v1/admin/schema-version.
 type SchemaVersionOutput struct {
 	Body struct {
-		Current int `json:"current" doc:"Current version of the LEGACY ClickHouse slip schema. Slip data now lives in Postgres, whose schema is owned by the slippy-migrator Job and is NOT reported here."`
-		Target  int `json:"target"  doc:"Target schema version derived from the pipeline config"`
+		Current int `json:"current" doc:"Version of the LEGACY ClickHouse slip schema (now frozen). The operational slip schema lives in Postgres, owned by the slippy-migrator Job, and is not reported by this endpoint."`
 	}
 }
 
@@ -69,17 +66,12 @@ func (h *AdminHandler) getSchemaVersion(ctx context.Context, _ *struct{}) (*Sche
 			"database", h.database, "error", err)
 		return nil, huma.NewError(http.StatusInternalServerError, "failed to read schema version")
 	}
-	target := slippy.GetDynamicMigrationVersion(h.pipeline)
-	span.SetAttributes(
-		attribute.Int("schema.current", current),
-		attribute.Int("schema.target", target),
-	)
+	span.SetAttributes(attribute.Int("schema.current", current))
 	span.SetStatus(codes.Ok, "")
 	slog.InfoContext(ctx, "admin: schema version retrieved",
-		"database", h.database, "current", current, "target", target)
+		"database", h.database, "current", current)
 
 	out := &SchemaVersionOutput{}
 	out.Body.Current = current
-	out.Body.Target = target
 	return out, nil
 }

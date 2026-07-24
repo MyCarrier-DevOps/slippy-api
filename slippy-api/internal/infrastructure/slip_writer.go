@@ -2,12 +2,14 @@ package infrastructure
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"strconv"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -377,11 +379,51 @@ func (a *SlipWriterAdapter) instrumentedWrite(
 	wctx, cancel := writeContext(ctx)
 	defer cancel()
 
-	if err := op(wctx, span); err != nil {
+	if err := a.writeWithLockRetry(wctx, span, op); err != nil {
 		recordWriterError(span, err)
 		return err
 	}
 	return nil
+}
+
+// maxLockRetries bounds the retry loop for a write that lost the per-slip FOR UPDATE lock
+// race. Postgres serializes same-slip writes on that row lock; under high fan-in a queued
+// write can be aborted at lock_timeout with SQLSTATE 55P03. Such an abort rolls back with
+// nothing applied, so retrying is safe and idempotent. All retries share the single
+// write-op context, so the total is still bounded by writeOpTimeout.
+const maxLockRetries = 3
+
+// lockRetryBaseBackoff is the first inter-retry sleep; it grows linearly per attempt.
+const lockRetryBaseBackoff = 100 * time.Millisecond
+
+// writeWithLockRetry runs op, retrying on a Postgres lock_timeout (55P03) with bounded
+// linear backoff. Any other error (or success) returns immediately.
+func (a *SlipWriterAdapter) writeWithLockRetry(
+	wctx context.Context,
+	span trace.Span,
+	op func(wctx context.Context, span trace.Span) error,
+) error {
+	var err error
+	for attempt := 0; ; attempt++ {
+		err = op(wctx, span)
+		if err == nil || attempt >= maxLockRetries || !isLockTimeout(err) {
+			return err
+		}
+		span.AddEvent("pg_lock_contention_retry",
+			trace.WithAttributes(attribute.Int("attempt", attempt+1)))
+		select {
+		case <-wctx.Done():
+			return err
+		case <-time.After(time.Duration(attempt+1) * lockRetryBaseBackoff):
+		}
+	}
+}
+
+// isLockTimeout reports whether err is a Postgres lock_timeout abort (SQLSTATE 55P03),
+// which the per-slip FOR UPDATE serialization can produce under high fan-in.
+func isLockTimeout(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "55P03"
 }
 
 // awaitExistingSlip polls the reader for an already-in-flight slip matching the
