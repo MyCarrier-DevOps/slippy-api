@@ -109,6 +109,8 @@ go vet ./...     # quick static analysis
 
 But **final gate before commit MUST be `make lint && make test`** — CI compares against Makefile output.
 
+**Coverage gate (per module): `make test` must satisfy the CI total-coverage threshold (currently 80%).** New code needs tests before you commit — CI fails the build below the gate. If a function is genuinely not unit-testable (`main()`, a thin `realDeps()` wiring closure, a `*pgxpool.Pool` call that needs a live DB), don't lower the threshold: keep the module above it by covering the rest, and make the untestable code thin — extract the real logic behind a small interface so it can be exercised with a fake (see `advisoryLock`/`pgExecer` in `slippy-migrator/run.go`).
+
 **For subagents:** brief them to use `make lint` / `make test` explicitly. Don't let them substitute raw commands. If a target is unfamiliar, list them first via `grep -E "^[a-z_-]+:" Makefile`.
 
 ## Architecture Overview
