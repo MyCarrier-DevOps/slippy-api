@@ -10,6 +10,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/MyCarrier-DevOps/goLibMyCarrier/postgres"
@@ -40,6 +41,12 @@ type deps struct {
 // that serializes concurrent slippy-migrator runs against one database.
 const migrationLockKey int64 = 0x736C6970 // "slip"
 
+// pgExecer is the subset of a pooled connection that advisoryLock needs — satisfied by
+// *pgxpool.Conn in production and by a fake in tests.
+type pgExecer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
 // acquireMigrationLock takes a session-level pg_advisory_lock on a dedicated pooled
 // connection so only one migrator applies DDL at a time; it blocks (bounded by ctx) until
 // the lock is free. The returned func releases the lock and the connection.
@@ -48,8 +55,18 @@ func acquireMigrationLock(ctx context.Context, pool *pgxpool.Pool) (func(), erro
 	if err != nil {
 		return nil, fmt.Errorf("acquire connection: %w", err)
 	}
-	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", migrationLockKey); err != nil {
+	unlock, err := advisoryLock(ctx, conn, conn.Release)
+	if err != nil {
 		conn.Release()
+		return nil, err
+	}
+	return unlock, nil
+}
+
+// advisoryLock takes the session-level advisory lock via execer and returns a release func
+// that unlocks and then runs release. Split from the pool wiring so it is unit-testable.
+func advisoryLock(ctx context.Context, execer pgExecer, release func()) (func(), error) {
+	if _, err := execer.Exec(ctx, "SELECT pg_advisory_lock($1)", migrationLockKey); err != nil {
 		return nil, fmt.Errorf("pg_advisory_lock: %w", err)
 	}
 	return func() {
@@ -57,10 +74,10 @@ func acquireMigrationLock(ctx context.Context, pool *pgxpool.Pool) (func(), erro
 		// so unlock explicitly first (best-effort, on an independent short context).
 		unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if _, err := conn.Exec(unlockCtx, "SELECT pg_advisory_unlock($1)", migrationLockKey); err != nil {
+		if _, err := execer.Exec(unlockCtx, "SELECT pg_advisory_unlock($1)", migrationLockKey); err != nil {
 			log.Printf("slippy-migrator: pg_advisory_unlock: %v", err)
 		}
-		conn.Release()
+		release()
 	}, nil
 }
 

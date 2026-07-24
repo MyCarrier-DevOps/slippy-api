@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -239,4 +240,59 @@ func TestRun_LockReleasedAfterRun(t *testing.T) {
 	}
 	require.NoError(t, run(context.Background(), nil, d))
 	assert.True(t, unlocked, "the migration lock must be released")
+}
+
+// fakeExecer records the SQL passed to Exec and can fail the first (lock) call.
+type fakeExecer struct {
+	calls   []string
+	lockErr error
+}
+
+func (f *fakeExecer) Exec(_ context.Context, sql string, _ ...any) (pgconn.CommandTag, error) {
+	f.calls = append(f.calls, sql)
+	if len(f.calls) == 1 {
+		return pgconn.CommandTag{}, f.lockErr
+	}
+	return pgconn.CommandTag{}, nil
+}
+
+func TestAdvisoryLock(t *testing.T) {
+	t.Run("locks then unlocks and releases", func(t *testing.T) {
+		f := &fakeExecer{}
+		released := false
+		unlock, err := advisoryLock(context.Background(), f, func() { released = true })
+		require.NoError(t, err)
+		require.NotNil(t, unlock)
+		require.Len(t, f.calls, 1)
+		assert.Contains(t, f.calls[0], "pg_advisory_lock")
+
+		unlock()
+		require.Len(t, f.calls, 2)
+		assert.Contains(t, f.calls[1], "pg_advisory_unlock")
+		assert.True(t, released, "release must run after unlock")
+	})
+
+	t.Run("lock error returns and does not release", func(t *testing.T) {
+		f := &fakeExecer{lockErr: errors.New("lock busy")}
+		released := false
+		unlock, err := advisoryLock(context.Background(), f, func() { released = true })
+		require.Error(t, err)
+		assert.Nil(t, unlock)
+		assert.False(t, released, "release is the caller's responsibility on lock failure")
+	})
+}
+
+func TestAcquireMigrationLock_AcquireError(t *testing.T) {
+	// A closed pool fails Acquire immediately (no network, deterministic), exercising the
+	// connection-acquire error path of acquireMigrationLock without a real database.
+	cfg, err := pgxpool.ParseConfig("postgres://localhost:5432/postgres?sslmode=disable")
+	require.NoError(t, err)
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	require.NoError(t, err)
+	pool.Close()
+
+	unlock, err := acquireMigrationLock(context.Background(), pool)
+	require.Error(t, err)
+	assert.Nil(t, unlock)
+	assert.Contains(t, err.Error(), "acquire connection")
 }
