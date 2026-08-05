@@ -19,7 +19,9 @@ import (
 
 	"github.com/MyCarrier-DevOps/slippy-api/internal/config"
 	"github.com/MyCarrier-DevOps/slippy-api/internal/domain"
+	"github.com/MyCarrier-DevOps/slippy-api/internal/handler"
 	"github.com/MyCarrier-DevOps/slippy-api/internal/infrastructure"
+	"github.com/MyCarrier-DevOps/slippy-api/internal/middleware"
 )
 
 // --- Stub SlipReader for tests ---
@@ -262,6 +264,144 @@ func TestBuildHandler_OpenAPISpecContainsV1Routes(t *testing.T) {
 	assert.Contains(t, paths, "/v1/health")
 	assert.Contains(t, paths, "/slips/{correlationID}")
 	assert.Contains(t, paths, "/v1/slips/{correlationID}")
+}
+
+// --- Route security audit ---
+
+// fetchOpenAPISpec serves GET /openapi.json against h and decodes the document.
+func fetchOpenAPISpec(t *testing.T, h http.Handler) map[string]any {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var spec map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&spec))
+	return spec
+}
+
+// buildFullyWiredHandler builds the handler with every optional dependency
+// supplied, so the OpenAPI document covers the complete route surface.
+//
+// The diagnostics handler is constructed with a nil ClickHouse session on
+// purpose: route registration and spec generation never touch it, and these tests
+// only inspect the document.
+func buildFullyWiredHandler(t *testing.T) http.Handler {
+	t.Helper()
+
+	cfg := &config.Config{APIKey: "test-key", WriteAPIKey: "write-key", Port: 8080}
+	h := buildHandler(
+		cfg,
+		newStubSlipReader(),
+		&stubSlipWriter{},
+		&stubImageTagReader{},
+		&stubCIJobLogReader{},
+		&stubAutomationTestResultsReader{},
+		&stubAutomationTestsReader{},
+		nil,
+		handler.NewDiagnosticsHandler(nil, "slippy"),
+	)
+	require.NotNil(t, h)
+	return h
+}
+
+// TestBuildHandler_EveryOperationIsSecuredOrAllowlisted is the registration-time
+// half of fail-closed auth (DEVOPS-217). The middleware rejects any operation that
+// declares no security requirement and is not allowlisted; this walks the whole
+// OpenAPI document and fails the build for such a route rather than letting it
+// ship — open under the old opt-in model, uniformly 401 under the new one.
+func TestBuildHandler_EveryOperationIsSecuredOrAllowlisted(t *testing.T) {
+	spec := fetchOpenAPISpec(t, buildFullyWiredHandler(t))
+
+	paths, ok := spec["paths"].(map[string]any)
+	require.True(t, ok)
+	require.NotEmpty(t, paths)
+
+	seen := map[string]struct{}{}
+	for path, methodsAny := range paths {
+		methods, ok := methodsAny.(map[string]any)
+		require.True(t, ok, "path %s", path)
+
+		for method, opAny := range methods {
+			op, ok := opAny.(map[string]any)
+			require.True(t, ok, "%s %s", method, path)
+
+			opID, _ := op["operationId"].(string)
+			seen[opID] = struct{}{}
+
+			if security, _ := op["security"].([]any); len(security) > 0 {
+				continue
+			}
+			assert.True(t, middleware.IsPublicOperation(opID),
+				"%s %s (operationId %q) declares no security requirement and is not on the public "+
+					"allowlist in internal/middleware/auth.go, so it would be rejected with 401. "+
+					"Declare Security on the operation, or add it to publicOperationIDs if it is "+
+					"deliberately public.",
+				strings.ToUpper(method), path, opID)
+		}
+	}
+
+	// Guard against a vacuous pass: the audit must have covered a public route, a
+	// read-key route on both prefixes, a write-key route, and the diagnostic.
+	for _, opID := range []string{
+		"health-check",
+		"v1-health-check",
+		"get-slip",
+		"v1-get-slip",
+		"create-slip",
+		"get-clickhouse-schema-version",
+	} {
+		assert.Contains(t, seen, opID, "expected the audit to cover operation %q", opID)
+	}
+}
+
+// TestBuildHandler_DiagnosticRouteIsRenamedAndSecured pins the other half of
+// DEVOPS-217: the ClickHouse schema-version probe no longer sits under /v1/admin/
+// — a namespace that reads as privileged and invited genuinely administrative
+// (and unauthenticated) additions — and it now requires the read key.
+func TestBuildHandler_DiagnosticRouteIsRenamedAndSecured(t *testing.T) {
+	spec := fetchOpenAPISpec(t, buildFullyWiredHandler(t))
+
+	paths, ok := spec["paths"].(map[string]any)
+	require.True(t, ok)
+
+	assert.NotContains(t, paths, "/admin/schema-version")
+	assert.NotContains(t, paths, "/v1/admin/schema-version")
+	require.Contains(t, paths, "/v1/diagnostics/clickhouse-schema-version")
+
+	methods, ok := paths["/v1/diagnostics/clickhouse-schema-version"].(map[string]any)
+	require.True(t, ok)
+	op, ok := methods["get"].(map[string]any)
+	require.True(t, ok)
+
+	assert.Equal(t, "get-clickhouse-schema-version", op["operationId"])
+
+	security, ok := op["security"].([]any)
+	require.True(t, ok, "diagnostic must declare a security requirement")
+	require.Len(t, security, 1)
+	scheme, ok := security[0].(map[string]any)
+	require.True(t, ok)
+	assert.Contains(t, scheme, "apiKey", "diagnostic should accept the read key")
+}
+
+// TestBuildHandler_DiagnosticRouteRequiresKey exercises the renamed route through
+// the middleware: no credential is a 401, and the read key gets past auth.
+func TestBuildHandler_DiagnosticRouteRequiresKey(t *testing.T) {
+	h := buildFullyWiredHandler(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/diagnostics/clickhouse-schema-version", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+
+	// The old path is gone entirely.
+	req = httptest.NewRequest(http.MethodGet, "/v1/admin/schema-version", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
 // --- Optional handler registration tests ---

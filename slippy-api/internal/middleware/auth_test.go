@@ -64,14 +64,27 @@ func setupAuthTestAPI(readKey, writeKey string) http.Handler {
 		return resp, nil
 	})
 
-	// Public endpoint (no security requirements)
+	// No security requirement and not on the public allowlist. Stands in for a
+	// route whose author forgot to declare Security.
 	huma.Register(api, huma.Operation{
-		OperationID: "get-public",
+		OperationID: "get-unsecured",
 		Method:      http.MethodGet,
-		Path:        "/public",
+		Path:        "/unsecured",
 	}, func(ctx context.Context, input *struct{}) (*greetingOutput, error) {
 		resp := &greetingOutput{}
-		resp.Body.Message = "public"
+		resp.Body.Message = "unsecured"
+		return resp, nil
+	})
+
+	// No security requirement, but explicitly allowlisted as public. Uses the
+	// real allowlisted operation ID so the test exercises the shipped policy.
+	huma.Register(api, huma.Operation{
+		OperationID: "health-check",
+		Method:      http.MethodGet,
+		Path:        "/health",
+	}, func(ctx context.Context, input *struct{}) (*greetingOutput, error) {
+		resp := &greetingOutput{}
+		resp.Body.Message = "healthy"
 		return resp, nil
 	})
 
@@ -201,17 +214,73 @@ func TestAuthMiddleware_MalformedHeader(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
-func TestAuthMiddleware_PublicEndpoint(t *testing.T) {
+// TestAuthMiddleware_NoSecurity_NotAllowlisted_Rejected pins the fail-closed
+// default: an operation that declares no security requirement and is not named
+// on the public allowlist is rejected, not served. A new route that forgets its
+// Security declaration must break here rather than ship world-readable.
+func TestAuthMiddleware_NoSecurity_NotAllowlisted_Rejected(t *testing.T) {
 	handler := setupAuthTestAPI("read-key", "write-key")
 
-	req := httptest.NewRequest(http.MethodGet, "/public", nil)
+	req := httptest.NewRequest(http.MethodGet, "/unsecured", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+	var errBody map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&errBody))
+	assert.Equal(t, float64(401), errBody["status"])
+}
+
+// TestAuthMiddleware_NoSecurity_Allowlisted_OK covers the other side of the
+// allowlist: a named public operation is still served without a credential.
+func TestAuthMiddleware_NoSecurity_Allowlisted_OK(t *testing.T) {
+	handler := setupAuthTestAPI("read-key", "write-key")
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	var body map[string]string
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&body))
-	assert.Equal(t, "public", body["message"])
+	assert.Equal(t, "healthy", body["message"])
+}
+
+// TestIsPublicOperation pins the shipped allowlist. Widening it is a deliberate
+// security decision, so it must show up as a change to this table.
+func TestIsPublicOperation(t *testing.T) {
+	tests := []struct {
+		name        string
+		operationID string
+		expected    bool
+	}{
+		{"health check", "health-check", true},
+		{"v1 health check", "v1-health-check", true},
+		{"empty operation id", "", false},
+		{"read operation", "get-slip", false},
+		{"write operation", "create-slip", false},
+		{"clickhouse schema version diagnostic", "get-clickhouse-schema-version", false},
+		{"retired admin diagnostic", "get-schema-version", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, IsPublicOperation(tt.operationID))
+		})
+	}
+}
+
+// TestAuthMiddleware_NoSecurity_NotAllowlisted_RejectedWithValidKey shows the
+// rejection is a property of the operation, not of the caller: even the write
+// key does not open a route that was never declared public.
+func TestAuthMiddleware_NoSecurity_NotAllowlisted_RejectedWithValidKey(t *testing.T) {
+	handler := setupAuthTestAPI("read-key", "write-key")
+
+	req := httptest.NewRequest(http.MethodGet, "/unsecured", nil)
+	req.Header.Set("Authorization", "Bearer write-key")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
 func TestAuthMiddleware_EmptyBearerToken(t *testing.T) {

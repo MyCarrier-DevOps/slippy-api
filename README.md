@@ -38,11 +38,13 @@ The application follows Clean Architecture with clear dependency boundaries:
 
 All endpoints except `/health`, `/openapi.json`, and `/docs` require a `Bearer` token in the `Authorization` header.
 
+Authentication is **fail-closed**: the middleware rejects any operation that declares no security requirement unless its operation ID appears in the `publicOperationIDs` allowlist in [`internal/middleware/auth.go`](slippy-api/internal/middleware/auth.go). A new route that forgets its `Security` declaration returns `401` rather than shipping world-readable, and the route audit in `main_test.go` fails the build for it. `/openapi.json` and `/docs` need no allowlist entry — huma registers those on the adapter directly, outside the middleware chain.
+
 ### Read Endpoints
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/health` | Health check (no auth required). Returns `{"status":"ok"}` |
+| `GET` | `/health` | Health check (no auth required — the only allowlisted public operation). Returns `{"status":"ok"}` |
 | `GET` | `/slips/{correlationID}` | Get a routing slip by its correlation ID |
 | `GET` | `/slips/by-commit/{owner}/{repo}/{commitSHA}` | Get a routing slip by repository and commit SHA |
 | `POST` | `/slips/find-by-commits` | Find the first matching slip for an ordered list of commits |
@@ -52,6 +54,7 @@ All endpoints except `/health`, `/openapi.json`, and `/docs` require a `Bearer` 
 | `GET` | `/v1/automation-test-results/by-correlation/{correlationID}` | Run-summary rows from `autotest_results.RunResults`. Filter by `environment`, `stack`, `stage`, `attempt`. When `attempt` is omitted, returns the latest attempt per (env, stack, stage) tuple. |
 | `GET` | `/v1/automation-test-results/by-correlation/{correlationID}/tests` | Per-test rows from `autotest_results.TestResultsCor` for a slip, paginated. Same parent filters plus `status` (default `Failed`; pass `*` or `all` to disable), `limit`, `cursor`. Bounded to a 14-day lookback for partition pruning. |
 | `GET` | `/v1/automation-test-results/by-correlation/{correlationID}/tests/{testId}` | Single test row (with stack trace). 404 when not in scope. |
+| `GET` | `/v1/diagnostics/clickhouse-schema-version` | Version of the **legacy, frozen** ClickHouse slip schema. Registered only when the ClickHouse session is available. The operational Postgres schema is owned by the `slippy-migrator` Job and is not reported here. |
 | `GET` | `/openapi.json` | Auto-generated OpenAPI 3.1 specification |
 | `GET` | `/docs` | Interactive API documentation (Stoplight Elements) |
 
@@ -461,11 +464,11 @@ docker run -p 8080:8080 \
 - **Ancestry resolution**: `SlipResolverAdapter` delegates all commit-based lookups to `slippy.Client.ResolveSlip()`. When a direct ClickHouse lookup returns `ErrSlipNotFound`, the adapter walks backwards through commit history via the GitHub GraphQL API to find an ancestor with a routing slip.
 - **Cursor pagination with composite cursor**: The `/logs` endpoint uses a `timestamp|cityHash64` composite cursor to guarantee no data loss when multiple rows share the same nanosecond timestamp. Uses `LIMIT n+1` peek to determine next-page existence without a separate COUNT query.
 - **huma v2 + humago**: Code-first API framework with auto-generated OpenAPI 3.1 spec. Uses Go's standard library `net/http.ServeMux` via the humago adapter — no Gin, no Echo.
-- **Bearer auth with constant-time comparison**: Prevents timing attacks. Operations without a `security` declaration (e.g., `/health`) pass through unauthenticated.
+- **Fail-closed bearer auth with constant-time comparison**: Constant-time token comparison prevents timing attacks. An operation that declares no `security` requirement is **rejected with 401** unless its operation ID is on the compile-time `publicOperationIDs` allowlist (currently `/health` only). The allowlist is deliberately not configurable at runtime, so the public surface cannot be widened by an environment variable, and `TestBuildHandler_EveryOperationIsSecuredOrAllowlisted` walks the generated OpenAPI document to fail the build on any route that is neither secured nor allowlisted.
 - **Cache decorator pattern**: `CachedSlipReader` wraps any `SlipReader` transparently. Caching is opt-in via environment variables and degrades gracefully if Dragonfly is unavailable.
 - **OpenTelemetry**: Full SDK initialisation with traces and metrics via OTLP (gRPC or HTTP). Every layer creates properly-parented spans that waterfall correctly in a trace viewer:
   - **HTTP** — `otelhttp.NewHandler` creates the root request span
-  - **Auth** — `auth.validateAPIKey` records scheme, operation, and outcome
+  - **Auth** — `auth.validateAPIKey` records scheme, operation, and outcome; `auth.rejectUndeclaredOperation` flags a route that declares no security requirement and is not allowlisted
   - **Handler** — `handler.*` spans capture operation parameters and results
   - **Cache** — `cache.*` spans show cache system, operation, and hit/miss status
   - **ClickHouse** — `clickhouse.*` spans record `db.system`, operation, and query parameters

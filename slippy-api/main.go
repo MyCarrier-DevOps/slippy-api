@@ -40,8 +40,8 @@ func main() {
 // buildHandler creates the fully-wired HTTP handler with auth, routes, and
 // OpenTelemetry instrumentation. This is extracted from run() for testability.
 // The imageTagReader, ciJobLogReader, automationTestResultsReader,
-// automationTestsReader, and adminHandler are optional — if nil, their endpoints
-// are not registered.
+// automationTestsReader, and diagnosticsHandler are optional — if nil, their
+// endpoints are not registered.
 func buildHandler(
 	cfg *config.Config,
 	reader domain.SlipReader,
@@ -51,7 +51,7 @@ func buildHandler(
 	automationTestResultsReader domain.AutomationTestResultsReader,
 	automationTestsReader domain.AutomationTestsReader,
 	pipelineCfg *slippy.PipelineConfig,
-	adminHandler *handler.AdminHandler,
+	diagnosticsHandler *handler.DiagnosticsHandler,
 ) http.Handler {
 	mux := http.NewServeMux()
 	apiConfig := huma.DefaultConfig("Slippy API", "1.0.0")
@@ -119,9 +119,10 @@ func buildHandler(
 		handler.RegisterWriteRoutes(v1Only, wh)
 	}
 
-	// Admin routes: v1-only (no auth required — diagnostic only).
-	if adminHandler != nil {
-		handler.RegisterAdminRoutes(v1Only, adminHandler)
+	// Diagnostic routes: v1-only. Read-only probes of the service's own datastores;
+	// they require the read key like every other read operation.
+	if diagnosticsHandler != nil {
+		handler.RegisterDiagnosticsRoutes(v1Only, diagnosticsHandler)
 	}
 
 	// Wrap with OpenTelemetry instrumentation.
@@ -315,15 +316,15 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("clickhouse config: %w", err)
 	}
-	// ClickHouse now backs only the non-slip readers (buildinfo/ciJob/autotest) and the admin
-	// diagnostic — the slip path is 100% Postgres. So a ClickHouse outage must NOT gate
+	// ClickHouse now backs only the non-slip readers (buildinfo/ciJob/autotest) and the
+	// schema-version diagnostic — the slip path is 100% Postgres. So a ClickHouse outage must NOT gate
 	// startup of a healthy slip API: log a warning and run degraded (those routes are left
 	// unregistered → 404) while the Postgres slip endpoints serve normally.
 	chConnectCtx, chConnectCancel := context.WithTimeout(context.Background(), startupConnectTimeout)
 	defer chConnectCancel()
 	chSession, chErr := clickhouse.NewClickhouseSession(chCfg, chConnectCtx)
 	if chErr != nil {
-		log.Printf("warning: clickhouse session unavailable — non-slip readers + admin run degraded: %v", chErr)
+		log.Printf("warning: clickhouse session unavailable — non-slip readers + diagnostics run degraded: %v", chErr)
 		chSession = nil
 	} else {
 		defer func() {
@@ -364,7 +365,7 @@ func run() error {
 	reader, rdb := connectCache(cfg, slipReader, redisDial)
 	defer closeRedis(rdb) // released at shutdown (no-op when caching is disabled / ping failed)
 
-	// --- ClickHouse-backed non-slip readers + admin (nil ⇒ routes skipped in degraded mode) ---
+	// --- ClickHouse-backed non-slip readers + diagnostics (nil ⇒ routes skipped in degraded mode) ---
 	// All of these query ClickHouse via the standalone session. When that session is
 	// unavailable (above), they stay nil and buildHandler leaves their routes unregistered,
 	// so the Postgres slip API keeps serving.
@@ -373,7 +374,7 @@ func run() error {
 		ciJobLogReader              domain.CIJobLogReader
 		automationTestResultsReader domain.AutomationTestResultsReader
 		automationTestsReader       domain.AutomationTestsReader
-		adminH                      *handler.AdminHandler
+		diagnosticsH                *handler.DiagnosticsHandler
 	)
 	if chSession != nil {
 		imageTagReader = infrastructure.NewBuildInfoReader(
@@ -387,7 +388,7 @@ func run() error {
 		automationTestsReader = infrastructure.NewAutomationTestsStore(
 			chSession,
 		) // autotest_results.TestResults
-		adminH = handler.NewAdminHandler(
+		diagnosticsH = handler.NewDiagnosticsHandler(
 			chSession,
 			cfg.SlipDatabase,
 		) // legacy CH schema-version diagnostic
@@ -415,7 +416,7 @@ func run() error {
 	// --- HTTP Server ---
 	otelHandler := buildHandler(
 		cfg, reader, writer, imageTagReader, ciJobLogReader,
-		automationTestResultsReader, automationTestsReader, pipelineCfg, adminH,
+		automationTestResultsReader, automationTestsReader, pipelineCfg, diagnosticsH,
 	)
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),

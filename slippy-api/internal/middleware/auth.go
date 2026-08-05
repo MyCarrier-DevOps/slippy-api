@@ -18,21 +18,50 @@ import (
 // authTracerName is the instrumentation scope for authentication operations.
 const authTracerName = "slippy-api/auth"
 
+// publicOperationIDs is the explicit allowlist of operations that may be served
+// without a credential. Authentication is fail-closed: an operation declaring no
+// Security requirement is rejected unless its OperationID appears here, so a
+// route registered without a Security declaration fails shut instead of shipping
+// world-readable.
+//
+// The allowlist is compile-time only, deliberately not sourced from config: the
+// public surface cannot be widened by an environment variable.
+//
+// The health route is registered on the ("", "/v1") group, which fans one
+// operation out to both prefixes and prefixes the versioned ID — hence two
+// entries for a single handler (see huma.PrefixModifier).
+//
+// The OpenAPI and docs routes need no entry: huma registers those on the adapter
+// directly, outside the middleware chain.
+var publicOperationIDs = map[string]struct{}{
+	"health-check":    {},
+	"v1-health-check": {},
+}
+
 // NewAPIKeyAuth returns a huma middleware that validates Bearer tokens using a
 // two-key scheme. Operations declaring "apiKey" security accept either the read
 // key or the write key. Operations declaring "writeApiKey" security accept only
 // the write key. Constant-time comparison is used for all token checks.
+//
+// Auth is fail-closed: an operation that declares no security requirement is
+// rejected with 401 unless it is named in publicOperationIDs.
 func NewAPIKeyAuth(readKey, writeKey string) func(ctx huma.Context, next func(huma.Context)) {
 	return func(ctx huma.Context, next func(huma.Context)) {
-		// Only enforce auth on operations that declare a security requirement.
-		if len(ctx.Operation().Security) == 0 {
-			next(ctx)
+		op := ctx.Operation()
+		opID := op.OperationID
+
+		// No security requirement: serve it only if it is explicitly public.
+		if len(op.Security) == 0 {
+			if IsPublicOperation(opID) {
+				next(ctx)
+				return
+			}
+			rejectUndeclaredOperation(ctx, opID)
 			return
 		}
 
 		// Start a span for the authentication check.
 		reqCtx := ctx.Context()
-		opID := ctx.Operation().OperationID
 		spanCtx, span := otel.Tracer(authTracerName).Start(reqCtx, "auth.validateAPIKey",
 			trace.WithAttributes(
 				attribute.String("auth.scheme", "bearer"),
@@ -98,6 +127,36 @@ func NewAPIKeyAuth(readKey, writeKey string) func(ctx huma.Context, next func(hu
 		span.SetStatus(codes.Ok, "")
 		next(ctx)
 	}
+}
+
+// IsPublicOperation reports whether the named operation is on the public
+// allowlist and may therefore be served without a credential. Exported so route
+// registration can be audited against the shipped policy — see the route audit
+// in main_test.go, which fails when a route declares neither Security nor an
+// allowlist entry.
+func IsPublicOperation(operationID string) bool {
+	_, ok := publicOperationIDs[operationID]
+	return ok
+}
+
+// rejectUndeclaredOperation refuses an operation that declares no security
+// requirement and is not allowlisted as public. No credential can satisfy such an
+// operation, so reaching here is a registration defect rather than a caller
+// error: it is logged at error level and traced so the misconfiguration surfaces
+// instead of being served or silently denied.
+func rejectUndeclaredOperation(ctx huma.Context, opID string) {
+	spanCtx, span := otel.Tracer(authTracerName).Start(ctx.Context(), "auth.rejectUndeclaredOperation",
+		trace.WithAttributes(
+			attribute.String("auth.operation", opID),
+			attribute.String("auth.result", "not_allowlisted"),
+		),
+	)
+	defer span.End()
+
+	span.SetStatus(codes.Error, "operation declares no security requirement and is not allowlisted as public")
+	slog.ErrorContext(spanCtx, "auth: rejecting operation that declares no security requirement",
+		"operation", opID, "result", "not_allowlisted")
+	writeError(ctx, http.StatusUnauthorized, "authentication required")
 }
 
 // requiresWriteAccess returns true if the operation declares a "writeApiKey"

@@ -40,7 +40,7 @@ slippy-api/
 │       │   ├── slip_handler.go          # Slip query routes (4 operations)
 │       │   ├── image_tag_handler.go     # Image tag resolution route
 │       │   └── ci_job_log_handler.go    # CI job log route with pagination
-│       ├── middleware/auth.go           # Bearer token authentication
+│       ├── middleware/auth.go           # Bearer token authentication (fail-closed + public allowlist)
 │       ├── telemetry/telemetry.go       # OpenTelemetry SDK init
 │       └── e2e/e2e_test.go             # End-to-end tests with testcontainers
 └── slippy-client/                       # Auto-generated Go client library
@@ -67,7 +67,9 @@ slippy-api/
 
 ## 3. API Endpoints
 
-Read endpoints require `SLIPPY_API_KEY` (or `SLIPPY_WRITE_API_KEY`). Write endpoints require `SLIPPY_WRITE_API_KEY` only. Public endpoints (`/health`, `/docs`, `/openapi.json`) require no auth.
+Read endpoints require `SLIPPY_API_KEY` (or `SLIPPY_WRITE_API_KEY`). Write endpoints require `SLIPPY_WRITE_API_KEY` only.
+
+Auth is **fail-closed**. An operation that declares no `Security` requirement is rejected with `401` unless its operation ID is on the compile-time `publicOperationIDs` allowlist in `internal/middleware/auth.go` — currently `health-check` and `v1-health-check` only. `/docs` and `/openapi.json` are served outside the middleware chain (huma registers them on the adapter directly) and so need no allowlist entry. The route audit in `main_test.go` walks the generated OpenAPI document and fails the build on any operation that is neither secured nor allowlisted, so a route cannot ship unauthenticated by omission.
 
 ### Read Endpoints (legacy + /v1)
 
