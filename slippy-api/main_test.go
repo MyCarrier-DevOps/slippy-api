@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -133,7 +135,8 @@ func TestBuildHandler_HealthEndpoint(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
+	h, err := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
+	require.NoError(t, err)
 	require.NotNil(t, h)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -151,7 +154,8 @@ func TestBuildHandler_AuthRequired(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
+	h, err := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
+	require.NoError(t, err)
 
 	// Request without auth header should be rejected
 	req := httptest.NewRequest(http.MethodGet, "/slips/test-corr-001", nil)
@@ -164,7 +168,8 @@ func TestBuildHandler_AuthSuccess(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
+	h, err := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
+	require.NoError(t, err)
 
 	// Request with valid auth header should succeed
 	req := httptest.NewRequest(http.MethodGet, "/slips/test-corr-001", nil)
@@ -182,7 +187,8 @@ func TestBuildHandler_OpenAPISpec(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
+	h, err := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
+	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
 	w := httptest.NewRecorder()
@@ -204,7 +210,8 @@ func TestBuildHandler_V1HealthEndpoint(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
+	h, err := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
+	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
 	w := httptest.NewRecorder()
@@ -221,7 +228,8 @@ func TestBuildHandler_V1AuthRequired(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
+	h, err := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
+	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/slips/test-corr-001", nil)
 	w := httptest.NewRecorder()
@@ -233,7 +241,8 @@ func TestBuildHandler_V1AuthSuccess(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
+	h, err := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
+	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/slips/test-corr-001", nil)
 	req.Header.Set("Authorization", "Bearer test-key")
@@ -250,7 +259,8 @@ func TestBuildHandler_OpenAPISpecContainsV1Routes(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
+	h, err := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
+	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
 	w := httptest.NewRecorder()
@@ -268,6 +278,79 @@ func TestBuildHandler_OpenAPISpecContainsV1Routes(t *testing.T) {
 	assert.Contains(t, paths, "/v1/health")
 	assert.Contains(t, paths, "/slips/{correlationID}")
 	assert.Contains(t, paths, "/v1/slips/{correlationID}")
+}
+
+// --- Startup route-security guard ---
+
+// TestVerifyRouteSecurity covers the boot-time guard directly, with routes
+// buildHandler cannot be made to register.
+//
+// The guard exists because the equivalent CI assertion can be bypassed: the branch
+// ruleset requires the unit-test check on main but carries bypass actors with
+// bypass_mode "always". The failure it prevents is an in-place path rename that leaves
+// publicRoutes pointing at the old path — the renamed health routes are registered,
+// declare no Security, and are not allowlisted, so they 401 to kubelet's liveness and
+// readiness probes on every replica at once.
+func TestVerifyRouteSecurity(t *testing.T) {
+	newTestAPI := func(t *testing.T, op huma.Operation) huma.API {
+		t.Helper()
+		api := humago.New(http.NewServeMux(), huma.DefaultConfig("Test", "1.0.0"))
+		huma.Register(api, op, func(_ context.Context, _ *struct{}) (*struct{ Body string }, error) {
+			return &struct{ Body string }{Body: "ok"}, nil
+		})
+		return api
+	}
+
+	t.Run("allowlisted route passes", func(t *testing.T) {
+		api := newTestAPI(t, huma.Operation{
+			OperationID: "health-check", Method: http.MethodGet, Path: "/health",
+		})
+		assert.NoError(t, verifyRouteSecurity(api))
+	})
+
+	t.Run("secured route passes", func(t *testing.T) {
+		api := newTestAPI(t, huma.Operation{
+			OperationID: "get-thing", Method: http.MethodGet, Path: "/thing",
+			Security: []map[string][]string{{"apiKey": {}}},
+		})
+		assert.NoError(t, verifyRouteSecurity(api))
+	})
+
+	t.Run("renamed health route fails", func(t *testing.T) {
+		// The exact shape the guard exists for: allowlist still says /health.
+		api := newTestAPI(t, huma.Operation{
+			OperationID: "health-check", Method: http.MethodGet, Path: "/healthz",
+		})
+		err := verifyRouteSecurity(api)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "GET /healthz")
+		assert.Contains(t, err.Error(), "publicRoutes")
+	})
+
+	t.Run("optional security is not a credential requirement", func(t *testing.T) {
+		api := newTestAPI(t, huma.Operation{
+			OperationID: "get-optional", Method: http.MethodGet, Path: "/optional",
+			Security: []map[string][]string{{}},
+		})
+		err := verifyRouteSecurity(api)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "GET /optional")
+	})
+
+	t.Run("non-GET verbs are walked", func(t *testing.T) {
+		api := newTestAPI(t, huma.Operation{
+			OperationID: "post-thing", Method: http.MethodPost, Path: "/thing",
+		})
+		err := verifyRouteSecurity(api)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "POST /thing")
+	})
+}
+
+// TestBuildHandler_PassesStartupRouteSecurityGuard proves the guard is actually wired
+// into buildHandler for the shipped route set, not merely defined.
+func TestBuildHandler_PassesStartupRouteSecurityGuard(t *testing.T) {
+	require.NotNil(t, buildFullyWiredHandler(t))
 }
 
 // --- Route security audit ---
@@ -315,7 +398,7 @@ func buildFullyWiredHandler(t *testing.T) http.Handler {
 	t.Helper()
 
 	cfg := &config.Config{APIKey: "test-key", WriteAPIKey: "write-key", Port: 8080}
-	h := buildHandler(
+	h, err := buildHandler(
 		cfg,
 		newStubSlipReader(),
 		&stubSlipWriter{},
@@ -326,6 +409,7 @@ func buildFullyWiredHandler(t *testing.T) http.Handler {
 		nil,
 		handler.NewDiagnosticsHandler(mockClickHouseSession(), "slippy"),
 	)
+	require.NoError(t, err)
 	require.NotNil(t, h)
 	return h
 }
@@ -339,6 +423,116 @@ func buildFullyWiredHandler(t *testing.T) http.Handler {
 // which is outside DEVOPS-217 — but it must not be able to grow silently, so the
 // exclusion is named here and asserted in both directions.
 var operationsExcludedFromPublishedSpec = []string{"get-clickhouse-schema-version"}
+
+// Access tiers an operation can be served at, as enforced by the middleware.
+const (
+	tierPublic = "public" // no credential; must also be in middleware.PublicRoutes()
+	tierRead   = "read"   // apiKey — either key accepted
+	tierWrite  = "write"  // writeApiKey — write key only
+)
+
+// operationTiers is the tier every audited operation must be served at.
+//
+// The middleware tiers on scheme names, and `apiKey` is a *known* name — so an
+// operation that should be write-tier but declares apiKeySecurity is served at the
+// read tier by design, and every other assertion in the audit passes: the declaration
+// is non-empty, the requirement is non-empty, and the scheme is in the document. That
+// is the likelier mistake of the two, because slip_write_handler.go carries eight
+// hand-written writeApiKeySecurity registrations and apiKeySecurity is exported from
+// a sibling file in the same package, so a copy-pasted block compiles, lints, passes,
+// and publishes a spec saying the read key may mutate.
+//
+// The table is COMPLETE and checked both ways on purpose. A write-only list would
+// catch a demotion but not a brand-new mutation that was never added to it, since the
+// forward direction has no assertion for an unlisted operation and the reverse passes
+// while every listed row still resolves. Listing the read tier too is what makes it
+// self-maintaining, and it also catches the availability-direction mistake
+// requiresWriteKey warns about — adding a second requirement to a working read route
+// silently turns it 403.
+//
+// Tiers are never inferred from the HTTP method: find-by-commits and
+// find-all-by-commits are read-tier POSTs.
+var operationTiers = map[string]string{
+	"health-check":    tierPublic,
+	"v1-health-check": tierPublic,
+
+	"get-slip":                                     tierRead,
+	"v1-get-slip":                                  tierRead,
+	"get-slip-by-commit":                           tierRead,
+	"v1-get-slip-by-commit":                        tierRead,
+	"find-by-commits":                              tierRead,
+	"v1-find-by-commits":                           tierRead,
+	"find-all-by-commits":                          tierRead,
+	"v1-find-all-by-commits":                       tierRead,
+	"get-image-tags":                               tierRead,
+	"v1-get-image-tags":                            tierRead,
+	"get-logs":                                     tierRead,
+	"v1-get-logs":                                  tierRead,
+	"get-pipeline-config":                          tierRead,
+	"get-step-prerequisites":                       tierRead,
+	"get-automation-test-results":                  tierRead,
+	"get-automation-test-results-tests":            tierRead,
+	"get-automation-test-result-by-id-correlation": tierRead,
+	"get-clickhouse-schema-version":                tierRead,
+
+	"create-slip":   tierWrite,
+	"start-step":    tierWrite,
+	"complete-step": tierWrite,
+	"fail-step":     tierWrite,
+	"skip-step":     tierWrite,
+	"set-image-tag": tierWrite,
+	"promote-slip":  tierWrite,
+	"abandon-slip":  tierWrite,
+}
+
+// assertOperationTier checks an operation's declared security against the tier
+// operationTiers says it must be served at. Called for every audited operation,
+// including credential-free ones, so a new route cannot skip the table.
+func assertOperationTier(t *testing.T, method, path, opID string, security []any) {
+	t.Helper()
+
+	route := strings.ToUpper(method) + " " + path
+	wantTier, listed := operationTiers[opID]
+	if !assert.True(t, listed,
+		"%s (operationId %q) is not in operationTiers. Every operation must declare its tier "+
+			"there, so a new route cannot inherit one by accident.", route, opID) {
+		return
+	}
+
+	if wantTier == tierPublic {
+		assert.Empty(t, security,
+			"%s (operationId %q) is public in operationTiers but declares security %v.",
+			route, opID, security)
+		assert.True(t, middleware.IsPublicRoute(method, path),
+			"%s (operationId %q) is public in operationTiers but is not in publicRoutes, so it "+
+				"would be rejected with 401.", route, opID)
+		return
+	}
+
+	if !assert.NotEmpty(t, security,
+		"%s (operationId %q) is %s-tier in operationTiers but declares no security requirement.",
+		route, opID, wantTier) {
+		return
+	}
+
+	for _, requirementAny := range security {
+		requirement, ok := requirementAny.(map[string]any)
+		require.True(t, ok, "%s security requirement", route)
+
+		switch wantTier {
+		case tierWrite:
+			assert.Contains(t, requirement, "writeApiKey",
+				"%s (operationId %q) is write-tier but declares %v — requiresWriteKey serves an "+
+					"all-apiKey declaration at the read tier, so SLIPPY_API_KEY would be accepted "+
+					"for a write.", route, opID, requirement)
+		case tierRead:
+			assert.Equal(t, map[string]any{"apiKey": []any{}}, requirement,
+				"%s (operationId %q) is read-tier but declares %v — anything other than exactly "+
+					"apiKey escalates to the write tier, so read callers get 403.",
+				route, opID, requirement)
+		}
+	}
+}
 
 // TestBuildHandler_EveryOperationIsSecuredOrAllowlisted is the registration-time
 // half of fail-closed auth (DEVOPS-217). The middleware rejects any operation that
@@ -396,6 +590,8 @@ func TestBuildHandler_EveryOperationIsSecuredOrAllowlisted(t *testing.T) {
 			seenRoutes[strings.ToUpper(method)+" "+path] = struct{}{}
 
 			security, _ := op["security"].([]any)
+			assertOperationTier(t, method, path, opID, security)
+
 			if len(security) == 0 {
 				assert.True(t, middleware.IsPublicRoute(method, path),
 					"%s %s (operationId %q) declares no security requirement and is not on the public "+
@@ -426,6 +622,13 @@ func TestBuildHandler_EveryOperationIsSecuredOrAllowlisted(t *testing.T) {
 				}
 			}
 		}
+	}
+
+	// operationTiers must not outlive its routes either.
+	for opID := range operationTiers {
+		assert.Contains(t, seenOps, opID,
+			"operationTiers names %q, but no registered operation has that ID. Remove the stale row "+
+				"or restore the route.", opID)
 	}
 
 	// The reverse direction, which a forward-only walk cannot check: every allowlist
@@ -501,6 +704,73 @@ func TestBuildHandler_CredentialFreeAdapterRoutes(t *testing.T) {
 	}
 }
 
+// recordingMux captures the patterns registered on the router so a test can compare
+// what was actually registered against what the OpenAPI document describes.
+type recordingMux struct {
+	*http.ServeMux
+	patterns []string
+}
+
+func (m *recordingMux) HandleFunc(pattern string, h func(http.ResponseWriter, *http.Request)) {
+	m.patterns = append(m.patterns, pattern)
+	m.ServeMux.HandleFunc(pattern, h)
+}
+
+// TestBuildHandler_CredentialFreeSurfaceIsClosed asserts the credential-free surface
+// is exactly six routes — not that six named routes exist.
+//
+// The distinction matters because the count is a property of the huma version, not of
+// this repository: NewAPI registers its middleware-free routes gated on OpenAPIPath,
+// DocsPath and SchemasPath, and a dependency bump could add a seventh.
+// TestBuildHandler_CredentialFreeAdapterRoutes iterates a fixed list, so a route
+// outside that list is invisible to it, and README and docs/architecture.md both lean
+// on this being a closed set.
+//
+// Taking the set difference between registered mux patterns and documented operations
+// is order-independent, so it catches a new route wherever huma registers it. It also
+// covers the audit's acknowledged Hidden blind spot: a Hidden operation registers on
+// the router but never enters the document, so it lands in this difference.
+func TestBuildHandler_CredentialFreeSurfaceIsClosed(t *testing.T) {
+	rec := &recordingMux{ServeMux: http.NewServeMux()}
+	original := newServeMux
+	newServeMux = func() humago.Mux { return rec }
+	t.Cleanup(func() { newServeMux = original })
+
+	h := buildFullyWiredHandler(t)
+
+	documented := map[string]struct{}{}
+	paths, ok := fetchOpenAPISpec(t, h)["paths"].(map[string]any)
+	require.True(t, ok)
+	for path, methodsAny := range paths {
+		methods, ok := methodsAny.(map[string]any)
+		require.True(t, ok)
+		for method := range methods {
+			documented[strings.ToUpper(method)+" "+path] = struct{}{}
+		}
+	}
+
+	var credentialFree []string
+	for _, pattern := range rec.patterns {
+		if _, isOperation := documented[pattern]; !isOperation {
+			credentialFree = append(credentialFree, pattern)
+		}
+	}
+	slices.Sort(credentialFree)
+
+	assert.Equal(t, []string{
+		"GET /docs",
+		"GET /openapi-3.0.json",
+		"GET /openapi-3.0.yaml",
+		"GET /openapi.json",
+		"GET /openapi.yaml",
+		"GET /schemas/{schema}",
+	}, credentialFree,
+		"the set of routes registered outside the OpenAPI document changed. Anything new here is "+
+			"served with no credential (huma registers it on the adapter, bypassing the middleware) "+
+			"or is a Hidden operation the route audit cannot see. Update README.md and "+
+			"docs/architecture.md if this is intended.")
+}
+
 // TestGenerateOpenAPISpec_PublishedSurfaceMatchesAudited pins the deliberate gap
 // between the audited route surface and the published contract.
 //
@@ -512,7 +782,7 @@ func TestBuildHandler_CredentialFreeAdapterRoutes(t *testing.T) {
 // both directions — so a second omission cannot slip in unnoticed.
 func TestGenerateOpenAPISpec_PublishedSurfaceMatchesAudited(t *testing.T) {
 	audited := operationIDs(t, fetchOpenAPISpec(t, buildFullyWiredHandler(t)))
-	published := operationIDs(t, fetchOpenAPISpec(t, buildSpecGenerationHandler()))
+	published := operationIDs(t, fetchOpenAPISpec(t, buildSpecGenerationHandler(t)))
 
 	for _, opID := range operationsExcludedFromPublishedSpec {
 		assert.Contains(t, audited, opID, "excluded operation %q should still be audited", opID)
@@ -646,7 +916,7 @@ func TestBuildHandler_WithAllOptionalHandlers(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", WriteAPIKey: "write-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h := buildHandler(
+	h, err := buildHandler(
 		cfg,
 		reader,
 		&stubSlipWriter{},
@@ -657,6 +927,7 @@ func TestBuildHandler_WithAllOptionalHandlers(t *testing.T) {
 		nil,
 		nil,
 	)
+	require.NoError(t, err)
 	require.NotNil(t, h)
 
 	// The OpenAPI spec should now contain paths registered via each optional handler.
@@ -707,9 +978,11 @@ func TestBuildHandler_WithAllOptionalHandlers(t *testing.T) {
 // audited surface minus operationsExcludedFromPublishedSpec. Keep the two in step
 // through that list — TestGenerateOpenAPISpec_PublishedSurfaceMatchesAudited asserts
 // the difference is exactly what is named there.
-func buildSpecGenerationHandler() http.Handler {
+func buildSpecGenerationHandler(t *testing.T) http.Handler {
+	t.Helper()
+
 	cfg := &config.Config{APIKey: "dummy", Port: 8080}
-	return buildHandler(
+	h, err := buildHandler(
 		cfg,
 		newStubSlipReader(),
 		&stubSlipWriter{},
@@ -720,6 +993,8 @@ func buildSpecGenerationHandler() http.Handler {
 		nil,
 		nil,
 	)
+	require.NoError(t, err)
+	return h
 }
 
 func TestGenerateOpenAPISpec(t *testing.T) {
@@ -727,7 +1002,7 @@ func TestGenerateOpenAPISpec(t *testing.T) {
 		t.Skip("set GENERATE_SPEC=1 to regenerate OpenAPI spec files")
 	}
 
-	h := buildSpecGenerationHandler()
+	h := buildSpecGenerationHandler(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
 	w := httptest.NewRecorder()

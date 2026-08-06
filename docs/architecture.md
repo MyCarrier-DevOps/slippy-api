@@ -75,7 +75,11 @@ Auth is **fail-closed**. An operation that requires no credential is rejected wi
 
 Six further routes are served with no credential and are **not** allowlisted, because huma registers them on the adapter directly and they never reach the middleware: `/openapi.json`, `/openapi-3.0.json`, `/openapi.yaml`, `/openapi-3.0.yaml`, `/docs`, `/schemas/{schema}`. `TestBuildHandler_CredentialFreeAdapterRoutes` pins that set.
 
-The route audit in `main_test.go` walks the generated OpenAPI document and fails the build on any operation that is neither secured nor allowlisted, on any allowlist entry that matches no route, and on any security declaration the middleware cannot enforce. Its blind spots are `Hidden` operations and routes behind config branches the test fixture does not enable — both still subject to the middleware at runtime, so omission is fail-closed rather than fail-open.
+The route audit in `main_test.go` walks the generated OpenAPI document and fails the build on any operation that is neither secured nor allowlisted, on any allowlist entry that matches no route, on any security declaration the middleware cannot enforce, and on any operation whose declared scheme does not match the tier `operationTiers` says it must be served at. That last check is what catches a mutating route declaring `apiKeySecurity` — `apiKey` is a *known* scheme, so the middleware serves it at the read tier by design and every other assertion passes.
+
+`buildHandler` repeats the "secured or allowlisted" half of that audit at startup and returns an error, so the process refuses to boot rather than serving 401s. The CI assertion alone is not enough: the branch ruleset requires the unit-test check but carries bypass actors with `bypass_mode: always`. The shape it guards against is an in-place path rename that leaves `publicRoutes` pointing at the old path, which 401s liveness *and* readiness on every replica simultaneously; a boot failure instead leaves the previous ReplicaSet serving.
+
+The audit's blind spots are `Hidden` operations and routes behind config branches the test fixture does not enable — both still subject to the middleware at runtime, so omission is fail-closed rather than fail-open. `TestBuildHandler_CredentialFreeSurfaceIsClosed` covers the first by set-differencing the registered mux patterns against the documented operations, which also detects a huma upgrade adding a seventh adapter route.
 
 ### Read Endpoints (legacy + /v1)
 
@@ -304,7 +308,7 @@ main() → run()
   - Read operations (`apiKey` only): either key accepted
   - Missing/malformed token → `401 Unauthorized`
   - Invalid token → `403 Forbidden`
-  - Every error response carries `Content-Type: application/json` and `X-Content-Type-Options: nosniff`; `writeError` sets headers before the status because humago's `SetStatus` flushes the header block immediately
+  - Every error response carries `Content-Type: application/problem+json` — matching what the generated spec declares for every operation's default response, and what huma emits for the errors it handles itself — plus `X-Content-Type-Options: nosniff`. `writeError` sets headers before the status because humago's `SetStatus` flushes the header block immediately
 - **OTel**: Span with `auth.result` and `auth.access_level` (`"read"` or `"write"`) attributes
 
 ---

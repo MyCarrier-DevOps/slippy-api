@@ -72,7 +72,7 @@ func NewAPIKeyAuth(readKey, writeKey string) func(ctx huma.Context, next func(hu
 		opID := op.OperationID
 
 		// Requires no credential: serve it only if the route is explicitly public.
-		if !requiresCredential(op) {
+		if !RequiresCredential(op) {
 			if IsPublicRoute(op.Method, op.Path) {
 				next(ctx)
 				return
@@ -211,7 +211,7 @@ func rejectUndeclaredOperation(ctx huma.Context, op *huma.Operation) {
 	writeError(ctx, http.StatusUnauthorized, "authentication required")
 }
 
-// requiresCredential reports whether the operation demands a credential at all.
+// RequiresCredential reports whether the operation demands a credential at all.
 //
 // An empty Security list is the syntactic form of "no security". A list containing an
 // empty requirement object ({}) is the semantic form: OpenAPI reads {} as "security
@@ -220,7 +220,10 @@ func rejectUndeclaredOperation(ctx huma.Context, op *huma.Operation) {
 // route around the fail-closed default entirely — past the allowlist, into the read
 // tier, with no error log and no rejection span — while the equivalent
 // `Security: []` is refused. Both are treated as requiring no credential.
-func requiresCredential(op *huma.Operation) bool {
+//
+// Exported so the startup route check in main.go applies the same predicate the
+// middleware enforces at request time, rather than reimplementing it.
+func RequiresCredential(op *huma.Operation) bool {
 	if len(op.Security) == 0 {
 		return false
 	}
@@ -267,7 +270,18 @@ func routeKey(method, path string) string {
 	return strings.ToUpper(method) + " " + path
 }
 
-// writeError writes a JSON error response without needing the huma.API reference.
+// errorContentType is the media type of every error this middleware writes.
+//
+// It matches what the generated OpenAPI document declares for the default (error)
+// response of every operation, and what huma itself emits for the errors it handles
+// (validation failures, unknown routes). A generated client dispatching on media
+// type — slippy-client is generated from exactly that document — would otherwise
+// see an undeclared type on the two most common errors an API emits, missing and
+// wrong credentials. The body already validates as an ErrorModel, which declares no
+// required fields, so only the header needed correcting.
+const errorContentType = "application/problem+json"
+
+// writeError writes an error response without needing the huma.API reference.
 //
 // Headers are set BEFORE the status, and the order is load-bearing: humago's
 // SetStatus calls http.ResponseWriter.WriteHeader immediately, which flushes the
@@ -275,7 +289,7 @@ func routeKey(method, path string) string {
 // Content-Type second — as this did originally — meant every auth response went out
 // content-sniffed as text/plain despite carrying a JSON body.
 func writeError(ctx huma.Context, status int, msg string) {
-	ctx.SetHeader("Content-Type", "application/json")
+	ctx.SetHeader("Content-Type", errorContentType)
 	ctx.SetHeader("X-Content-Type-Options", "nosniff")
 	ctx.SetStatus(status)
 	body := fmt.Sprintf(`{"status":%d,"title":%q}`, status, msg)

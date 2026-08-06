@@ -11,12 +11,17 @@ lint: install-tools
 	@for dir in $(MODULES); do \
 		if [ -d "$$dir" ]; then \
 			echo "Linting $$dir module..."; \
-			(cd $$dir && go mod tidy && golangci-lint run --config ../.github/.golangci.yml --timeout 5m ./...); \
+			(cd $$dir && go mod tidy && golangci-lint run --config ../.github/.golangci.yml --timeout 5m ./...) || exit 1; \
 		else \
 			echo "Directory $$dir not found, skipping..."; \
 		fi; \
 	done
 
+# NOTE: the `|| exit 1` on each module is load-bearing. Without it the recipe's exit
+# status is whatever the LAST module returned, so a slippy-api failure was masked by a
+# passing slippy-migrator and `make test` exited 0 with a red suite. CLAUDE.md names
+# `make lint && make test` the final gate before commit, so a masked failure defeats
+# the gate. CI is unaffected (per-module matrix in .github/workflows/ci.yaml).
 .PHONY: test
 test:
 	@echo "Testing all modules..."
@@ -24,7 +29,7 @@ test:
 		if [ -d "$$dir" ]; then \
 			if [ "$$dir" != "slippy-client" ]; then \
 				echo "Testing $$dir module..."; \
-				(cd $$dir && go mod download && go test -cover -coverprofile=coverage.out ./... && go tool cover -func coverage.out ); \
+				(cd $$dir && go mod download && go test -cover -coverprofile=coverage.out ./... && go tool cover -func coverage.out ) || exit 1; \
 			fi; \
 		else \
 			echo "Directory $$dir not found, skipping..."; \
@@ -49,7 +54,7 @@ fmt: install-tools
 	@for dir in $(MODULES); do \
 		if [ -d "$$dir" ]; then \
 			echo "Formatting $$dir module..."; \
-			(cd $$dir && golangci-lint fmt --config ../.github/.golangci.yml ./...); \
+			(cd $$dir && golangci-lint fmt --config ../.github/.golangci.yml ./...) || exit 1; \
 		else \
 			echo "Directory $$dir not found, skipping..."; \
 		fi; \

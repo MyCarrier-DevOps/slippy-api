@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -37,11 +39,68 @@ func main() {
 	}
 }
 
+// newServeMux builds the router buildHandler registers on. Extracted as a variable —
+// the same seam redisDial uses below — so a test can substitute a recording mux and
+// observe the routes huma registers straight on the adapter, outside the middleware
+// chain. Those never enter the OpenAPI document, so there is no other way to
+// enumerate them.
+var newServeMux = func() humago.Mux { return http.NewServeMux() }
+
+// verifyRouteSecurity reports an error when a registered operation neither requires a
+// credential nor is allowlisted as public.
+//
+// This is the same assertion the route audit makes in main_test.go, moved to process
+// startup so it cannot be routed around. The repository's branch ruleset does require
+// the unit-test check on main, but it also carries bypass actors with bypass_mode
+// "always", so a red test is one deliberate merge away from not applying. The failure
+// it guards against is an in-place path rename that keeps the allowlist pointing at
+// the old path: the renamed routes are registered, declare no Security, and are not
+// allowlisted, so they 401 — including kubelet's liveness and readiness probes, on
+// every replica, simultaneously. Refusing to start turns that into a deployment that
+// never rolls out, which leaves the previous ReplicaSet serving.
+//
+// (Dropping a prefix instead is harmless here: the route is de-registered from the mux
+// entirely, so requests 404 and the middleware never runs.)
+//
+// This walks the OpenAPI document, so it shares that document's blind spot for
+// operations marked Hidden. Those are still enforced by the middleware at runtime.
+func verifyRouteSecurity(api huma.API) error {
+	var undeclared []string
+	for path, item := range api.OpenAPI().Paths {
+		// PathItem has no operation iterator, so the verbs are enumerated explicitly.
+		for _, op := range []*huma.Operation{
+			item.Get, item.Put, item.Post, item.Delete,
+			item.Options, item.Head, item.Patch, item.Trace,
+		} {
+			if op == nil {
+				continue
+			}
+			if middleware.RequiresCredential(op) || middleware.IsPublicRoute(op.Method, op.Path) {
+				continue
+			}
+			undeclared = append(undeclared,
+				fmt.Sprintf("%s %s (operationId %q)", strings.ToUpper(op.Method), path, op.OperationID))
+		}
+	}
+	if len(undeclared) == 0 {
+		return nil
+	}
+	sort.Strings(undeclared)
+	return fmt.Errorf(
+		"refusing to start: %d route(s) require no credential and are not in publicRoutes, so they "+
+			"would return 401 to every caller: %s — declare Security on the operation, or add the "+
+			"route to publicRoutes in internal/middleware/auth.go",
+		len(undeclared), strings.Join(undeclared, ", "))
+}
+
 // buildHandler creates the fully-wired HTTP handler with auth, routes, and
 // OpenTelemetry instrumentation. This is extracted from run() for testability.
 // The imageTagReader, ciJobLogReader, automationTestResultsReader,
 // automationTestsReader, and diagnosticsHandler are optional — if nil, their
 // endpoints are not registered.
+//
+// It returns an error when the registered routes fail verifyRouteSecurity, so a
+// wiring mistake stops the process at boot instead of serving 401s.
 func buildHandler(
 	cfg *config.Config,
 	reader domain.SlipReader,
@@ -52,8 +111,8 @@ func buildHandler(
 	automationTestsReader domain.AutomationTestsReader,
 	pipelineCfg *slippy.PipelineConfig,
 	diagnosticsHandler *handler.DiagnosticsHandler,
-) http.Handler {
-	mux := http.NewServeMux()
+) (http.Handler, error) {
+	mux := newServeMux()
 	apiConfig := huma.DefaultConfig("Slippy API", "1.0.0")
 	apiConfig.Info.Description = "API for CI/CD routing slips"
 
@@ -125,8 +184,14 @@ func buildHandler(
 		handler.RegisterDiagnosticsRoutes(v1Only, diagnosticsHandler)
 	}
 
+	// Fail the wiring rather than the requests: a route that requires no credential
+	// and is not allowlisted would 401 for everyone, health probes included.
+	if err := verifyRouteSecurity(api); err != nil {
+		return nil, err
+	}
+
 	// Wrap with OpenTelemetry instrumentation.
-	return otelhttp.NewHandler(mux, "slippy-api")
+	return otelhttp.NewHandler(mux, "slippy-api"), nil
 }
 
 // redisDial is the default factory for creating Redis clients.
@@ -414,10 +479,13 @@ func run() error {
 	log.Printf("write endpoints enabled")
 
 	// --- HTTP Server ---
-	otelHandler := buildHandler(
+	otelHandler, err := buildHandler(
 		cfg, reader, writer, imageTagReader, ciJobLogReader,
 		automationTestResultsReader, automationTestsReader, pipelineCfg, diagnosticsH,
 	)
+	if err != nil {
+		return err
+	}
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
 		Handler:           otelHandler,

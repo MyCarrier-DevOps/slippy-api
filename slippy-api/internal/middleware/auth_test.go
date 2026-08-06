@@ -535,7 +535,7 @@ func TestRequiresCredential(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			op := &huma.Operation{Security: tt.security}
-			assert.Equal(t, tt.expected, requiresCredential(op))
+			assert.Equal(t, tt.expected, RequiresCredential(op))
 		})
 	}
 }
@@ -571,9 +571,16 @@ func TestRequiresWriteKey(t *testing.T) {
 // against a real server rather than a recorder.
 //
 // httptest.NewRecorder cannot catch this class of bug: it records header mutations
-// after WriteHeader, so a recorder shows "application/json" even when the wire does
-// not. humago's SetStatus calls WriteHeader immediately, so header order in
-// writeError is load-bearing and only an actual HTTP round trip proves it.
+// made after WriteHeader, so a recorder reports the intended media type even when
+// the wire carries a sniffed text/plain. humago's SetStatus calls WriteHeader
+// immediately, so header order in writeError is load-bearing and only an actual HTTP
+// round trip proves it.
+//
+// The value must stay application/problem+json: that is what the generated OpenAPI
+// document declares for the default response of every operation, and what huma emits
+// for the errors it handles itself. Missing and wrong credentials are the two most
+// common errors this API returns, so they are the worst ones to have contradict the
+// published contract.
 func TestAuthMiddleware_ErrorResponseContentType(t *testing.T) {
 	srv := httptest.NewServer(setupAuthTestAPI("read-key", "write-key"))
 	defer srv.Close()
@@ -601,7 +608,7 @@ func TestAuthMiddleware_ErrorResponseContentType(t *testing.T) {
 			defer func() { require.NoError(t, resp.Body.Close()) }()
 
 			assert.Equal(t, tt.wantStatus, resp.StatusCode)
-			assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+			assert.Equal(t, "application/problem+json", resp.Header.Get("Content-Type"))
 			assert.Equal(t, "nosniff", resp.Header.Get("X-Content-Type-Options"))
 
 			body, err := io.ReadAll(resp.Body)
@@ -664,7 +671,7 @@ func TestWriteError_BodyWriterFailure(t *testing.T) {
 	ctx := &stubHumaContext{}
 	writeError(ctx, http.StatusForbidden, "forbidden")
 	assert.Equal(t, http.StatusForbidden, ctx.statusSet)
-	assert.Equal(t, "application/json", ctx.headers["Content-Type"])
+	assert.Equal(t, "application/problem+json", ctx.headers["Content-Type"])
 }
 
 // --- extractBearerToken ---
