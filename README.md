@@ -36,15 +36,22 @@ The application follows Clean Architecture with clear dependency boundaries:
 
 ## API Endpoints
 
-All endpoints except `/health`, `/openapi.json`, and `/docs` require a `Bearer` token in the `Authorization` header.
+Every endpoint requires a `Bearer` token in the `Authorization` header except these eight, which are served with no credential:
 
-Authentication is **fail-closed**: the middleware rejects any operation that declares no security requirement unless its operation ID appears in the `publicOperationIDs` allowlist in [`internal/middleware/auth.go`](slippy-api/internal/middleware/auth.go). A new route that forgets its `Security` declaration returns `401` rather than shipping world-readable, and the route audit in `main_test.go` fails the build for it. `/openapi.json` and `/docs` need no allowlist entry — huma registers those on the adapter directly, outside the middleware chain.
+| Route | Why it needs no credential |
+|---|---|
+| `GET /health`, `GET /v1/health` | Allowlisted in `publicRoutes` (below). Two routes, one handler — the `("", "/v1")` fan-out group registers the probe on both prefixes. |
+| `GET /openapi.json`, `/openapi-3.0.json`, `/openapi.yaml`, `/openapi-3.0.yaml`, `/docs`, `/schemas/{schema}` | huma registers these on the adapter directly, outside the middleware chain, so they are not allowlisted — they never reach the middleware at all. All six come from `huma.DefaultConfig`. |
+
+Authentication is **fail-closed**: the middleware rejects any operation that requires no credential unless its route appears in the `publicRoutes` allowlist in [`internal/middleware/auth.go`](slippy-api/internal/middleware/auth.go). A route that forgets its `Security` declaration returns `401` rather than shipping world-readable, and the route audit in `main_test.go` fails the build for it.
+
+Two limits on that audit are worth knowing, and they differ in kind. It walks the OpenAPI document built by a fully-wired test fixture, so it does not **build-check** operations marked `Hidden` (huma omits those from the document) or routes behind a config branch the fixture does not enable — but those are still subject to the middleware at runtime, so an omission there fails closed with a `401`, not open. Only the six adapter routes above genuinely **bypass** auth, and they are pinned by `TestBuildHandler_CredentialFreeAdapterRoutes`.
 
 ### Read Endpoints
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/health` | Health check (no auth required — the only allowlisted public operation). Returns `{"status":"ok"}` |
+| `GET` | `/health` | Health check (no auth required; allowlisted on both `/health` and `/v1/health`). Returns `{"status":"ok"}` |
 | `GET` | `/slips/{correlationID}` | Get a routing slip by its correlation ID |
 | `GET` | `/slips/by-commit/{owner}/{repo}/{commitSHA}` | Get a routing slip by repository and commit SHA |
 | `POST` | `/slips/find-by-commits` | Find the first matching slip for an ordered list of commits |
@@ -464,7 +471,8 @@ docker run -p 8080:8080 \
 - **Ancestry resolution**: `SlipResolverAdapter` delegates all commit-based lookups to `slippy.Client.ResolveSlip()`. When a direct ClickHouse lookup returns `ErrSlipNotFound`, the adapter walks backwards through commit history via the GitHub GraphQL API to find an ancestor with a routing slip.
 - **Cursor pagination with composite cursor**: The `/logs` endpoint uses a `timestamp|cityHash64` composite cursor to guarantee no data loss when multiple rows share the same nanosecond timestamp. Uses `LIMIT n+1` peek to determine next-page existence without a separate COUNT query.
 - **huma v2 + humago**: Code-first API framework with auto-generated OpenAPI 3.1 spec. Uses Go's standard library `net/http.ServeMux` via the humago adapter — no Gin, no Echo.
-- **Fail-closed bearer auth with constant-time comparison**: Constant-time token comparison prevents timing attacks. An operation that declares no `security` requirement is **rejected with 401** unless its operation ID is on the compile-time `publicOperationIDs` allowlist (currently `/health` only). The allowlist is deliberately not configurable at runtime, so the public surface cannot be widened by an environment variable, and `TestBuildHandler_EveryOperationIsSecuredOrAllowlisted` walks the generated OpenAPI document to fail the build on any route that is neither secured nor allowlisted.
+- **Fail-closed bearer auth with constant-time comparison**: Constant-time token comparison prevents timing attacks. An operation that requires no credential is **rejected with 401** unless its route is on the compile-time `publicRoutes` allowlist — currently `GET /health` and `GET /v1/health`, two entries for one handler because the `("", "/v1")` fan-out group registers the probe on both prefixes, so adding a group prefix means adding an entry. The allowlist is keyed on `"METHOD /path"`, the same route identity `net/http.ServeMux` registers, rather than on operation ID: an ID is a nickname that can outlive its route (a rename strands it), and a stranded entry would make any later operation adopting that ID public. It is deliberately not configurable at runtime, so the public surface cannot be widened by an environment variable. `TestBuildHandler_EveryOperationIsSecuredOrAllowlisted` walks the generated OpenAPI document in both directions — no route may be unsecured-and-unallowlisted, and no allowlist entry may be stale.
+- **Security declarations must be enforceable, not merely present**: OpenAPI treats an empty security requirement (`{}`) as *optional* auth, so the middleware rejects `Security: [{}]` exactly as it rejects `Security: []` — otherwise "security optional" would route around the fail-closed default into the read tier. Tiering also fails closed: an operation is served at the read tier only when every requirement names exactly `apiKey`, so an unrecognised scheme name (`writeAPIKey`, say) escalates to the write key instead of silently accepting a read key on a mutation. The route audit pins the document's scheme set against `middleware.KnownSecuritySchemes()` so adding a third scheme forces a look at the middleware.
 - **Cache decorator pattern**: `CachedSlipReader` wraps any `SlipReader` transparently. Caching is opt-in via environment variables and degrades gracefully if Dragonfly is unavailable.
 - **OpenTelemetry**: Full SDK initialisation with traces and metrics via OTLP (gRPC or HTTP). Every layer creates properly-parented spans that waterfall correctly in a trace viewer:
   - **HTTP** — `otelhttp.NewHandler` creates the root request span

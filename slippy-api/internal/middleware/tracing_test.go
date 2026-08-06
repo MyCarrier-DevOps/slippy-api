@@ -120,10 +120,10 @@ func TestAuth_InvalidToken_CreatesErrorSpan(t *testing.T) {
 	require.True(t, found, "expected an auth.validateAPIKey span")
 }
 
-// setupNoSecurityTestAPI registers a single operation with no Security
-// requirement under the given operation ID, so callers can vary only whether that
-// ID is on the public allowlist.
-func setupNoSecurityTestAPI(operationID string) http.Handler {
+// setupNoSecurityTestAPI registers a single GET operation with no Security
+// requirement at the given operation ID and path, so callers can vary the route
+// identity the allowlist is keyed on.
+func setupNoSecurityTestAPI(operationID, path string) http.Handler {
 	mux := http.NewServeMux()
 	cfg := huma.DefaultConfig("Test", "1.0.0")
 	api := humago.New(mux, cfg)
@@ -132,7 +132,7 @@ func setupNoSecurityTestAPI(operationID string) http.Handler {
 	huma.Register(api, huma.Operation{
 		OperationID: operationID,
 		Method:      http.MethodGet,
-		Path:        "/probe",
+		Path:        path,
 	}, func(_ context.Context, _ *struct{}) (*struct{ Body string }, error) {
 		return &struct{ Body string }{Body: "ok"}, nil
 	})
@@ -147,7 +147,7 @@ func TestAuth_NoSecurity_NotAllowlisted_CreatesErrorSpan(t *testing.T) {
 	recorder, cleanup := telemetry.SetupTestTracing()
 	defer cleanup()
 
-	handler := setupNoSecurityTestAPI("undeclared-op")
+	handler := setupNoSecurityTestAPI("undeclared-op", "/probe")
 
 	req := httptest.NewRequest(http.MethodGet, "/probe", nil)
 	rec := httptest.NewRecorder()
@@ -174,9 +174,9 @@ func TestAuth_NoSecurity_Allowlisted_NoSpan(t *testing.T) {
 	recorder, cleanup := telemetry.SetupTestTracing()
 	defer cleanup()
 
-	handler := setupNoSecurityTestAPI("health-check")
+	handler := setupNoSecurityTestAPI("health-check", "/health")
 
-	req := httptest.NewRequest(http.MethodGet, "/probe", nil)
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 

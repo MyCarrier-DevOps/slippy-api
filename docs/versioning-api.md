@@ -44,6 +44,23 @@ Both sets of routes use the same handlers. The legacy routes exist solely for ba
 - Adding a new optional request body field
 - Returning additional enum values (if consumers are tolerant)
 
+### Security-Corrective Changes (stay in current version)
+
+Closing a security hole is **not** deferred to a new major version, even when the change matches an entry in the breaking list above — most obviously "Changing authentication requirements", and "Removing an endpoint" when the endpoint is the exposure.
+
+Read without this carve-out, the breaking-change list forbids its own remedy: a route that is unauthenticated by mistake could only be secured in `/v2`, which leaves the hole open in `/v1` for as long as `/v1` is supported. A deprecation alias is no help either, since the added authentication breaks pre-existing callers whether or not the old path still resolves.
+
+What a security-corrective change requires instead:
+
+- Call it out explicitly in the PR description and the release notes, naming the routes affected and the new requirement.
+- State the caller-visible effect. "Callers with no credential now receive `401`" is the useful sentence, not "auth was tightened".
+- Identify the affected consumers where the repository allows it, and say so plainly when it does not — ingress and network policy live in ManagementInfra, so who was calling an endpoint usually cannot be settled here.
+- Regenerate the spec and client if the route is part of the published contract, so consumers see the requirement.
+
+Recorded instances:
+
+- **DEVOPS-217** — API-key auth changed from opt-in per operation to fail-closed, and `GET /v1/admin/schema-version` (unauthenticated) was removed in favour of `GET /v1/diagnostics/clickhouse-schema-version` (read key required). Both the retirement and the added authentication land in `/v1` under this carve-out.
+
 ## How to Add a New Major Version
 
 The API uses [Huma v2](https://huma.rocks/) groups for versioning. Adding a new version follows this pattern:
@@ -71,6 +88,10 @@ handler.RegisterCIJobLogRoutes(v1, clh)
 v2 := huma.NewGroup(api, "/v2")
 handler.RegisterRoutesV2(v2, slipHandlerV2)
 ```
+
+**Update the public-route allowlist in the same change.** Dropping the fan-out group changes which routes exist, and `publicRoutes` in `internal/middleware/auth.go` is keyed on `"METHOD /path"`. Keeping the unversioned group means keeping `GET /health`; dropping it means dropping that entry. Adding `/v2/health` means adding `GET /v2/health`, or the new probe returns `401` to kubelet on every replica.
+
+`TestBuildHandler_EveryOperationIsSecuredOrAllowlisted` checks both directions and will fail the build on a missing entry *and* on one left stale, so this cannot ship silently — but fix it deliberately rather than reacting to a red test.
 
 ### 2. Create new input/output structs for changed endpoints
 
