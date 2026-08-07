@@ -15,45 +15,56 @@ import (
 	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
 )
 
-// AdminHandler serves diagnostic endpoints that require direct ClickHouse access.
-type AdminHandler struct {
+// DiagnosticsHandler serves read-only diagnostic endpoints that need direct
+// ClickHouse access. These report on the service's own datastores; they perform no
+// administrative action, which is why they live under /diagnostics rather than a
+// path namespace that reads as privileged (DEVOPS-217).
+type DiagnosticsHandler struct {
 	session  ch.ClickhouseSessionInterface
 	database string
 }
 
-// NewAdminHandler creates an AdminHandler backed by the given session.
-func NewAdminHandler(
+// NewDiagnosticsHandler creates a DiagnosticsHandler backed by the given session.
+func NewDiagnosticsHandler(
 	session ch.ClickhouseSessionInterface,
 	database string,
-) *AdminHandler {
-	return &AdminHandler{session: session, database: database}
+) *DiagnosticsHandler {
+	return &DiagnosticsHandler{session: session, database: database}
 }
 
-// SchemaVersionOutput is the response body for GET /v1/admin/schema-version.
-type SchemaVersionOutput struct {
+// ClickHouseSchemaVersionOutput is the response body for
+// GET /v1/diagnostics/clickhouse-schema-version.
+type ClickHouseSchemaVersionOutput struct {
 	Body struct {
 		Current int `json:"current" doc:"Version of the LEGACY ClickHouse slip schema (now frozen). The operational slip schema lives in Postgres, owned by the slippy-migrator Job, and is not reported by this endpoint."`
 	}
 }
 
-// RegisterAdminRoutes registers admin diagnostic endpoints on the given API group.
-func RegisterAdminRoutes(api huma.API, h *AdminHandler) {
+// RegisterDiagnosticsRoutes registers the diagnostic endpoints on the given API
+// group. They require the read key like every other read operation — the probe
+// costs a caller nothing to authenticate and needs no exception to the
+// fail-closed auth default.
+func RegisterDiagnosticsRoutes(api huma.API, h *DiagnosticsHandler) {
 	huma.Register(api, huma.Operation{
-		OperationID: "get-schema-version",
+		OperationID: "get-clickhouse-schema-version",
 		Method:      http.MethodGet,
-		Path:        "/admin/schema-version",
+		Path:        "/diagnostics/clickhouse-schema-version",
 		Summary:     "Get the legacy ClickHouse slip schema version (diagnostic; PG schema is owned by the migrator Job)",
 		Tags:        []string{"v1"},
-	}, h.getSchemaVersion)
+		Security:    apiKeySecurity,
+	}, h.getClickHouseSchemaVersion)
 }
 
-func (h *AdminHandler) getSchemaVersion(ctx context.Context, _ *struct{}) (*SchemaVersionOutput, error) {
-	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.getSchemaVersion",
+func (h *DiagnosticsHandler) getClickHouseSchemaVersion(
+	ctx context.Context,
+	_ *struct{},
+) (*ClickHouseSchemaVersionOutput, error) {
+	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.getClickHouseSchemaVersion",
 		trace.WithAttributes(attribute.String("slip.database", h.database)),
 	)
 	defer span.End()
 
-	slog.InfoContext(ctx, "admin: reading schema version", "database", h.database)
+	slog.InfoContext(ctx, "diagnostics: reading clickhouse schema version", "database", h.database)
 
 	// NOTE: this reports the LEGACY ClickHouse slip schema version. Post-Postgres-cutover
 	// the operational slip schema lives in Postgres and is owned by the slippy-migrator Job;
@@ -62,16 +73,16 @@ func (h *AdminHandler) getSchemaVersion(ctx context.Context, _ *struct{}) (*Sche
 	current, err := slippy.GetCurrentSchemaVersion(ctx, h.session.Conn(), h.database)
 	if err != nil {
 		recordHandlerError(span, err)
-		slog.ErrorContext(ctx, "admin: failed to read schema version",
+		slog.ErrorContext(ctx, "diagnostics: failed to read clickhouse schema version",
 			"database", h.database, "error", err)
 		return nil, huma.NewError(http.StatusInternalServerError, "failed to read schema version")
 	}
 	span.SetAttributes(attribute.Int("schema.current", current))
 	span.SetStatus(codes.Ok, "")
-	slog.InfoContext(ctx, "admin: schema version retrieved",
+	slog.InfoContext(ctx, "diagnostics: clickhouse schema version retrieved",
 		"database", h.database, "current", current)
 
-	out := &SchemaVersionOutput{}
+	out := &ClickHouseSchemaVersionOutput{}
 	out.Body.Current = current
 	return out, nil
 }

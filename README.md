@@ -36,13 +36,24 @@ The application follows Clean Architecture with clear dependency boundaries:
 
 ## API Endpoints
 
-All endpoints except `/health`, `/openapi.json`, and `/docs` require a `Bearer` token in the `Authorization` header.
+Every endpoint requires a `Bearer` token in the `Authorization` header except these eight, which are served with no credential:
+
+| Route | Why it needs no credential |
+|---|---|
+| `GET /health`, `GET /v1/health` | Allowlisted in `publicRoutes` (below). Two routes, one handler — the `("", "/v1")` fan-out group registers the probe on both prefixes. |
+| `GET /openapi.json`, `/openapi-3.0.json`, `/openapi.yaml`, `/openapi-3.0.yaml`, `/docs`, `/schemas/{schema}` | huma registers these on the adapter directly, outside the middleware chain, so they are not allowlisted — they never reach the middleware at all. All six come from `huma.DefaultConfig`. |
+
+Authentication is **fail-closed**: the middleware rejects any operation that requires no credential unless its route appears in the `publicRoutes` allowlist in [`internal/middleware/auth.go`](slippy-api/internal/middleware/auth.go). A route that forgets its `Security` declaration returns `401` rather than shipping world-readable, and the route audit in `main_test.go` fails the build for it.
+
+The same "secured or allowlisted" check runs again inside `buildHandler` at startup, which returns an error rather than a handler. A test can be bypassed — the branch ruleset requires the unit-test check but carries bypass actors with `bypass_mode: always` — and the failure it guards against is severe and simultaneous: an in-place path rename that leaves `publicRoutes` pointing at the old path returns `401` to liveness *and* readiness probes on every replica at once. Refusing to boot turns that into a rollout that never completes, leaving the previous ReplicaSet serving.
+
+Two limits on the audit are worth knowing, and they differ in kind. It walks the OpenAPI document built by a fully-wired test fixture, so it does not **build-check** operations marked `Hidden` (huma omits those from the document) or routes behind a config branch the fixture does not enable — but those are still subject to the middleware at runtime, so an omission there fails closed with a `401`, not open. Only the six adapter routes above genuinely **bypass** auth. `TestBuildHandler_CredentialFreeAdapterRoutes` proves those six are served; `TestBuildHandler_CredentialFreeSurfaceIsClosed` proves there are only six, by set-differencing the routes actually registered on the mux against the documented operations — so a huma upgrade adding a seventh, or a `Hidden` route, fails the build rather than widening the surface silently.
 
 ### Read Endpoints
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/health` | Health check (no auth required). Returns `{"status":"ok"}` |
+| `GET` | `/health` | Health check (no auth required; allowlisted on both `/health` and `/v1/health`). Returns `{"status":"ok"}` |
 | `GET` | `/slips/{correlationID}` | Get a routing slip by its correlation ID |
 | `GET` | `/slips/by-commit/{owner}/{repo}/{commitSHA}` | Get a routing slip by repository and commit SHA |
 | `POST` | `/slips/find-by-commits` | Find the first matching slip for an ordered list of commits |
@@ -52,6 +63,7 @@ All endpoints except `/health`, `/openapi.json`, and `/docs` require a `Bearer` 
 | `GET` | `/v1/automation-test-results/by-correlation/{correlationID}` | Run-summary rows from `autotest_results.RunResults`. Filter by `environment`, `stack`, `stage`, `attempt`. When `attempt` is omitted, returns the latest attempt per (env, stack, stage) tuple. |
 | `GET` | `/v1/automation-test-results/by-correlation/{correlationID}/tests` | Per-test rows from `autotest_results.TestResultsCor` for a slip, paginated. Same parent filters plus `status` (default `Failed`; pass `*` or `all` to disable), `limit`, `cursor`. Bounded to a 14-day lookback for partition pruning. |
 | `GET` | `/v1/automation-test-results/by-correlation/{correlationID}/tests/{testId}` | Single test row (with stack trace). 404 when not in scope. |
+| `GET` | `/v1/diagnostics/clickhouse-schema-version` | Version of the **legacy, frozen** ClickHouse slip schema. Registered only when the ClickHouse session is available. The operational Postgres schema is owned by the `slippy-migrator` Job and is not reported here. |
 | `GET` | `/openapi.json` | Auto-generated OpenAPI 3.1 specification |
 | `GET` | `/docs` | Interactive API documentation (Stoplight Elements) |
 
@@ -461,11 +473,13 @@ docker run -p 8080:8080 \
 - **Ancestry resolution**: `SlipResolverAdapter` delegates all commit-based lookups to `slippy.Client.ResolveSlip()`. When a direct ClickHouse lookup returns `ErrSlipNotFound`, the adapter walks backwards through commit history via the GitHub GraphQL API to find an ancestor with a routing slip.
 - **Cursor pagination with composite cursor**: The `/logs` endpoint uses a `timestamp|cityHash64` composite cursor to guarantee no data loss when multiple rows share the same nanosecond timestamp. Uses `LIMIT n+1` peek to determine next-page existence without a separate COUNT query.
 - **huma v2 + humago**: Code-first API framework with auto-generated OpenAPI 3.1 spec. Uses Go's standard library `net/http.ServeMux` via the humago adapter — no Gin, no Echo.
-- **Bearer auth with constant-time comparison**: Prevents timing attacks. Operations without a `security` declaration (e.g., `/health`) pass through unauthenticated.
+- **Fail-closed bearer auth with constant-time comparison**: Constant-time token comparison prevents timing attacks. An operation that requires no credential is **rejected with 401** unless its route is on the compile-time `publicRoutes` allowlist — currently `GET /health` and `GET /v1/health`, two entries for one handler because the `("", "/v1")` fan-out group registers the probe on both prefixes, so adding a group prefix means adding an entry. The allowlist is keyed on `"METHOD /path"`, the same route identity `net/http.ServeMux` registers, rather than on operation ID: an ID is a nickname that can outlive its route (a rename strands it), and a stranded entry would make any later operation adopting that ID public. It is deliberately not configurable at runtime, so the public surface cannot be widened by an environment variable. `TestBuildHandler_EveryOperationIsSecuredOrAllowlisted` walks the generated OpenAPI document in both directions — no route may be unsecured-and-unallowlisted, and no allowlist entry may be stale.
+- **Security declarations must be enforceable, not merely present**: OpenAPI treats an empty security requirement (`{}`) as *optional* auth, so the middleware rejects `Security: [{}]` exactly as it rejects `Security: []` — otherwise "security optional" would route around the fail-closed default into the read tier. Tiering also fails closed: an operation is served at the read tier only when every requirement names exactly `apiKey`, so an unrecognised scheme name (`writeAPIKey`, say) escalates to the write key instead of silently accepting a read key on a mutation. The route audit pins the document's scheme set against `middleware.KnownSecuritySchemes()` so adding a third scheme forces a look at the middleware.
+- **Every operation declares its access tier in one table**: `operationTiers` in `main_test.go` names the tier for all 28 audited operations and is checked in both directions. The inverted tiering above only fails closed for *unrecognised* schemes — `apiKey` is recognised, so a mutating route that declares `apiKeySecurity` is served at the read tier by design, and every other audit assertion passes. That is the likelier mistake, since the eight write registrations are hand-written and `apiKeySecurity` is exported from a sibling file in the same package. The table makes the read tier explicit too, which keeps it self-maintaining and catches the opposite error — an extra requirement added to a working read route turns it `403`. Tiers are never inferred from the HTTP method: `find-by-commits` and `find-all-by-commits` are read-tier `POST`s.
 - **Cache decorator pattern**: `CachedSlipReader` wraps any `SlipReader` transparently. Caching is opt-in via environment variables and degrades gracefully if Dragonfly is unavailable.
 - **OpenTelemetry**: Full SDK initialisation with traces and metrics via OTLP (gRPC or HTTP). Every layer creates properly-parented spans that waterfall correctly in a trace viewer:
   - **HTTP** — `otelhttp.NewHandler` creates the root request span
-  - **Auth** — `auth.validateAPIKey` records scheme, operation, and outcome
+  - **Auth** — `auth.validateAPIKey` records scheme, operation, and outcome; `auth.rejectUndeclaredOperation` flags a route that declares no security requirement and is not allowlisted
   - **Handler** — `handler.*` spans capture operation parameters and results
   - **Cache** — `cache.*` spans show cache system, operation, and hit/miss status
   - **ClickHouse** — `clickhouse.*` spans record `db.system`, operation, and query parameters

@@ -40,7 +40,7 @@ slippy-api/
 │       │   ├── slip_handler.go          # Slip query routes (4 operations)
 │       │   ├── image_tag_handler.go     # Image tag resolution route
 │       │   └── ci_job_log_handler.go    # CI job log route with pagination
-│       ├── middleware/auth.go           # Bearer token authentication
+│       ├── middleware/auth.go           # Bearer token authentication (fail-closed + public allowlist)
 │       ├── telemetry/telemetry.go       # OpenTelemetry SDK init
 │       └── e2e/e2e_test.go             # End-to-end tests with testcontainers
 └── slippy-client/                       # Auto-generated Go client library
@@ -67,7 +67,19 @@ slippy-api/
 
 ## 3. API Endpoints
 
-Read endpoints require `SLIPPY_API_KEY` (or `SLIPPY_WRITE_API_KEY`). Write endpoints require `SLIPPY_WRITE_API_KEY` only. Public endpoints (`/health`, `/docs`, `/openapi.json`) require no auth.
+Read endpoints require `SLIPPY_API_KEY` (or `SLIPPY_WRITE_API_KEY`). Write endpoints require `SLIPPY_WRITE_API_KEY` only.
+
+Auth is **fail-closed**. An operation that requires no credential is rejected with `401` unless its route is on the compile-time `publicRoutes` allowlist in `internal/middleware/auth.go` — currently `GET /health` and `GET /v1/health` only. The allowlist is keyed on `"METHOD /path"` rather than operation ID, so an entry cannot outlive its route and an ID collision cannot inherit one.
+
+"Requires no credential" covers both `Security: []` and `Security: [{}]`: OpenAPI reads an empty requirement object as *optional* auth, so treating only the first as undeclared would let the second route around the allowlist into the read tier.
+
+Six further routes are served with no credential and are **not** allowlisted, because huma registers them on the adapter directly and they never reach the middleware: `/openapi.json`, `/openapi-3.0.json`, `/openapi.yaml`, `/openapi-3.0.yaml`, `/docs`, `/schemas/{schema}`. `TestBuildHandler_CredentialFreeAdapterRoutes` pins that set.
+
+The route audit in `main_test.go` walks the generated OpenAPI document and fails the build on any operation that is neither secured nor allowlisted, on any allowlist entry that matches no route, on any security declaration the middleware cannot enforce, and on any operation whose declared scheme does not match the tier `operationTiers` says it must be served at. That last check is what catches a mutating route declaring `apiKeySecurity` — `apiKey` is a *known* scheme, so the middleware serves it at the read tier by design and every other assertion passes.
+
+`buildHandler` repeats the "secured or allowlisted" half of that audit at startup and returns an error, so the process refuses to boot rather than serving 401s. The CI assertion alone is not enough: the branch ruleset requires the unit-test check but carries bypass actors with `bypass_mode: always`. The shape it guards against is an in-place path rename that leaves `publicRoutes` pointing at the old path, which 401s liveness *and* readiness on every replica simultaneously; a boot failure instead leaves the previous ReplicaSet serving.
+
+The audit's blind spots are `Hidden` operations and routes behind config branches the test fixture does not enable — both still subject to the middleware at runtime, so omission is fail-closed rather than fail-open. `TestBuildHandler_CredentialFreeSurfaceIsClosed` covers the first by set-differencing the registered mux patterns against the documented operations, which also detects a huma upgrade adding a seventh adapter route.
 
 ### Read Endpoints (legacy + /v1)
 
@@ -288,13 +300,15 @@ main() → run()
   - `SLIPPY_API_KEY` — grants access to read endpoints only
   - `SLIPPY_WRITE_API_KEY` (optional) — grants access to both read and write endpoints (superset)
 - **Validation**: Constant-time comparison (`subtle.ConstantTimeCompare`) to prevent timing attacks
-- **Security scheme detection**: Middleware inspects `ctx.Operation().Security` map keys to distinguish `apiKey` (read) from `writeApiKey` (write) operations
+- **Security scheme detection**: Middleware inspects `ctx.Operation().Security` map keys. An operation is served at the read tier only when every requirement names exactly `apiKey`; any other scheme name — including a typo such as `writeAPIKey` — escalates to the write tier rather than falling through to the weaker check
 - **Behavior**:
-  - Operations without security requirements skip auth (`/health`, `/docs`, `/openapi.json`)
-  - Write operations (`writeApiKey` security): only `SLIPPY_WRITE_API_KEY` accepted
-  - Read operations (`apiKey` security): either key accepted
+  - Operations requiring no credential (`Security: []` or `Security: [{}]`, which OpenAPI reads as optional auth) are **rejected with `401`** unless their route is on the `publicRoutes` allowlist (`GET /health`, `GET /v1/health`). Reaching that rejection means a route shipped without a `Security` declaration, so it is logged at error level and traced as `auth.rejectUndeclaredOperation`
+  - `/docs` and `/openapi.json` (plus the other four spec representations and `/schemas/{schema}`) bypass the middleware entirely — huma registers them on the adapter, not through `huma.Register`
+  - Write operations (`writeApiKey`, or any unrecognised scheme): only `SLIPPY_WRITE_API_KEY` accepted
+  - Read operations (`apiKey` only): either key accepted
   - Missing/malformed token → `401 Unauthorized`
   - Invalid token → `403 Forbidden`
+  - Every error response carries `Content-Type: application/problem+json` — matching what the generated spec declares for every operation's default response, and what huma emits for the errors it handles itself — plus `X-Content-Type-Options: nosniff`. `writeError` sets headers before the status because humago's `SetStatus` flushes the header block immediately
 - **OTel**: Span with `auth.result` and `auth.access_level` (`"read"` or `"write"`) attributes
 
 ---
