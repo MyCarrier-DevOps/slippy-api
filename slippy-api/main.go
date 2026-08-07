@@ -806,12 +806,14 @@ func run() error {
 		// is never reaped. An unauthenticated caller can hold connections open on /health
 		// until file descriptors run out.
 		//
-		// WriteTimeout is deliberately NOT set yet: the ancestry walk behind
-		// find-by-commits/find-all-by-commits is currently unbounded, so a write deadline
-		// would cut legitimate slow requests before the real fix (bounding that fan-out)
-		// lands. Tracked as a follow-up — see the PR discussion.
-		ReadTimeout: 30 * time.Second,
-		IdleTimeout: 120 * time.Second,
+		// WriteTimeout is now safe to set because the ancestry fan-out behind
+		// find-by-commits/find-all-by-commits is bounded (maxAncestryResolutions, plus a
+		// maxItems cap on the request). Before that bound a write deadline would have cut
+		// legitimate slow requests instead of the pathological ones. 60s leaves ample room
+		// for a capped ancestry walk while stopping a request from pinning a goroutine.
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 
 	// --- Graceful shutdown ---
