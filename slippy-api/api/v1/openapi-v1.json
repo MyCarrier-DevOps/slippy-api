@@ -590,6 +590,7 @@
             "items": {
               "type": "string"
             },
+            "maxItems": 1000,
             "nullable": true,
             "type": "array"
           },

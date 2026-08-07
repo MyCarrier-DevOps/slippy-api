@@ -285,6 +285,28 @@ func TestKnownSecuritySchemes(t *testing.T) {
 	assert.Equal(t, []string{"apiKey", "writeApiKey"}, KnownSecuritySchemes())
 }
 
+// TestServedAtWriteTier_ExportedSurface pins the tiering decision as the startup route
+// check sees it, which is the same function the middleware uses — there is no second
+// implementation to drift from.
+func TestServedAtWriteTier_ExportedSurface(t *testing.T) {
+	tests := []struct {
+		name     string
+		security []map[string][]string
+		expected bool
+	}{
+		{"read scheme", []map[string][]string{{"apiKey": {}}}, false},
+		{"write scheme", []map[string][]string{{"writeApiKey": {}}}, true},
+		{"capitalisation typo", []map[string][]string{{"writeAPIKey": {}}}, true},
+		{"no security", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			op := &huma.Operation{Security: tt.security}
+			assert.Equal(t, tt.expected, RequiresWriteKey(op))
+		})
+	}
+}
+
 // TestAuthMiddleware_AllowlistIsKeyedOnRouteNotOperationID covers the escape branch
 // that an operation-ID-keyed allowlist could not close: an operation reusing an
 // allowlisted ID at a different path. With a method+path key the ID is irrelevant, so
@@ -560,7 +582,7 @@ func TestRequiresWriteKey(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			op := &huma.Operation{Security: tt.security}
-			assert.Equal(t, tt.expected, requiresWriteKey(op))
+			assert.Equal(t, tt.expected, RequiresWriteKey(op))
 		})
 	}
 }

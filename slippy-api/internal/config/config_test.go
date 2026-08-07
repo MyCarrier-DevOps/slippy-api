@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -260,4 +261,118 @@ func TestLoad_MissingWriteAPIKey(t *testing.T) {
 	cfg, err := Load()
 	assert.Nil(t, cfg)
 	assert.ErrorContains(t, err, "SLIPPY_WRITE_API_KEY is required")
+}
+
+// TestTiersCollapsed pins the detection of a config that nullifies the read/write
+// split. Every tiering mechanism in the middleware evaluates correctly when the two
+// keys are equal and still produces the same outcome for both, so nothing downstream
+// can notice; this predicate is the only place the condition is visible.
+func TestTiersCollapsed(t *testing.T) {
+	tests := []struct {
+		name     string
+		read     string
+		write    string
+		expected bool
+	}{
+		{"distinct keys", "read-key", "write-key", false},
+		{"identical keys", "same-key", "same-key", true},
+		{"differ by one byte", "same-keY", "same-key", false},
+		{"differing lengths", "same-key", "same-key-longer", false},
+		// The middleware trims the presented bearer token, so keys that differ only by
+		// surrounding whitespace are the SAME credential at the comparison that decides
+		// the tier. TiersCollapsed must agree with that view, not with a raw byte compare.
+		{"differ only by trailing newline", "same-key\n", "same-key", true},
+		{"differ only by leading space", " same-key", "same-key", true},
+		{"differ only by surrounding whitespace", "\tsame-key ", "same-key", true},
+		{"read key unset", "", "write-key", false},
+		{"write key unset", "read-key", "", false},
+		{"both unset", "", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{APIKey: tt.read, WriteAPIKey: tt.write}
+			assert.Equal(t, tt.expected, cfg.TiersCollapsed())
+		})
+	}
+}
+
+// TestLoad_IdenticalKeysRefused pins the refusal. Identical keys make the read/write
+// tier split inert, and the condition is invisible from the request path — the tiering
+// evaluates correctly and simply returns the same answer for both. A pod that will not
+// start is recoverable; a silently collapsed authorization boundary is not.
+func TestLoad_IdenticalKeysRefused(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("SLIPPY_API_KEY", "same-key-for-both")
+	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
+	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
+	t.Setenv("SLIPPY_WRITE_API_KEY", "same-key-for-both")
+
+	cfg, err := Load()
+
+	require.Error(t, err)
+	assert.Nil(t, cfg)
+	assert.Contains(t, err.Error(), "SLIPPY_API_KEY")
+	assert.Contains(t, err.Error(), "SLIPPY_WRITE_API_KEY")
+	assert.Contains(t, err.Error(), "distinct")
+}
+
+// TestLoad_DistinctKeysAccepted is the control: the refusal must key on equality, not
+// on both variables merely being set.
+func TestLoad_DistinctKeysAccepted(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("SLIPPY_API_KEY", "read-key")
+	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
+	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
+	t.Setenv("SLIPPY_WRITE_API_KEY", "write-key")
+
+	cfg, err := Load()
+
+	require.NoError(t, err)
+	assert.Equal(t, "read-key", cfg.APIKey)
+	assert.Equal(t, "write-key", cfg.WriteAPIKey)
+}
+
+// TestLoad_WhitespaceKeyRefused pins the refusal of a padded key.
+//
+// extractBearerToken trims the presented token, so a key carrying surrounding whitespace
+// is not the value the middleware ends up comparing. Two consequences, both bad: a read
+// key that is the write key plus a trailing newline passes the distinctness check and
+// still authenticates at the write tier; and a write key carrying whitespace can never
+// authenticate at all, because the trimmed token never equals the untrimmed key.
+// Kubernetes Secrets created from files routinely carry a trailing newline.
+func TestLoad_WhitespaceKeyRefused(t *testing.T) {
+	tests := []struct {
+		name  string
+		read  string
+		write string
+		field string
+	}{
+		{"read key trailing newline", "read-key\n", "write-key", "SLIPPY_API_KEY"},
+		{"write key trailing newline", "read-key", "write-key\n", "SLIPPY_WRITE_API_KEY"},
+		{"read key leading space", " read-key", "write-key", "SLIPPY_API_KEY"},
+		{
+			"read key is write key plus newline",
+			"write-key\n", "write-key", "SLIPPY_API_KEY",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv("SLIPPY_API_KEY", tt.read)
+			t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
+			t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
+			t.Setenv("SLIPPY_WRITE_API_KEY", tt.write)
+
+			cfg, err := Load()
+
+			require.Error(t, err)
+			assert.Nil(t, cfg)
+			assert.Contains(t, err.Error(), tt.field)
+			assert.Contains(t, err.Error(), "whitespace")
+			// The message must never echo EITHER key's material. Asserting only on the read
+			// key would leave the higher-privilege credential unchecked.
+			assert.NotContains(t, err.Error(), strings.TrimSpace(tt.read))
+			assert.NotContains(t, err.Error(), strings.TrimSpace(tt.write))
+		})
+	}
 }

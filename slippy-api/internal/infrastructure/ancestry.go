@@ -17,6 +17,38 @@ import (
 
 const ancestryTracerName = "slippy-api/ancestry"
 
+// maxAncestryResolutions caps how many commits one request may resolve through the
+// GitHub ancestry walk.
+//
+// The direct store lookup takes every commit in a single query and is cheap. This
+// fallback is not: each resolution is a GitHub GraphQL round trip, so an unbounded loop
+// turns one read-tier request into one outbound call per input commit. Measured before
+// this cap: a single 1 MiB request produced 262,133 calls against a shared GitHub App,
+// which is more than the hourly budget and fails ancestry resolution platform-wide.
+//
+// The cap costs nothing real. Callers send commits newest-first and ResolveSlip walks
+// *backwards* from each ref, so resolving from commits[0] already covers commits[1..N]
+// and their ancestors — the tail of a long list is near-entirely redundant. 256 also
+// clears every documented caller with room: slippy-find sends 1+(parents x depth), i.e.
+// 51 at its default depth of 25 and 101 at the `--depth 50` shown in its own help text.
+//
+// This bounds the blast radius; it is not a rate limit. A caller can still issue many
+// requests. Per-key rate limiting is tracked separately.
+const maxAncestryResolutions = 256
+
+// boundedCommits returns the prefix of commits the ancestry fallback may resolve, and
+// logs when the list was truncated so the cap is visible rather than silent.
+func boundedCommits(ctx context.Context, repository string, commits []string) []string {
+	if len(commits) <= maxAncestryResolutions {
+		return commits
+	}
+	slog.WarnContext(ctx, "ancestry: commit list exceeds the resolution cap, truncating",
+		"requested_repository", repository,
+		"commits_count", len(commits),
+		"resolving", maxAncestryResolutions)
+	return commits[:maxAncestryResolutions]
+}
+
 // SlipResolver abstracts the slippy library's ResolveSlip functionality.
 // This interface enables testing without a real slippy.Client.
 type SlipResolver interface {
@@ -236,7 +268,13 @@ func (a *SlipResolverAdapter) FindByCommits(
 	slog.InfoContext(ctx, "ancestry: resolving slip for commits via library",
 		"requested_repository", repository, "commits_count", len(commits))
 
-	for _, commit := range commits {
+	for _, commit := range boundedCommits(ctx, repository, commits) {
+		// Stop as soon as the caller is gone. Without this the fan-out runs to completion
+		// after a client disconnect, making the work fire-and-forget for an attacker.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			span.SetStatus(codes.Error, "context done")
+			return nil, "", ctxErr
+		}
 		result, resolveErr := a.resolver.ResolveSlip(ctx, slippy.ResolveOptions{
 			Repository: repository,
 			Ref:        commit,
@@ -302,7 +340,12 @@ func (a *SlipResolverAdapter) FindAllByCommits(
 		"requested_repository", repository, "commits_count", len(commits))
 
 	var allResults []domain.SlipWithCommit
-	for _, commit := range commits {
+	for _, commit := range boundedCommits(ctx, repository, commits) {
+		// See FindByCommits: stop the fan-out once the caller is gone.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			span.SetStatus(codes.Error, "context done")
+			return nil, ctxErr
+		}
 		result, resolveErr := a.resolver.ResolveSlip(ctx, slippy.ResolveOptions{
 			Repository: repository,
 			Ref:        commit,

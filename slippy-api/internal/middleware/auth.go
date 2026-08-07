@@ -21,7 +21,7 @@ const authTracerName = "slippy-api/auth"
 
 const (
 	// readAPIKeyScheme names the security scheme served at the read tier. It is the
-	// only scheme name that does not escalate to the write key — see requiresWriteKey.
+	// only scheme name that does not escalate to the write key — see RequiresWriteKey.
 	readAPIKeyScheme = "apiKey"
 	// writeAPIKeyScheme names the security scheme served at the write tier.
 	writeAPIKeyScheme = "writeApiKey"
@@ -69,7 +69,6 @@ var publicRoutes = map[string]struct{}{
 func NewAPIKeyAuth(readKey, writeKey string) func(ctx huma.Context, next func(huma.Context)) {
 	return func(ctx huma.Context, next func(huma.Context)) {
 		op := ctx.Operation()
-		opID := op.OperationID
 
 		// Requires no credential: serve it only if the route is explicitly public.
 		if !RequiresCredential(op) {
@@ -81,73 +80,88 @@ func NewAPIKeyAuth(readKey, writeKey string) func(ctx huma.Context, next func(hu
 			return
 		}
 
-		// Start a span for the authentication check.
-		reqCtx := ctx.Context()
-		spanCtx, span := otel.Tracer(authTracerName).Start(reqCtx, "auth.validateAPIKey",
-			trace.WithAttributes(
-				attribute.String("auth.scheme", "bearer"),
-				attribute.String("auth.operation", opID),
-			),
-		)
-		defer span.End()
-
-		token := extractBearerToken(ctx.Header("Authorization"))
-		if token == "" {
-			span.SetAttributes(attribute.String("auth.result", "missing_token"))
-			span.SetStatus(codes.Error, "missing or malformed Authorization header")
-			slog.WarnContext(spanCtx, "auth: missing bearer token",
-				"operation", opID, "result", "missing_token")
-			writeError(ctx, http.StatusUnauthorized, "missing or malformed Authorization header")
+		if !authorize(ctx, op, readKey, writeKey) {
 			return
 		}
-
-		if requiresWriteKey(op) {
-			// Write operations: only the write key is accepted.
-			if writeKey == "" || subtle.ConstantTimeCompare([]byte(token), []byte(writeKey)) != 1 {
-				span.SetAttributes(attribute.String("auth.result", "invalid_token"))
-				span.SetStatus(codes.Error, "invalid API key")
-				slog.WarnContext(spanCtx, "auth: invalid token for write operation",
-					"operation", opID, "result", "invalid_token", "required_level", "write")
-				writeError(ctx, http.StatusForbidden, "invalid API key")
-				return
-			}
-			span.SetAttributes(
-				attribute.String("auth.result", "success"),
-				attribute.String("auth.access_level", "write"),
-			)
-			slog.InfoContext(spanCtx, "auth: token accepted",
-				"operation", opID, "access_level", "write")
-		} else {
-			// Read operations: accept either the read key or the write key.
-			readMatch := subtle.ConstantTimeCompare([]byte(token), []byte(readKey))
-			writeMatch := 0
-			if writeKey != "" {
-				writeMatch = subtle.ConstantTimeCompare([]byte(token), []byte(writeKey))
-			}
-			if readMatch|writeMatch != 1 {
-				span.SetAttributes(attribute.String("auth.result", "invalid_token"))
-				span.SetStatus(codes.Error, "invalid API key")
-				slog.WarnContext(spanCtx, "auth: invalid token for read operation",
-					"operation", opID, "result", "invalid_token", "required_level", "read")
-				writeError(ctx, http.StatusForbidden, "invalid API key")
-				return
-			}
-
-			level := "read"
-			if writeMatch == 1 {
-				level = "write"
-			}
-			span.SetAttributes(
-				attribute.String("auth.result", "success"),
-				attribute.String("auth.access_level", level),
-			)
-			slog.InfoContext(spanCtx, "auth: token accepted",
-				"operation", opID, "access_level", level)
-		}
-
-		span.SetStatus(codes.Ok, "")
 		next(ctx)
 	}
+}
+
+// authorize validates the bearer credential against the tier the operation declares,
+// and reports whether the request may proceed. It writes the error response itself on
+// failure, so a false return means the response is already complete.
+//
+// next is deliberately NOT called from here. The span this opens closes when the
+// function returns, so its recorded duration is the credential check alone. Calling
+// next inside the span — the shape this replaced — kept it open across the handler, the
+// cache and the database, so auth.validateAPIKey reported total request latency while
+// sitting as a fully-overlapping sibling of the handler span rather than its parent.
+func authorize(ctx huma.Context, op *huma.Operation, readKey, writeKey string) bool {
+	opID := op.OperationID
+	spanCtx, span := otel.Tracer(authTracerName).Start(ctx.Context(), "auth.validateAPIKey",
+		trace.WithAttributes(
+			attribute.String("auth.scheme", "bearer"),
+			attribute.String("auth.operation", opID),
+		),
+	)
+	defer span.End()
+
+	token := extractBearerToken(ctx.Header("Authorization"))
+	if token == "" {
+		span.SetAttributes(attribute.String("auth.result", "missing_token"))
+		span.SetStatus(codes.Error, "missing or malformed Authorization header")
+		slog.WarnContext(spanCtx, "auth: missing bearer token",
+			"operation", opID, "result", "missing_token")
+		writeError(ctx, http.StatusUnauthorized, "missing or malformed Authorization header")
+		return false
+	}
+
+	if RequiresWriteKey(op) {
+		// Write operations: only the write key is accepted.
+		if writeKey == "" || subtle.ConstantTimeCompare([]byte(token), []byte(writeKey)) != 1 {
+			span.SetAttributes(attribute.String("auth.result", "invalid_token"))
+			span.SetStatus(codes.Error, "invalid API key")
+			slog.WarnContext(spanCtx, "auth: invalid token for write operation",
+				"operation", opID, "result", "invalid_token", "required_level", "write")
+			writeError(ctx, http.StatusForbidden, "invalid API key")
+			return false
+		}
+		span.SetAttributes(
+			attribute.String("auth.result", "success"),
+			attribute.String("auth.access_level", "write"),
+		)
+		slog.InfoContext(spanCtx, "auth: token accepted",
+			"operation", opID, "access_level", "write")
+	} else {
+		// Read operations: accept either the read key or the write key.
+		readMatch := subtle.ConstantTimeCompare([]byte(token), []byte(readKey))
+		writeMatch := 0
+		if writeKey != "" {
+			writeMatch = subtle.ConstantTimeCompare([]byte(token), []byte(writeKey))
+		}
+		if readMatch|writeMatch != 1 {
+			span.SetAttributes(attribute.String("auth.result", "invalid_token"))
+			span.SetStatus(codes.Error, "invalid API key")
+			slog.WarnContext(spanCtx, "auth: invalid token for read operation",
+				"operation", opID, "result", "invalid_token", "required_level", "read")
+			writeError(ctx, http.StatusForbidden, "invalid API key")
+			return false
+		}
+
+		level := "read"
+		if writeMatch == 1 {
+			level = "write"
+		}
+		span.SetAttributes(
+			attribute.String("auth.result", "success"),
+			attribute.String("auth.access_level", level),
+		)
+		slog.InfoContext(spanCtx, "auth: token accepted",
+			"operation", opID, "access_level", level)
+	}
+
+	span.SetStatus(codes.Ok, "")
+	return true
 }
 
 // IsPublicRoute reports whether the given method and post-prefix path name a route
@@ -177,7 +191,7 @@ func PublicRoutes() []string {
 // KnownSecuritySchemes returns the security scheme names this middleware tiers
 // explicitly, sorted.
 //
-// Any name outside this set is enforced at the write tier by requiresWriteKey, so a
+// Any name outside this set is enforced at the write tier by RequiresWriteKey, so a
 // scheme added to the OpenAPI document without being added here silently becomes
 // write-only. Exported so the route audit can pin the document's scheme set against
 // what the middleware actually understands.
@@ -235,7 +249,13 @@ func RequiresCredential(op *huma.Operation) bool {
 	return true
 }
 
-// requiresWriteKey reports whether the operation must be served the write key.
+// RequiresWriteKey reports whether the operation must be served the write key.
+//
+// Exported so the startup route check can ask the middleware for its actual tiering
+// decision rather than re-deriving it from scheme names. Re-deriving is the whole failure
+// mode it guards against: an operation that should be write-tier but declares only
+// "apiKey" is served at the read tier by design, and a caller inspecting the declaration
+// itself would duplicate — and could drift from — the rule below.
 //
 // The default is inverted deliberately: an operation is served at the read tier only
 // when every requirement names exactly readAPIKeyScheme and nothing else. Any other
@@ -252,7 +272,7 @@ func RequiresCredential(op *huma.Operation) bool {
 // from read-key-accepted to 403), so a future read-tier scheme must be added to the
 // condition below in the same change that adds it to the document. Scopes are
 // ignored, so `{apiKey: ["read"]}` is unaffected.
-func requiresWriteKey(op *huma.Operation) bool {
+func RequiresWriteKey(op *huma.Operation) bool {
 	for _, req := range op.Security {
 		for scheme := range req {
 			if scheme != readAPIKeyScheme {

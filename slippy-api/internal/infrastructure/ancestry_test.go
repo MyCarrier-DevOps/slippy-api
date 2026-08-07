@@ -3,6 +3,7 @@ package infrastructure
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -655,4 +656,92 @@ func TestAdapter_FindAllByCommits_ResolverError(t *testing.T) {
 	results, err := adapter.FindAllByCommits(context.Background(), "org/repo", []string{"sha1"})
 	assert.ErrorIs(t, err, resolverErr)
 	assert.Nil(t, results)
+}
+
+// --- Ancestry fan-out bounds ---
+
+// TestAdapter_AncestryFanoutIsBounded pins the cap on ancestry resolutions per request.
+//
+// The direct store lookup takes every commit in one query, but the fallback resolves each
+// commit individually and each resolution is a GitHub GraphQL round trip. Unbounded, one
+// read-tier request drove 262,133 outbound calls against a shared GitHub App — enough to
+// exhaust the hourly budget, which fails ancestry resolution across the whole platform.
+//
+// The cap is safe because the list arrives newest-first and ResolveSlip walks *backwards*
+// from each ref: resolving from commits[0] already covers commits[1..N] and their
+// ancestors, so the tail of a long list is almost entirely redundant work.
+func TestAdapter_AncestryFanoutIsBounded(t *testing.T) {
+	commits := make([]string, 5000)
+	for i := range commits {
+		commits[i] = fmt.Sprintf("%040x", i)
+	}
+
+	for _, tt := range []struct {
+		name string
+		call func(a *SlipResolverAdapter, ctx context.Context) error
+	}{
+		{"FindByCommits", func(a *SlipResolverAdapter, ctx context.Context) error {
+			_, _, err := a.FindByCommits(ctx, "org/repo", commits)
+			return err
+		}},
+		{"FindAllByCommits", func(a *SlipResolverAdapter, ctx context.Context) error {
+			_, err := a.FindAllByCommits(ctx, "org/repo", commits)
+			return err
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls int
+			resolver := &mockSlipResolver{
+				resolveSlipFn: func(context.Context, slippy.ResolveOptions) (*slippy.ResolveResult, error) {
+					calls++
+					return nil, slippy.ErrSlipNotFound
+				},
+			}
+			reader := &mockReader{
+				findByCommitsFn: func(context.Context, string, []string) (*domain.Slip, string, error) {
+					return nil, "", slippy.ErrSlipNotFound
+				},
+				findAllByCommitsFn: func(context.Context, string, []string) ([]domain.SlipWithCommit, error) {
+					return nil, nil
+				},
+			}
+			_ = tt.call(NewSlipResolverAdapter(resolver, reader), context.Background())
+
+			assert.LessOrEqual(t, calls, maxAncestryResolutions,
+				"the fallback must not issue one GitHub call per input commit")
+			assert.Positive(t, calls, "the fallback must still run for the head of the list")
+		})
+	}
+}
+
+// TestAdapter_AncestryStopsOnCancellation pins that a disconnected client stops the
+// fan-out. Without it the loop runs to completion after the caller is gone, so the work
+// is fire-and-forget from an attacker's point of view.
+func TestAdapter_AncestryStopsOnCancellation(t *testing.T) {
+	commits := make([]string, 100)
+	for i := range commits {
+		commits[i] = fmt.Sprintf("%040x", i)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var calls int
+	resolver := &mockSlipResolver{
+		resolveSlipFn: func(context.Context, slippy.ResolveOptions) (*slippy.ResolveResult, error) {
+			calls++
+			return nil, slippy.ErrSlipNotFound
+		},
+	}
+	reader := &mockReader{
+		findByCommitsFn: func(context.Context, string, []string) (*domain.Slip, string, error) {
+			return nil, "", slippy.ErrSlipNotFound
+		},
+	}
+
+	_, _, err := NewSlipResolverAdapter(resolver, reader).FindByCommits(ctx, "org/repo", commits)
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Zero(t, calls, "no resolution should start once the caller is gone")
 }

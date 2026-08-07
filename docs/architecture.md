@@ -77,7 +77,21 @@ Six further routes are served with no credential and are **not** allowlisted, be
 
 The route audit in `main_test.go` walks the generated OpenAPI document and fails the build on any operation that is neither secured nor allowlisted, on any allowlist entry that matches no route, on any security declaration the middleware cannot enforce, and on any operation whose declared scheme does not match the tier `operationTiers` says it must be served at. That last check is what catches a mutating route declaring `apiKeySecurity` — `apiKey` is a *known* scheme, so the middleware serves it at the read tier by design and every other assertion passes.
 
-`buildHandler` repeats the "secured or allowlisted" half of that audit at startup and returns an error, so the process refuses to boot rather than serving 401s. The CI assertion alone is not enough: the branch ruleset requires the unit-test check but carries bypass actors with `bypass_mode: always`. The shape it guards against is an in-place path rename that leaves `publicRoutes` pointing at the old path, which 401s liveness *and* readiness on every replica simultaneously; a boot failure instead leaves the previous ReplicaSet serving.
+`buildHandler` repeats the parts of that audit whose failure the middleware cannot mitigate at request time, and returns an error so the process refuses to boot. The CI assertion alone is not enough: the branch ruleset requires the unit-test check but carries bypass actors with `bypass_mode: always`. Seven conditions are checked:
+
+1. A route that requires no credential and is not allowlisted — 401 for everyone.
+2. A route that is allowlisted but requires a credential — the allowlist entry goes dead and it 401s everyone, the same probe outage from the other direction.
+3. A route registered but absent from `operationTiers` — never tier-checked at all, since the map lookup yields a zero policy that matches no tier. One author, one lapse: a mutation copy-pasted with `apiKeySecurity` and never added to the table is served to the read key.
+4. A route public-tier in `operationTiers` that demands a credential — the probe outage of (1) and (2) with the path renamed *and* the declaration added. Each half alone is caught by an earlier check; the combination falls between them.
+5. A route not public-tier in `operationTiers` that requires no credential — an **open route**. The mirror of (4) and the only one of the pair that opens rather than closes: the route is allowlisted so (2) skips it, and the tier arms fire only for public and write rows.
+6. A route listed write-tier that would be served at the read tier — silent privilege escalation, since the route keeps working.
+7. An `operationTiers` row with a live gate that names no registered operation — a stale row, which silently narrows every check read against the table.
+
+All classes are reported together via `errors.Join`, not just the first: under a boot guard each hidden class costs a full build-and-deploy cycle to discover.
+
+**`Hidden` operations.** huma omits them from the OpenAPI document while still routing them, so checks (1)–(6) cannot see such a route. Check (7) is the exception and points the other way: a Hidden operation with a live-gated row looks unregistered, so the process refuses to boot. That coupling is deliberate — re-keying the stale scan on mux patterns would let Hidden routes boot silently, and the middleware fails closed on a *missing* credential but not on the *wrong tier*, so a Hidden mutation declaring `apiKey` would then be served to the read key with nothing to catch it.
+
+`operationTiers` lives in `main.go` rather than the test file because the guard consults it. Each row carries a **gate** naming the optional collaborator whose presence registers it, so check (7) runs only for rows whose gate is up — a ClickHouse outage leaves five collaborators nil and their routes unregistered, and that degraded mode stays bootable. The gate map is built from the same nil checks that decided registration, so the guard's view of what *should* exist is exact in both full and degraded boots. Read-tier declarations are checked only by the audit, against the fully-wired fixture, since a mistake there costs one route a 403 rather than the fleet.
 
 The audit's blind spots are `Hidden` operations and routes behind config branches the test fixture does not enable — both still subject to the middleware at runtime, so omission is fail-closed rather than fail-open. `TestBuildHandler_CredentialFreeSurfaceIsClosed` covers the first by set-differencing the registered mux patterns against the documented operations, which also detects a huma upgrade adding a seventh adapter route.
 
@@ -298,7 +312,8 @@ main() → run()
 - **Scheme**: Two-key Bearer token in `Authorization` header
 - **Keys**:
   - `SLIPPY_API_KEY` — grants access to read endpoints only
-  - `SLIPPY_WRITE_API_KEY` (optional) — grants access to both read and write endpoints (superset)
+  - `SLIPPY_WRITE_API_KEY` (**required** — `config.Load` refuses to start without it) — grants access to both read and write endpoints (superset)
+  - The two must be **distinct values**, and `config.Load` **refuses to start** when they are equal. Identical keys make the tier split inert — every read-key holder can mutate slips — and nothing in the request path can detect it, because the tiering still evaluates correctly and simply returns the same answer for both. A pod that will not start is loud and bounded; a silently collapsed authorization boundary is neither. Note the failure surfaces on the next pod recycle rather than at the moment the secret changes — a Vault edit creates no new ReplicaSet, so unlike the route guard during a rollout there is nothing to roll back to
 - **Validation**: Constant-time comparison (`subtle.ConstantTimeCompare`) to prevent timing attacks
 - **Security scheme detection**: Middleware inspects `ctx.Operation().Security` map keys. An operation is served at the read tier only when every requirement names exactly `apiKey`; any other scheme name — including a typo such as `writeAPIKey` — escalates to the write tier rather than falling through to the weaker check
 - **Behavior**:

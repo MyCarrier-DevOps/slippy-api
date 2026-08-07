@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
@@ -13,8 +14,10 @@ import (
 
 	"github.com/MyCarrier-DevOps/slippy-api/internal/telemetry"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 // --- Auth Middleware Tracing Tests ---
@@ -186,6 +189,68 @@ func TestAuth_NoSecurity_Allowlisted_NoSpan(t *testing.T) {
 		assert.NotContains(t, span.Name(), "auth.",
 			"no auth span should be created for an allowlisted public operation")
 	}
+}
+
+// TestAuth_Span_EndsBeforeHandlerRuns pins the auth span's lifetime to the credential
+// check.
+//
+// The middleware calls next(ctx) to run the rest of the chain, so a `defer span.End()`
+// in the closure body would keep the span open across the handler, the cache and the
+// database — making auth.validateAPIKey's duration the whole request. It is not a parent
+// of that work either (next receives the unmodified huma.Context), so a trace viewer
+// shows a full-width auth bar beside the handler bar, which reads as "auth took 200ms".
+//
+// Two assertions, covering different things. The ordering assertion (auth ends before the
+// handler starts) pins the span lifetime deterministically. The duration bound is not
+// redundant with it: if a remote key lookup were ever added inside authorize(), the auth
+// span could take 500ms and still close before the handler starts — ordering would pass,
+// the bound would catch it. Measured over 500 runs including a saturated-core pass with
+// no failures, and neither `make test` nor CI runs -race, so the bound is not marginal.
+func TestAuth_Span_EndsBeforeHandlerRuns(t *testing.T) {
+	recorder, cleanup := telemetry.SetupTestTracing()
+	defer cleanup()
+
+	mux := http.NewServeMux()
+	cfg := huma.DefaultConfig("Test", "1.0.0")
+	api := humago.New(mux, cfg)
+	api.UseMiddleware(NewAPIKeyAuth("test-key", ""))
+
+	huma.Register(api, huma.Operation{
+		OperationID: "slow-op",
+		Method:      http.MethodGet,
+		Path:        "/slow",
+		Security:    []map[string][]string{{"apiKey": {}}},
+	}, func(ctx context.Context, _ *struct{}) (*struct{ Body string }, error) {
+		_, span := otel.Tracer("test").Start(ctx, "handler.slow")
+		time.Sleep(20 * time.Millisecond)
+		span.End()
+		return &struct{ Body string }{Body: "ok"}, nil
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/slow", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var authSpan, handlerSpan sdktrace.ReadOnlySpan
+	for _, span := range recorder.Ended() {
+		switch span.Name() {
+		case "auth.validateAPIKey":
+			authSpan = span
+		case "handler.slow":
+			handlerSpan = span
+		}
+	}
+	require.NotNil(t, authSpan, "expected an auth.validateAPIKey span")
+	require.NotNil(t, handlerSpan, "expected a handler.slow span")
+
+	assert.False(t, authSpan.EndTime().After(handlerSpan.StartTime()),
+		"auth.validateAPIKey must close before the handler runs; it ended at %s but the handler "+
+			"started at %s, so its duration covers downstream work",
+		authSpan.EndTime(), handlerSpan.StartTime())
+	assert.Less(t, authSpan.EndTime().Sub(authSpan.StartTime()), 10*time.Millisecond,
+		"auth span duration should be the credential check, not the 20ms handler")
 }
 
 // --- Assertion helper ---
