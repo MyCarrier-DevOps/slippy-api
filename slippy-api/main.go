@@ -39,33 +39,118 @@ func main() {
 	}
 }
 
-// newServeMux builds the router buildHandler registers on. Extracted as a variable —
-// the same seam redisDial uses below — so a test can substitute a recording mux and
-// observe the routes huma registers straight on the adapter, outside the middleware
-// chain. Those never enter the OpenAPI document, so there is no other way to
+// newServeMux builds the router buildHandler registers on. Extracted as a package
+// variable so TestBuildHandler_CredentialFreeSurfaceIsClosed can substitute a recording
+// mux and observe the routes huma registers straight on the adapter, outside the
+// middleware chain. Those never enter the OpenAPI document, so there is no other way to
 // enumerate them.
+//
+// This is NOT the seam redisDial uses. redisDial is injected as a parameter —
+// connectCache takes a dial func and run() passes redisDial to it — and is never
+// reassigned; every test supplies its own closure as an argument. A package-level var
+// that a test mutates is the weaker form: it forecloses t.Parallel() anywhere in package
+// main, and `reassign` cannot flag it because .golangci.yml sets `tests: false`. Thread
+// the mux through the parameter list the next time buildHandler's signature is revisited
+// — the sole consumer of this seam is one test.
 var newServeMux = func() humago.Mux { return http.NewServeMux() }
 
-// verifyRouteSecurity reports an error when a registered operation neither requires a
-// credential nor is allowlisted as public.
+// Access tiers an operation can be served at, as enforced by the middleware.
+const (
+	tierPublic = "public" // no credential; must also be in middleware.PublicRoutes()
+	tierRead   = "read"   // apiKey — either key accepted
+	tierWrite  = "write"  // writeApiKey — write key only
+)
+
+// operationTiers is the tier every registered operation must be served at.
 //
-// This is the same assertion the route audit makes in main_test.go, moved to process
-// startup so it cannot be routed around. The repository's branch ruleset does require
+// The middleware tiers on scheme names, and "apiKey" is a *known* name — so an
+// operation that should be write-tier but declares apiKeySecurity is served at the read
+// tier by design, and every structural check passes: the declaration is non-empty, the
+// requirement is non-empty, and the scheme is in the document. That is the likelier of
+// the two declaration mistakes, because slip_write_handler.go carries eight hand-written
+// writeApiKeySecurity registrations while apiKeySecurity is exported from a sibling file
+// in the same package, so a copy-pasted block compiles, lints, passes, and publishes a
+// spec saying the read key may mutate.
+//
+// Tiers are never inferred from the HTTP method: find-by-commits and find-all-by-commits
+// are read-tier POSTs.
+//
+// This table is read in two places with deliberately different strictness.
+// verifyRouteSecurity checks only the escalation direction at startup (see there for
+// why); the route audit in main_test.go checks every tier in both directions against the
+// fully-wired fixture.
+var operationTiers = map[string]string{
+	"health-check":    tierPublic,
+	"v1-health-check": tierPublic,
+
+	"get-slip":                                     tierRead,
+	"v1-get-slip":                                  tierRead,
+	"get-slip-by-commit":                           tierRead,
+	"v1-get-slip-by-commit":                        tierRead,
+	"find-by-commits":                              tierRead,
+	"v1-find-by-commits":                           tierRead,
+	"find-all-by-commits":                          tierRead,
+	"v1-find-all-by-commits":                       tierRead,
+	"get-image-tags":                               tierRead,
+	"v1-get-image-tags":                            tierRead,
+	"get-logs":                                     tierRead,
+	"v1-get-logs":                                  tierRead,
+	"get-pipeline-config":                          tierRead,
+	"get-step-prerequisites":                       tierRead,
+	"get-automation-test-results":                  tierRead,
+	"get-automation-test-results-tests":            tierRead,
+	"get-automation-test-result-by-id-correlation": tierRead,
+	"get-clickhouse-schema-version":                tierRead,
+
+	"create-slip":   tierWrite,
+	"start-step":    tierWrite,
+	"complete-step": tierWrite,
+	"fail-step":     tierWrite,
+	"skip-step":     tierWrite,
+	"set-image-tag": tierWrite,
+	"promote-slip":  tierWrite,
+	"abandon-slip":  tierWrite,
+}
+
+// verifyRouteSecurity reports an error when the registered routes contradict the auth
+// policy in a way that is unrecoverable at request time.
+//
+// These are the same assertions the route audit makes in main_test.go, moved to process
+// startup so they cannot be routed around. The repository's branch ruleset does require
 // the unit-test check on main, but it also carries bypass actors with bypass_mode
-// "always", so a red test is one deliberate merge away from not applying. The failure
-// it guards against is an in-place path rename that keeps the allowlist pointing at
-// the old path: the renamed routes are registered, declare no Security, and are not
-// allowlisted, so they 401 — including kubelet's liveness and readiness probes, on
-// every replica, simultaneously. Refusing to start turns that into a deployment that
-// never rolls out, which leaves the previous ReplicaSet serving.
+// "always", so a red test is one deliberate merge away from not applying.
 //
-// (Dropping a prefix instead is harmless here: the route is de-registered from the mux
+// Three conditions are checked, and each maps to a failure the middleware cannot
+// mitigate once the process is serving:
+//
+//  1. Requires no credential and is not allowlisted → 401 for every caller. The shape
+//     is an in-place path rename that leaves the allowlist on the old path.
+//  2. Allowlisted but requires a credential → also 401 for every caller. The middleware
+//     consults publicRoutes only for operations that require no credential, so the
+//     allowlist entry goes dead. This is the same probe outage as (1) arriving from the
+//     opposite direction: kubelet's liveness AND readiness, every replica, at once.
+//  3. Listed write-tier but not served at the write tier → silent privilege escalation.
+//     Unlike (1) and (2) the route keeps working, so nothing surfaces while the read key
+//     gains a mutation.
+//
+// (Dropping a prefix instead is harmless: the route is de-registered from the mux
 // entirely, so requests 404 and the middleware never runs.)
+//
+// Deliberately NOT checked here, though the audit checks both against the wired fixture:
+//
+//   - The reverse direction of operationTiers — that every row names a registered
+//     operation. buildHandler registers conditionally: when ClickHouse is unavailable it
+//     leaves five collaborators nil and eight rows match nothing. That degraded mode is
+//     supported, so asserting it at startup would convert a documented fallback into a
+//     crashloop — inverting the availability benefit this guard exists to provide.
+//   - Read-tier declarations. A read-tier operation declaring something else costs one
+//     route a 403, not a fleet-wide outage, and refusing to boot would be the heavier
+//     failure of the two.
 //
 // This walks the OpenAPI document, so it shares that document's blind spot for
 // operations marked Hidden. Those are still enforced by the middleware at runtime.
 func verifyRouteSecurity(api huma.API) error {
-	var undeclared []string
+	var undeclared, contradicted, mistiered []string
 	for path, item := range api.OpenAPI().Paths {
 		// PathItem has no operation iterator, so the verbs are enumerated explicitly.
 		for _, op := range []*huma.Operation{
@@ -75,22 +160,44 @@ func verifyRouteSecurity(api huma.API) error {
 			if op == nil {
 				continue
 			}
-			if middleware.RequiresCredential(op) || middleware.IsPublicRoute(op.Method, op.Path) {
-				continue
+			route := fmt.Sprintf("%s %s (operationId %q)", strings.ToUpper(op.Method), path, op.OperationID)
+			needsCredential := middleware.RequiresCredential(op)
+			switch {
+			case middleware.IsPublicRoute(op.Method, op.Path) && needsCredential:
+				contradicted = append(contradicted, route)
+			case !middleware.IsPublicRoute(op.Method, op.Path) && !needsCredential:
+				undeclared = append(undeclared, route)
+			case operationTiers[op.OperationID] == tierWrite && !middleware.ServedAtWriteTier(op):
+				mistiered = append(mistiered, route)
 			}
-			undeclared = append(undeclared,
-				fmt.Sprintf("%s %s (operationId %q)", strings.ToUpper(op.Method), path, op.OperationID))
 		}
 	}
-	if len(undeclared) == 0 {
-		return nil
+
+	switch {
+	case len(contradicted) > 0:
+		sort.Strings(contradicted)
+		return fmt.Errorf(
+			"refusing to start: %d allowlisted route(s) declare a Security requirement: %s — the "+
+				"middleware consults publicRoutes only for operations that require no credential, so "+
+				"these would return 401 to every caller including the kubelet probes. Drop the Security "+
+				"declaration, or remove the route from publicRoutes in internal/middleware/auth.go",
+			len(contradicted), strings.Join(contradicted, ", "))
+	case len(undeclared) > 0:
+		sort.Strings(undeclared)
+		return fmt.Errorf(
+			"refusing to start: %d route(s) require no credential and are not in publicRoutes, so they "+
+				"would return 401 to every caller: %s — declare Security on the operation, or add the "+
+				"route to publicRoutes in internal/middleware/auth.go",
+			len(undeclared), strings.Join(undeclared, ", "))
+	case len(mistiered) > 0:
+		sort.Strings(mistiered)
+		return fmt.Errorf(
+			"refusing to start: %d route(s) are write-tier in operationTiers but would be served at the "+
+				"read tier: %s — the declaration must name writeApiKey, otherwise SLIPPY_API_KEY is "+
+				"accepted for a mutation",
+			len(mistiered), strings.Join(mistiered, ", "))
 	}
-	sort.Strings(undeclared)
-	return fmt.Errorf(
-		"refusing to start: %d route(s) require no credential and are not in publicRoutes, so they "+
-			"would return 401 to every caller: %s — declare Security on the operation, or add the "+
-			"route to publicRoutes in internal/middleware/auth.go",
-		len(undeclared), strings.Join(undeclared, ", "))
+	return nil
 }
 
 // buildHandler creates the fully-wired HTTP handler with auth, routes, and
@@ -301,6 +408,15 @@ func run() error {
 	}
 	log.Printf("config loaded (port=%d, cache=%v, db=%s)",
 		cfg.Port, cfg.CacheEnabled(), cfg.SlipDatabase)
+	// Warn rather than refuse: the deployed values live in Vault/ManagementInfra, so a
+	// hard failure here could take every replica down on a config this process cannot
+	// verify from the inside. The condition is otherwise undetectable at runtime — the
+	// tiering evaluates correctly and simply returns the same answer for both keys.
+	if cfg.TiersCollapsed() {
+		log.Printf(
+			"WARNING: SLIPPY_API_KEY equals SLIPPY_WRITE_API_KEY — the read/write tier split is " +
+				"inert and every read-key holder can mutate slips; issue distinct keys")
+	}
 
 	// --- Library logger ---
 	// Single shared logger for the slippy library, ClickHouse store, migrations,

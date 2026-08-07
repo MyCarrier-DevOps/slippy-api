@@ -1,6 +1,7 @@
 package config
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"os"
 	"strconv"
@@ -149,4 +150,29 @@ func Load() (*Config, error) {
 // CacheEnabled returns true if Dragonfly configuration is provided.
 func (c *Config) CacheEnabled() bool {
 	return c.DragonflyHost != ""
+}
+
+// TiersCollapsed reports whether both API keys are set to the same value, which makes
+// the read/write tier split inert: every read-key holder can mutate slips.
+//
+// The condition is invisible from inside the request path. The middleware's tiering
+// still evaluates correctly — it just produces the same outcome for both keys — so no
+// request is rejected and nothing is logged. The one runtime tell is that the
+// auth.access_level span attribute reads "write" for read-tier operations too, which is
+// indistinguishable from legitimate write traffic without knowing to look.
+//
+// The two key populations are meant to be disjoint: SLIPPY_API_KEY is fanned out to
+// service repositories through the GitHub Actions workflow templates in admin/, while
+// SLIPPY_WRITE_API_KEY belongs to in-cluster pipeline components. Collapsing them
+// silently grants the Actions-runner population write access to the slip state machine.
+//
+// Comparison is constant-time for the same reason the middleware's is. An unset key
+// returns false rather than matching another unset key: Load requires both, so a
+// loaded Config cannot hit that case, and a hand-built one should not report a
+// collapsed tier it does not have.
+func (c *Config) TiersCollapsed() bool {
+	if c.APIKey == "" || c.WriteAPIKey == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(c.APIKey), []byte(c.WriteAPIKey)) == 1
 }

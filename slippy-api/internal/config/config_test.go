@@ -261,3 +261,30 @@ func TestLoad_MissingWriteAPIKey(t *testing.T) {
 	assert.Nil(t, cfg)
 	assert.ErrorContains(t, err, "SLIPPY_WRITE_API_KEY is required")
 }
+
+// TestTiersCollapsed pins the detection of a config that nullifies the read/write
+// split. Every tiering mechanism in the middleware evaluates correctly when the two
+// keys are equal and still produces the same outcome for both, so nothing downstream
+// can notice; this predicate is the only place the condition is visible.
+func TestTiersCollapsed(t *testing.T) {
+	tests := []struct {
+		name     string
+		read     string
+		write    string
+		expected bool
+	}{
+		{"distinct keys", "read-key", "write-key", false},
+		{"identical keys", "same-key", "same-key", true},
+		{"differ by one byte", "same-keY", "same-key", false},
+		{"differing lengths", "same-key", "same-key-longer", false},
+		{"read key unset", "", "write-key", false},
+		{"write key unset", "read-key", "", false},
+		{"both unset", "", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{APIKey: tt.read, WriteAPIKey: tt.write}
+			assert.Equal(t, tt.expected, cfg.TiersCollapsed())
+		})
+	}
+}

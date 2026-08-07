@@ -45,7 +45,17 @@ Every endpoint requires a `Bearer` token in the `Authorization` header except th
 
 Authentication is **fail-closed**: the middleware rejects any operation that requires no credential unless its route appears in the `publicRoutes` allowlist in [`internal/middleware/auth.go`](slippy-api/internal/middleware/auth.go). A route that forgets its `Security` declaration returns `401` rather than shipping world-readable, and the route audit in `main_test.go` fails the build for it.
 
-The same "secured or allowlisted" check runs again inside `buildHandler` at startup, which returns an error rather than a handler. A test can be bypassed — the branch ruleset requires the unit-test check but carries bypass actors with `bypass_mode: always` — and the failure it guards against is severe and simultaneous: an in-place path rename that leaves `publicRoutes` pointing at the old path returns `401` to liveness *and* readiness probes on every replica at once. Refusing to boot turns that into a rollout that never completes, leaving the previous ReplicaSet serving.
+`buildHandler` re-checks the policy at startup and returns an error rather than a handler, so the process refuses to boot. A test can be bypassed — the branch ruleset requires the unit-test check but carries bypass actors with `bypass_mode: always` — so anything whose failure the middleware cannot mitigate at request time is asserted here too:
+
+| Condition | Consequence if it shipped |
+|---|---|
+| Requires no credential and not allowlisted | `401` for every caller — an in-place path rename that left `publicRoutes` on the old path |
+| Allowlisted **but** requires a credential | Also `401` for every caller — the allowlist entry goes dead, because the middleware consults it only for operations that require no credential |
+| Write-tier in `operationTiers` but served at the read tier | Silent privilege escalation — the route keeps working while `SLIPPY_API_KEY` gains a mutation |
+
+The first two are the same total, simultaneous probe outage (kubelet liveness *and* readiness, every replica) arriving from opposite directions; refusing to boot turns either into a rollout that never completes, leaving the previous ReplicaSet serving. The third is the opposite shape — nothing surfaces at all — which is why it cannot be left to runtime.
+
+Two checks are deliberately **not** hoisted to startup and stay in CI: the reverse direction of `operationTiers` (every row must name a registered operation) would turn the supported degraded-ClickHouse boot into a crashloop, since eight rows match nothing when those routes are unregistered; and read-tier declarations, where a mistake costs one route a `403` rather than the fleet.
 
 Two limits on the audit are worth knowing, and they differ in kind. It walks the OpenAPI document built by a fully-wired test fixture, so it does not **build-check** operations marked `Hidden` (huma omits those from the document) or routes behind a config branch the fixture does not enable — but those are still subject to the middleware at runtime, so an omission there fails closed with a `401`, not open. Only the six adapter routes above genuinely **bypass** auth. `TestBuildHandler_CredentialFreeAdapterRoutes` proves those six are served; `TestBuildHandler_CredentialFreeSurfaceIsClosed` proves there are only six, by set-differencing the routes actually registered on the mux against the documented operations — so a huma upgrade adding a seventh, or a `Hidden` route, fails the build rather than widening the surface silently.
 

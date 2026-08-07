@@ -5,6 +5,14 @@ GOARCH ?= $(shell go env GOARCH)
 MODULES  := slippy-api slippy-client slippy-migrator
 BINARIES := slippy-api slippy-migrator
 
+# NOTE: the `|| exit 1` on every per-module loop below is load-bearing. Without it a
+# loop's exit status is whatever the LAST module returned, so a slippy-api failure was
+# masked by a passing slippy-migrator and the recipe exited 0. CLAUDE.md names
+# `make lint && make test` the final gate before commit, so a masked failure defeats the
+# gate; `make build` was worse still, exiting 0 while leaving a stale binary in bin/ that
+# looked freshly built. Every loop that can fail now carries it. CI is unaffected either
+# way (per-module matrix in .github/workflows/ci.yaml).
+
 .PHONY: lint
 lint: install-tools
 	@echo "Linting all modules..."
@@ -17,11 +25,6 @@ lint: install-tools
 		fi; \
 	done
 
-# NOTE: the `|| exit 1` on each module is load-bearing. Without it the recipe's exit
-# status is whatever the LAST module returned, so a slippy-api failure was masked by a
-# passing slippy-migrator and `make test` exited 0 with a red suite. CLAUDE.md names
-# `make lint && make test` the final gate before commit, so a masked failure defeats
-# the gate. CI is unaffected (per-module matrix in .github/workflows/ci.yaml).
 .PHONY: test
 test:
 	@echo "Testing all modules..."
@@ -42,7 +45,7 @@ clean:
 	@for dir in $(MODULES); do \
 		if [ -d "$$dir" ]; then \
 			echo "Cleaning $$dir module..."; \
-			(cd $$dir && go clean ./... && go clean -testcache); \
+			(cd $$dir && go clean ./... && go clean -testcache) || exit 1; \
 		else \
 			echo "Directory $$dir not found, skipping..."; \
 		fi; \
@@ -66,7 +69,7 @@ bump:
 	@for dir in $(MODULES); do \
 		if [ -d "$$dir" ]; then \
 			echo "Bumping $$dir module..."; \
-			(cd $$dir && go get -u && go mod tidy ); \
+			(cd $$dir && go get -u && go mod tidy ) || exit 1; \
 		else \
 			echo "Directory $$dir not found, skipping..."; \
 		fi; \
@@ -78,7 +81,7 @@ tidy:
 	@for dir in $(MODULES); do \
 		if [ -d "$$dir" ]; then \
 			echo "Tidying $$dir module..."; \
-			(cd $$dir && go mod tidy ); \
+			(cd $$dir && go mod tidy ) || exit 1; \
 		else \
 			echo "Directory $$dir not found, skipping..."; \
 		fi; \
@@ -106,7 +109,7 @@ build:
 	@for dir in $(BINARIES); do \
 		if [ -d "$$dir" ]; then \
 			echo "Building $$dir -> bin/$$(basename $$dir)"; \
-			(cd $$dir && CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -o ../bin/$$(basename $$dir) .); \
+			(cd $$dir && CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -o ../bin/$$(basename $$dir) .) || exit 1; \
 		else \
 			echo "Directory $$dir not found, skipping..."; \
 		fi; \
@@ -127,6 +130,17 @@ generate-client: generate-spec install-oapi-codegen
 install-oapi-codegen:
 	go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.6.0
 
+GOLANGCI_VERSION := v2.11.3
+
+# The installer is fetched from the SAME tag as the binary it installs, not from HEAD.
+# The script already SHA-256-verifies the tarball it downloads, so the binary was never
+# the gap — the gap was that the script performing that verification came from a moving
+# ref, so a compromise of golangci-lint's default branch would execute before any
+# verification ran. .github/workflows/ci.yaml runs this in the lint job across a 3-module
+# matrix, so it executes in CI on every PR as well as on developer machines.
+#
+# Deliberately NOT `go install`: golangci-lint's own install docs state that go install
+# "aren't guaranteed to work" and recommend the binary installation used here.
 .PHONY: install-tools
 install-tools:
-	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b `go env GOPATH`/bin v2.11.3
+	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/$(GOLANGCI_VERSION)/install.sh | sh -s -- -b `go env GOPATH`/bin $(GOLANGCI_VERSION)

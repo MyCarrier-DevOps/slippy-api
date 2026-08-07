@@ -285,6 +285,30 @@ func TestKnownSecuritySchemes(t *testing.T) {
 	assert.Equal(t, []string{"apiKey", "writeApiKey"}, KnownSecuritySchemes())
 }
 
+// TestServedAtWriteTier pins the exported view of the tiering decision. The startup
+// route check asks this rather than inspecting scheme names itself, so it must track
+// requiresWriteKey exactly — a divergence here is the drift the export exists to avoid.
+func TestServedAtWriteTier(t *testing.T) {
+	tests := []struct {
+		name     string
+		security []map[string][]string
+		expected bool
+	}{
+		{"read scheme", []map[string][]string{{"apiKey": {}}}, false},
+		{"write scheme", []map[string][]string{{"writeApiKey": {}}}, true},
+		{"capitalisation typo", []map[string][]string{{"writeAPIKey": {}}}, true},
+		{"no security", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			op := &huma.Operation{Security: tt.security}
+			assert.Equal(t, tt.expected, ServedAtWriteTier(op))
+			assert.Equal(t, requiresWriteKey(op), ServedAtWriteTier(op),
+				"the exported predicate must not diverge from the one the middleware uses")
+		})
+	}
+}
+
 // TestAuthMiddleware_AllowlistIsKeyedOnRouteNotOperationID covers the escape branch
 // that an operation-ID-keyed allowlist could not close: an operation reusing an
 // allowlisted ID at a different path. With a method+path key the ID is irrelevant, so

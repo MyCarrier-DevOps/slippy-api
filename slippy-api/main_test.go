@@ -345,6 +345,57 @@ func TestVerifyRouteSecurity(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "POST /thing")
 	})
+
+	// The converse of "renamed health route": the route keeps its allowlisted
+	// method+path but gains a Security declaration. The middleware consults
+	// publicRoutes only for operations that require no credential, so the allowlist
+	// entry goes dead and the route 401s every caller — the same total, simultaneous
+	// probe outage the guard exists to prevent, arriving from the other direction.
+	t.Run("allowlisted route that demands a credential fails", func(t *testing.T) {
+		api := newTestAPI(t, huma.Operation{
+			OperationID: "health-check", Method: http.MethodGet, Path: "/health",
+			Security: []map[string][]string{{"apiKey": {}}},
+		})
+		err := verifyRouteSecurity(api)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "GET /health")
+		assert.Contains(t, err.Error(), "publicRoutes")
+	})
+
+	// A write-tier operation served at the read tier is silent privilege escalation:
+	// the route still works, so nothing surfaces, while SLIPPY_API_KEY gains a
+	// mutation. Unlike the outage cases this one is caught only by asserting the
+	// declared scheme against the tier the route is supposed to be served at.
+	t.Run("write-tier operation declaring only apiKey fails", func(t *testing.T) {
+		api := newTestAPI(t, huma.Operation{
+			OperationID: "create-slip", Method: http.MethodPost, Path: "/v1/slips",
+			Security: []map[string][]string{{"apiKey": {}}},
+		})
+		err := verifyRouteSecurity(api)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "POST /v1/slips")
+		assert.Contains(t, err.Error(), "writeApiKey")
+	})
+
+	t.Run("write-tier operation declaring writeApiKey passes", func(t *testing.T) {
+		api := newTestAPI(t, huma.Operation{
+			OperationID: "create-slip", Method: http.MethodPost, Path: "/v1/slips",
+			Security: []map[string][]string{{"writeApiKey": {}}},
+		})
+		assert.NoError(t, verifyRouteSecurity(api))
+	})
+
+	// Degraded boot (ClickHouse unavailable) leaves five collaborators nil, so eight
+	// operationTiers rows name no registered operation. That is a supported mode —
+	// main.go documents it — so the startup guard must not walk the table's reverse
+	// direction. The audit in this file keeps that check against the wired fixture.
+	t.Run("tier rows naming no registered operation are tolerated", func(t *testing.T) {
+		api := newTestAPI(t, huma.Operation{
+			OperationID: "health-check", Method: http.MethodGet, Path: "/health",
+		})
+		assert.NoError(t, verifyRouteSecurity(api),
+			"a mostly-empty route set must still boot; the reverse direction is CI-only")
+	})
 }
 
 // TestBuildHandler_PassesStartupRouteSecurityGuard proves the guard is actually wired
@@ -424,66 +475,11 @@ func buildFullyWiredHandler(t *testing.T) http.Handler {
 // exclusion is named here and asserted in both directions.
 var operationsExcludedFromPublishedSpec = []string{"get-clickhouse-schema-version"}
 
-// Access tiers an operation can be served at, as enforced by the middleware.
-const (
-	tierPublic = "public" // no credential; must also be in middleware.PublicRoutes()
-	tierRead   = "read"   // apiKey — either key accepted
-	tierWrite  = "write"  // writeApiKey — write key only
-)
-
-// operationTiers is the tier every audited operation must be served at.
-//
-// The middleware tiers on scheme names, and `apiKey` is a *known* name — so an
-// operation that should be write-tier but declares apiKeySecurity is served at the
-// read tier by design, and every other assertion in the audit passes: the declaration
-// is non-empty, the requirement is non-empty, and the scheme is in the document. That
-// is the likelier mistake of the two, because slip_write_handler.go carries eight
-// hand-written writeApiKeySecurity registrations and apiKeySecurity is exported from
-// a sibling file in the same package, so a copy-pasted block compiles, lints, passes,
-// and publishes a spec saying the read key may mutate.
-//
-// The table is COMPLETE and checked both ways on purpose. A write-only list would
-// catch a demotion but not a brand-new mutation that was never added to it, since the
-// forward direction has no assertion for an unlisted operation and the reverse passes
-// while every listed row still resolves. Listing the read tier too is what makes it
-// self-maintaining, and it also catches the availability-direction mistake
-// requiresWriteKey warns about — adding a second requirement to a working read route
-// silently turns it 403.
-//
-// Tiers are never inferred from the HTTP method: find-by-commits and
-// find-all-by-commits are read-tier POSTs.
-var operationTiers = map[string]string{
-	"health-check":    tierPublic,
-	"v1-health-check": tierPublic,
-
-	"get-slip":                                     tierRead,
-	"v1-get-slip":                                  tierRead,
-	"get-slip-by-commit":                           tierRead,
-	"v1-get-slip-by-commit":                        tierRead,
-	"find-by-commits":                              tierRead,
-	"v1-find-by-commits":                           tierRead,
-	"find-all-by-commits":                          tierRead,
-	"v1-find-all-by-commits":                       tierRead,
-	"get-image-tags":                               tierRead,
-	"v1-get-image-tags":                            tierRead,
-	"get-logs":                                     tierRead,
-	"v1-get-logs":                                  tierRead,
-	"get-pipeline-config":                          tierRead,
-	"get-step-prerequisites":                       tierRead,
-	"get-automation-test-results":                  tierRead,
-	"get-automation-test-results-tests":            tierRead,
-	"get-automation-test-result-by-id-correlation": tierRead,
-	"get-clickhouse-schema-version":                tierRead,
-
-	"create-slip":   tierWrite,
-	"start-step":    tierWrite,
-	"complete-step": tierWrite,
-	"fail-step":     tierWrite,
-	"skip-step":     tierWrite,
-	"set-image-tag": tierWrite,
-	"promote-slip":  tierWrite,
-	"abandon-slip":  tierWrite,
-}
+// operationTiers, tierPublic, tierRead and tierWrite live in main.go: the startup guard
+// consults the table too, so it is production data rather than test fixture. The audit
+// below is the stricter of the two readers — it checks every tier in both directions
+// against the fully-wired fixture, where the guard checks only the escalation direction
+// on whatever happens to be registered. See verifyRouteSecurity for why they differ.
 
 // assertOperationTier checks an operation's declared security against the tier
 // operationTiers says it must be served at. Called for every audited operation,
@@ -519,6 +515,22 @@ func assertOperationTier(t *testing.T, method, path, opID string, security []any
 		requirement, ok := requirementAny.(map[string]any)
 		require.True(t, ok, "%s security requirement", route)
 
+		// Both declared schemes are http/bearer, and OpenAPI 3.0.3 requires an empty
+		// scopes array for every scheme type other than oauth2/openIdConnect. This
+		// service publishes a downgraded 3.0 document at /openapi-3.0.json — a route
+		// pinned as publicly served — and the downgrade copies scopes verbatim, so a
+		// non-empty array here ships an invalid document that slippy-client is generated
+		// from. Applied to both tiers: the read-tier equality check below would catch it
+		// incidentally, which left the write tier unguarded.
+		for scheme, scopes := range requirement {
+			assert.Empty(t, scopes,
+				"%s (operationId %q) declares scheme %q with scopes %v. Scopes are ignored at "+
+					"runtime, so this is a spec defect rather than an auth defect: OpenAPI 3.0.3 "+
+					"requires an empty array for non-oauth2 schemes and this service publishes a "+
+					"3.0 document at /openapi-3.0.json.",
+				route, opID, scheme, scopes)
+		}
+
 		switch wantTier {
 		case tierWrite:
 			assert.Contains(t, requirement, "writeApiKey",
@@ -527,8 +539,11 @@ func assertOperationTier(t *testing.T, method, path, opID string, security []any
 					"for a write.", route, opID, requirement)
 		case tierRead:
 			assert.Equal(t, map[string]any{"apiKey": []any{}}, requirement,
-				"%s (operationId %q) is read-tier but declares %v — anything other than exactly "+
-					"apiKey escalates to the write tier, so read callers get 403.",
+				"%s (operationId %q) is read-tier but declares %v. It must be exactly "+
+					"{\"apiKey\": []}: any requirement naming a second scheme escalates to the "+
+					"write tier (requiresWriteKey), so read callers would get 403 — scopes "+
+					"themselves are ignored there, and a non-empty array is the spec defect "+
+					"described above.",
 				route, opID, requirement)
 		}
 	}
@@ -592,6 +607,13 @@ func TestBuildHandler_EveryOperationIsSecuredOrAllowlisted(t *testing.T) {
 			security, _ := op["security"].([]any)
 			assertOperationTier(t, method, path, opID, security)
 
+			// Currently shadowed, deliberately kept. verifyRouteSecurity applies the same
+			// predicate at startup and buildFullyWiredHandler turns its error into a
+			// require.NoError, so nothing reaching here can fail this assertion today —
+			// and assertOperationTier's tierPublic branch covers it a second time. It
+			// stays because it is the assertion that carries the remediation text, and
+			// because the shadow is one refactor deep: making the guard non-fatal, or
+			// moving it, makes this live again with no other change.
 			if len(security) == 0 {
 				assert.True(t, middleware.IsPublicRoute(method, path),
 					"%s %s (operationId %q) declares no security requirement and is not on the public "+
