@@ -200,8 +200,12 @@ func TestAuth_NoSecurity_Allowlisted_NoSpan(t *testing.T) {
 // of that work either (next receives the unmodified huma.Context), so a trace viewer
 // shows a full-width auth bar beside the handler bar, which reads as "auth took 200ms".
 //
-// Asserting the auth span ends before the handler span starts pins the fix without
-// depending on a timing threshold.
+// Two assertions, covering different things. The ordering assertion (auth ends before the
+// handler starts) pins the span lifetime deterministically. The duration bound is not
+// redundant with it: if a remote key lookup were ever added inside authorize(), the auth
+// span could take 500ms and still close before the handler starts — ordering would pass,
+// the bound would catch it. Measured over 500 runs including a saturated-core pass with
+// no failures, and neither `make test` nor CI runs -race, so the bound is not marginal.
 func TestAuth_Span_EndsBeforeHandlerRuns(t *testing.T) {
 	recorder, cleanup := telemetry.SetupTestTracing()
 	defer cleanup()

@@ -90,13 +90,56 @@ const (
 // whose gate is down is expected to be absent; a row whose gate is up and is absent
 // anyway is a stale entry.
 const (
-	gateAlways      = ""                            // registered unconditionally
-	gateImageTags   = "imageTagReader"              // ci.buildinfo / ci.repoproperties
-	gateCIJobLogs   = "ciJobLogReader"              // observability.ciJob
-	gateAutomation  = "automationTestResultsReader" // autotest_results.*
-	gateWrites      = "writer"                      // slip mutations
-	gateDiagnostics = "diagnosticsHandler"          // legacy CH schema-version probe
+	gateAlways     = ""                            // registered unconditionally
+	gateImageTags  = "imageTagReader"              // ci.buildinfo / ci.repoproperties
+	gateCIJobLogs  = "ciJobLogReader"              // observability.ciJob
+	gateAutomation = "automationTestResultsReader" // autotest_results.* run summaries
+	// gateAutomationTests is separate from gateAutomation because
+	// RegisterAutomationTestResultsRoutes is the one Register* function with an internal
+	// conditional: it registers the run-summary route unconditionally, then guards the two
+	// per-test drill-downs behind `h.testsReader != nil`. Conflating the two gates makes a
+	// documented, supported wiring (parent reader set, drill-down reader nil) refuse to boot.
+	//
+	// This mirrors a nil check across a package boundary with no compile-time link. If the
+	// drill-downs ever become unconditional, or gain a third condition, this diverges again
+	// with the same failure mode — it is a mirror, not a link.
+	gateAutomationTests = "automationTestsReader" // autotest_results.* per-test drill-down
+	gateWrites          = "writer"                // slip mutations
+	gateDiagnostics     = "diagnosticsHandler"    // legacy CH schema-version probe
 )
+
+// knownGates is every gate an operationTiers row may name. A row naming anything else
+// would be skipped forever by the stale-row check, because a map lookup on a missing key
+// is indistinguishable from "gate is down" — the one fail-open default in a file whose
+// every other decision fails closed. buildHandler validates the table against this set.
+var knownGates = map[string]struct{}{
+	gateAlways:          {},
+	gateImageTags:       {},
+	gateCIJobLogs:       {},
+	gateAutomation:      {},
+	gateAutomationTests: {},
+	gateWrites:          {},
+	gateDiagnostics:     {},
+}
+
+// verifyGateNames reports rows naming a gate that is not a declared constant.
+//
+// It checks membership in knownGates rather than in the liveGates map buildHandler
+// builds: liveGates legitimately omits nothing today, but requiring presence there would
+// change the guard's contract from "absent or false means down" to "must be present",
+// which would break the degraded-boot subtest that passes an empty map on purpose.
+func verifyGateNames() error {
+	var unknown []string
+	for opID, policy := range operationTiers {
+		if _, ok := knownGates[policy.gate]; !ok {
+			unknown = append(unknown, fmt.Sprintf("%s (gate %q)", opID, policy.gate))
+		}
+	}
+	return routeSecurityError(unknown,
+		"operationTiers row(s) name a gate that is not a declared constant",
+		"an unknown gate reads as permanently down, so the stale-row check silently skips those "+
+			"rows. Add the gate to the const block and to buildHandler's liveGates map")
+}
 
 // operationPolicy is the tier an operation must be served at, plus the gate that decides
 // whether it is registered at all.
@@ -144,8 +187,8 @@ var operationTiers = map[string]operationPolicy{
 	"v1-get-logs":       {tierRead, gateCIJobLogs},
 
 	"get-automation-test-results":                  {tierRead, gateAutomation},
-	"get-automation-test-results-tests":            {tierRead, gateAutomation},
-	"get-automation-test-result-by-id-correlation": {tierRead, gateAutomation},
+	"get-automation-test-results-tests":            {tierRead, gateAutomationTests},
+	"get-automation-test-result-by-id-correlation": {tierRead, gateAutomationTests},
 
 	"get-clickhouse-schema-version": {tierRead, gateDiagnostics},
 
@@ -167,7 +210,7 @@ var operationTiers = map[string]operationPolicy{
 // the unit-test check on main, but it also carries bypass actors with bypass_mode
 // "always", so a red test is one deliberate merge away from not applying.
 //
-// Three conditions are checked, and each maps to a failure the middleware cannot
+// Seven conditions are checked, and each maps to a failure the middleware cannot
 // mitigate once the process is serving:
 //
 //  1. Requires no credential and is not allowlisted → 401 for every caller. The shape
@@ -176,18 +219,28 @@ var operationTiers = map[string]operationPolicy{
 //     consults publicRoutes only for operations that require no credential, so the
 //     allowlist entry goes dead. This is the same probe outage as (1) arriving from the
 //     opposite direction: kubelet's liveness AND readiness, every replica, at once.
-//  3. Listed write-tier but not served at the write tier → silent privilege escalation.
-//     Unlike (1) and (2) the route keeps working, so nothing surfaces while the read key
-//     gains a mutation.
+//  3. Registered but absent from operationTiers → never tier-checked at all, because the
+//     map lookup yields the zero policy whose tier matches nothing. A mutation that was
+//     copy-pasted with apiKeySecurity and never added to the table is served to the read
+//     key, and that is one author making one lapse.
+//  4. Public-tier in operationTiers but demanding a credential → the probe outage of (1)
+//     and (2) arriving with the path renamed AND the declaration added. Each half alone is
+//     caught by an earlier check; the combination falls between them.
+//  5. Not public-tier in operationTiers but requiring no credential → an OPEN ROUTE. The
+//     mirror of (4), and the only one of the pair that opens a route rather than closing
+//     one: the route is allowlisted so (2) skips it, and the tier arms below only fire for
+//     public and write rows, so a read-tier row lands on the allowlist and serves to anyone.
+//  6. Listed write-tier but not served at the write tier → silent privilege escalation.
+//     Unlike the outage classes the route keeps working, so nothing surfaces while the
+//     read key gains a mutation.
+//  7. Listed with a live gate but not registered → a stale row. The table is the inventory
+//     every other check is read against, so a row that no longer matches anything silently
+//     narrows all of them.
 //
-// (Dropping a prefix instead is harmless: the route is de-registered from the mux
+// (Dropping a prefix is harmless by contrast: the route is de-registered from the mux
 // entirely, so requests 404 and the middleware never runs.)
 //
-//  4. Listed in operationTiers with a live gate but not registered → a stale row. The
-//     table is the inventory the other three checks are read against, so a row that no
-//     longer matches anything silently narrows all of them.
-//
-// Gates are what make (4) safe. buildHandler registers conditionally — a ClickHouse
+// Gates are what make (7) safe. buildHandler registers conditionally — a ClickHouse
 // outage leaves five collaborators nil and their routes unregistered — so the check runs
 // only for rows whose gate is up. A degraded boot stays a boot.
 //
@@ -196,10 +249,19 @@ var operationTiers = map[string]operationPolicy{
 // one route a 403 rather than a fleet-wide outage, and refusing to boot would be the
 // heavier of the two failures.
 //
-// This walks the OpenAPI document, so it shares that document's blind spot for
-// operations marked Hidden. Those are still enforced by the middleware at runtime.
+// On Hidden operations. This walks the OpenAPI document, and huma omits Hidden operations
+// from it while still routing them — so checks (1) through (6) cannot see such a route,
+// and it serves traffic no document-walking check can inspect. Check (7) is the exception
+// and it points the other way: a Hidden operation that has a row with a live gate looks
+// unregistered, so the process refuses to boot. That coupling is deliberate. Re-keying the
+// stale scan on registered mux patterns would make Hidden routes boot silently, and since
+// the middleware fails closed on a missing credential but not on the wrong tier, a Hidden
+// mutation declaring apiKey would then be served to the read key with nothing to catch it.
+// The boot failure is currently the only signal anywhere in the system. If Hidden is ever
+// genuinely needed, add a mux-pattern-based tier check alongside the document walk — never
+// instead of it.
 func verifyRouteSecurity(api huma.API, liveGates map[string]bool) error {
-	var undeclared, contradicted, mistiered []string
+	var undeclared, contradicted, unlisted, mispublic, overexposed, mistiered []string
 	registered := map[string]struct{}{}
 	for path, item := range api.OpenAPI().Paths {
 		// PathItem has no operation iterator, so the verbs are enumerated explicitly.
@@ -213,12 +275,19 @@ func verifyRouteSecurity(api huma.API, liveGates map[string]bool) error {
 			registered[op.OperationID] = struct{}{}
 			route := fmt.Sprintf("%s %s (operationId %q)", strings.ToUpper(op.Method), path, op.OperationID)
 			needsCredential := middleware.RequiresCredential(op)
+			policy, listed := operationTiers[op.OperationID]
 			switch {
 			case middleware.IsPublicRoute(op.Method, op.Path) && needsCredential:
 				contradicted = append(contradicted, route)
 			case !middleware.IsPublicRoute(op.Method, op.Path) && !needsCredential:
 				undeclared = append(undeclared, route)
-			case operationTiers[op.OperationID].tier == tierWrite && !middleware.ServedAtWriteTier(op):
+			case !listed:
+				unlisted = append(unlisted, route)
+			case policy.tier == tierPublic && needsCredential:
+				mispublic = append(mispublic, route)
+			case policy.tier != tierPublic && !needsCredential:
+				overexposed = append(overexposed, route)
+			case policy.tier == tierWrite && !middleware.RequiresWriteKey(op):
 				mistiered = append(mistiered, route)
 			}
 		}
@@ -234,39 +303,54 @@ func verifyRouteSecurity(api huma.API, liveGates map[string]bool) error {
 		}
 	}
 
-	switch {
-	case len(contradicted) > 0:
-		sort.Strings(contradicted)
-		return fmt.Errorf(
-			"refusing to start: %d allowlisted route(s) declare a Security requirement: %s — the "+
-				"middleware consults publicRoutes only for operations that require no credential, so "+
+	// Every class is reported, not just the first. Under a boot guard each hidden class
+	// costs a full build-and-deploy cycle to discover, and the buckets are already
+	// computed. errors.Join returns nil when every argument is nil.
+	return errors.Join(
+		routeSecurityError(contradicted,
+			"allowlisted route(s) declare a Security requirement",
+			"the middleware consults publicRoutes only for operations that require no credential, so "+
 				"these would return 401 to every caller including the kubelet probes. Drop the Security "+
-				"declaration, or remove the route from publicRoutes in internal/middleware/auth.go",
-			len(contradicted), strings.Join(contradicted, ", "))
-	case len(undeclared) > 0:
-		sort.Strings(undeclared)
-		return fmt.Errorf(
-			"refusing to start: %d route(s) require no credential and are not in publicRoutes, so they "+
-				"would return 401 to every caller: %s — declare Security on the operation, or add the "+
-				"route to publicRoutes in internal/middleware/auth.go",
-			len(undeclared), strings.Join(undeclared, ", "))
-	case len(mistiered) > 0:
-		sort.Strings(mistiered)
-		return fmt.Errorf(
-			"refusing to start: %d route(s) are write-tier in operationTiers but would be served at the "+
-				"read tier: %s — the declaration must name writeApiKey, otherwise SLIPPY_API_KEY is "+
-				"accepted for a mutation",
-			len(mistiered), strings.Join(mistiered, ", "))
-	case len(stale) > 0:
-		sort.Strings(stale)
-		return fmt.Errorf(
-			"refusing to start: %d operationTiers row(s) have a live gate but name no registered "+
-				"operation: %s — the table is the inventory every other route-security check is read "+
-				"against, so a stale row silently narrows all of them. Remove the row, or restore the "+
-				"route",
-			len(stale), strings.Join(stale, ", "))
+				"declaration, or remove the route from publicRoutes in internal/middleware/auth.go"),
+		routeSecurityError(undeclared,
+			"route(s) require no credential and are not in publicRoutes",
+			"they would return 401 to every caller. Declare Security on the operation, or add the "+
+				"route to publicRoutes in internal/middleware/auth.go"),
+		routeSecurityError(unlisted,
+			"registered route(s) are absent from operationTiers",
+			"the table is the inventory every tier check is read against, so an unlisted route is "+
+				"never tier-checked at all and a mutation declaring apiKey would be served to "+
+				"SLIPPY_API_KEY. Add a row naming the tier and the gate"),
+		routeSecurityError(mispublic,
+			"route(s) are public-tier in operationTiers but demand a credential",
+			"a public-tier row asserts the route serves with no credential, so this is the probe "+
+				"outage above arriving with the path renamed AND the declaration added. Drop the "+
+				"Security declaration, or change the row's tier"),
+		routeSecurityError(overexposed,
+			"route(s) are not public-tier in operationTiers but require no credential",
+			"the route is on the publicRoutes allowlist, so it is served to anyone while the "+
+				"inventory says a key is required. This is the mirror of the case above and the "+
+				"only one of the pair that opens a route rather than closing one. Declare Security "+
+				"on the operation, or change the row's tier to public and keep the allowlist entry"),
+		routeSecurityError(mistiered,
+			"route(s) are write-tier in operationTiers but would be served at the read tier",
+			"the declaration must name writeApiKey, otherwise SLIPPY_API_KEY is accepted for a "+
+				"mutation"),
+		routeSecurityError(stale,
+			"operationTiers row(s) have a live gate but name no registered operation",
+			"the table is the inventory every other route-security check is read against, so a stale "+
+				"row silently narrows all of them. Remove the row, or restore the route"),
+	)
+}
+
+// routeSecurityError renders one class of route-security defect, or nil when the class
+// is empty. Names are sorted so the message is stable across map-iteration order.
+func routeSecurityError(names []string, what, why string) error {
+	if len(names) == 0 {
+		return nil
 	}
-	return nil
+	sort.Strings(names)
+	return fmt.Errorf("refusing to start: %d %s: %s — %s", len(names), what, strings.Join(names, ", "), why)
 }
 
 // buildHandler creates the fully-wired HTTP handler with auth, routes, and
@@ -278,16 +362,6 @@ func verifyRouteSecurity(api huma.API, liveGates map[string]bool) error {
 // It returns an error when the registered routes fail verifyRouteSecurity, so a
 // wiring mistake stops the process at boot instead of serving 401s.
 func buildHandler(deps handlerDeps) (http.Handler, error) {
-	cfg := deps.cfg
-	reader := deps.reader
-	writer := deps.writer
-	imageTagReader := deps.imageTagReader
-	ciJobLogReader := deps.ciJobLogReader
-	automationTestResultsReader := deps.automationTestResultsReader
-	automationTestsReader := deps.automationTestsReader
-	pipelineCfg := deps.pipelineCfg
-	diagnosticsHandler := deps.diagnosticsHandler
-
 	mux := deps.mux
 	if mux == nil {
 		mux = http.NewServeMux()
@@ -304,7 +378,7 @@ func buildHandler(deps handlerDeps) (http.Handler, error) {
 	api := humago.New(mux, apiConfig)
 
 	// Register authentication middleware.
-	api.UseMiddleware(middleware.NewAPIKeyAuth(cfg.APIKey, cfg.WriteAPIKey))
+	api.UseMiddleware(middleware.NewAPIKeyAuth(deps.cfg.APIKey, deps.cfg.WriteAPIKey))
 
 	// Register routes on both unversioned (legacy) and /v1 paths.
 	// The empty prefix keeps existing routes unchanged for backward compatibility.
@@ -312,18 +386,18 @@ func buildHandler(deps handlerDeps) (http.Handler, error) {
 	grp := huma.NewGroup(api, "", "/v1")
 
 	handler.RegisterHealthRoutes(grp)
-	h := handler.NewSlipHandler(reader)
+	h := handler.NewSlipHandler(deps.reader)
 	handler.RegisterRoutes(grp, h)
 
-	// Register image tag routes when a reader is available.
-	if imageTagReader != nil {
-		ith := handler.NewImageTagHandler(imageTagReader)
+	// Register image tag routes when a deps.reader is available.
+	if deps.imageTagReader != nil {
+		ith := handler.NewImageTagHandler(deps.imageTagReader)
 		handler.RegisterImageTagRoutes(grp, ith)
 	}
 
-	// Register CI job log routes when a reader is available.
-	if ciJobLogReader != nil {
-		clh := handler.NewCIJobLogHandler(ciJobLogReader)
+	// Register CI job log routes when a deps.reader is available.
+	if deps.ciJobLogReader != nil {
+		clh := handler.NewCIJobLogHandler(deps.ciJobLogReader)
 		handler.RegisterCIJobLogRoutes(grp, clh)
 	}
 
@@ -331,36 +405,36 @@ func buildHandler(deps handlerDeps) (http.Handler, error) {
 	v1Only := huma.NewGroup(api, "/v1")
 
 	// Pipeline config: v1-only.
-	pch := handler.NewPipelineConfigHandler(pipelineCfg)
+	pch := handler.NewPipelineConfigHandler(deps.pipelineCfg)
 	handler.RegisterPipelineConfigRoutes(v1Only, pch)
 
 	// Step prerequisites: v1-only.
-	sprh := handler.NewStepPrerequisitesHandler(reader, pipelineCfg)
+	sprh := handler.NewStepPrerequisitesHandler(deps.reader, deps.pipelineCfg)
 	handler.RegisterStepPrerequisitesRoutes(v1Only, sprh)
 
-	// Automation test results: v1-only. The optional automationTestsReader
+	// Automation test results: v1-only. The optional deps.automationTestsReader
 	// powers the per-test drill-down endpoints; when nil, only the parent
 	// run-summary routes are registered.
-	if automationTestResultsReader != nil {
-		atrh := handler.NewAutomationTestResultsHandler(automationTestResultsReader, automationTestsReader)
+	if deps.automationTestResultsReader != nil {
+		atrh := handler.NewAutomationTestResultsHandler(deps.automationTestResultsReader, deps.automationTestsReader)
 		handler.RegisterAutomationTestResultsRoutes(v1Only, atrh)
 	}
 
 	// Write routes: v1-only.
-	// Extract cache invalidator from reader when available (CachedSlipReader implements it).
-	if writer != nil {
+	// Extract cache invalidator from deps.reader when available (CachedSlipReader implements it).
+	if deps.writer != nil {
 		var inv domain.Invalidator
-		if i, ok := reader.(domain.Invalidator); ok {
+		if i, ok := deps.reader.(domain.Invalidator); ok {
 			inv = i
 		}
-		wh := handler.NewSlipWriteHandler(writer, inv)
+		wh := handler.NewSlipWriteHandler(deps.writer, inv)
 		handler.RegisterWriteRoutes(v1Only, wh)
 	}
 
 	// Diagnostic routes: v1-only. Read-only probes of the service's own datastores;
 	// they require the read key like every other read operation.
-	if diagnosticsHandler != nil {
-		handler.RegisterDiagnosticsRoutes(v1Only, diagnosticsHandler)
+	if deps.diagnosticsHandler != nil {
+		handler.RegisterDiagnosticsRoutes(v1Only, deps.diagnosticsHandler)
 	}
 
 	// Fail the wiring rather than the requests: a route that requires no credential
@@ -369,14 +443,19 @@ func buildHandler(deps handlerDeps) (http.Handler, error) {
 	// The gate map is built from the same nil checks that decided registration above, so
 	// the guard's view of which operations *should* exist is exact in a degraded boot as
 	// well as a full one.
-	if err := verifyRouteSecurity(api, map[string]bool{
-		gateAlways:      true,
-		gateImageTags:   imageTagReader != nil,
-		gateCIJobLogs:   ciJobLogReader != nil,
-		gateAutomation:  automationTestResultsReader != nil,
-		gateWrites:      writer != nil,
-		gateDiagnostics: diagnosticsHandler != nil,
-	}); err != nil {
+	// Joined, not sequential: an unknown gate would otherwise suppress every route-security
+	// class for that boot, which is the "one class per boot" cost the guard exists to avoid.
+	if err := errors.Join(verifyGateNames(), verifyRouteSecurity(api, map[string]bool{
+		gateAlways:     true,
+		gateImageTags:  deps.imageTagReader != nil,
+		gateCIJobLogs:  deps.ciJobLogReader != nil,
+		gateAutomation: deps.automationTestResultsReader != nil,
+		// A conjunction, not just deps.automationTestsReader: the inner `h.testsReader != nil`
+		// guard only runs when the outer `deps.automationTestResultsReader != nil` did.
+		gateAutomationTests: deps.automationTestResultsReader != nil && deps.automationTestsReader != nil,
+		gateWrites:          deps.writer != nil,
+		gateDiagnostics:     deps.diagnosticsHandler != nil,
+	})); err != nil {
 		return nil, err
 	}
 
@@ -407,6 +486,14 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("Cache-Control", "no-store")
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'")
+		// Set unconditionally even though this listener is plaintext (TLS terminates at the
+		// ingress). RFC 6797 §8.1 requires a client to ignore the header on a non-secure
+		// connection, so the in-cluster hop is unaffected, and the ingress re-serves it over
+		// TLS where it takes effect. Note §7.2 says an HSTS host MUST NOT send the header over
+		// non-secure transport — so the strictly correct home for this is the ingress; it is
+		// set here so the guarantee does not depend on infrastructure this repo cannot see.
+		// No preload: that is a domain-wide commitment belonging to whoever owns the apex.
+		h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -714,6 +801,17 @@ func run() error {
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
 		Handler:           otelHandler,
 		ReadHeaderTimeout: 10 * time.Second,
+		// Without ReadTimeout AND IdleTimeout, Server.idleTimeout() falls back to ReadTimeout
+		// (zero), so conn.serve clears the read deadline entirely and a keep-alive connection
+		// is never reaped. An unauthenticated caller can hold connections open on /health
+		// until file descriptors run out.
+		//
+		// WriteTimeout is deliberately NOT set yet: the ancestry walk behind
+		// find-by-commits/find-all-by-commits is currently unbounded, so a write deadline
+		// would cut legitimate slow requests before the real fix (bounding that fan-out)
+		// lands. Tracked as a follow-up — see the PR discussion.
+		ReadTimeout: 30 * time.Second,
+		IdleTimeout: 120 * time.Second,
 	}
 
 	// --- Graceful shutdown ---

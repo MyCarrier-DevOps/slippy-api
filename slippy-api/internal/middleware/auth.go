@@ -21,7 +21,7 @@ const authTracerName = "slippy-api/auth"
 
 const (
 	// readAPIKeyScheme names the security scheme served at the read tier. It is the
-	// only scheme name that does not escalate to the write key — see requiresWriteKey.
+	// only scheme name that does not escalate to the write key — see RequiresWriteKey.
 	readAPIKeyScheme = "apiKey"
 	// writeAPIKeyScheme names the security scheme served at the write tier.
 	writeAPIKeyScheme = "writeApiKey"
@@ -116,7 +116,7 @@ func authorize(ctx huma.Context, op *huma.Operation, readKey, writeKey string) b
 		return false
 	}
 
-	if requiresWriteKey(op) {
+	if RequiresWriteKey(op) {
 		// Write operations: only the write key is accepted.
 		if writeKey == "" || subtle.ConstantTimeCompare([]byte(token), []byte(writeKey)) != 1 {
 			span.SetAttributes(attribute.String("auth.result", "invalid_token"))
@@ -191,24 +191,12 @@ func PublicRoutes() []string {
 // KnownSecuritySchemes returns the security scheme names this middleware tiers
 // explicitly, sorted.
 //
-// Any name outside this set is enforced at the write tier by requiresWriteKey, so a
+// Any name outside this set is enforced at the write tier by RequiresWriteKey, so a
 // scheme added to the OpenAPI document without being added here silently becomes
 // write-only. Exported so the route audit can pin the document's scheme set against
 // what the middleware actually understands.
 func KnownSecuritySchemes() []string {
 	return []string{readAPIKeyScheme, writeAPIKeyScheme}
-}
-
-// ServedAtWriteTier reports whether the operation's declaration would make the
-// middleware demand the write key.
-//
-// Exported so the startup route check can ask the middleware for its actual tiering
-// decision rather than re-deriving it from scheme names. Re-deriving is the whole
-// failure mode: an operation that should be write-tier but declares only "apiKey" is
-// served at the read tier by design, and a caller that inspected the declaration itself
-// would have to duplicate — and could drift from — requiresWriteKey's rule.
-func ServedAtWriteTier(op *huma.Operation) bool {
-	return requiresWriteKey(op)
 }
 
 // rejectUndeclaredOperation refuses an operation that requires no credential and is
@@ -261,7 +249,13 @@ func RequiresCredential(op *huma.Operation) bool {
 	return true
 }
 
-// requiresWriteKey reports whether the operation must be served the write key.
+// RequiresWriteKey reports whether the operation must be served the write key.
+//
+// Exported so the startup route check can ask the middleware for its actual tiering
+// decision rather than re-deriving it from scheme names. Re-deriving is the whole failure
+// mode it guards against: an operation that should be write-tier but declares only
+// "apiKey" is served at the read tier by design, and a caller inspecting the declaration
+// itself would duplicate — and could drift from — the rule below.
 //
 // The default is inverted deliberately: an operation is served at the read tier only
 // when every requirement names exactly readAPIKeyScheme and nothing else. Any other
@@ -278,7 +272,7 @@ func RequiresCredential(op *huma.Operation) bool {
 // from read-key-accepted to 403), so a future read-tier scheme must be added to the
 // condition below in the same change that adds it to the document. Scopes are
 // ignored, so `{apiKey: ["read"]}` is unaffected.
-func requiresWriteKey(op *huma.Operation) bool {
+func RequiresWriteKey(op *huma.Operation) bool {
 	for _, req := range op.Security {
 		for scheme := range req {
 			if scheme != readAPIKeyScheme {

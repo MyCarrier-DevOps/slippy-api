@@ -309,11 +309,81 @@ func TestVerifyRouteSecurity(t *testing.T) {
 	})
 
 	t.Run("secured route passes", func(t *testing.T) {
+		// Must use a listed operation ID: an unlisted one now trips the unlisted arm.
 		api := newTestAPI(t, huma.Operation{
-			OperationID: "get-thing", Method: http.MethodGet, Path: "/thing",
+			OperationID: "get-slip", Method: http.MethodGet, Path: "/slips/{correlationID}",
 			Security: []map[string][]string{{"apiKey": {}}},
 		})
 		assert.NoError(t, verifyRouteSecurity(api, nil))
+	})
+
+	// A registered operation with no operationTiers row is never tier-checked: the map
+	// lookup yields the zero policy, whose tier is "" and never matches tierWrite. So a
+	// mutation that was copy-pasted with apiKeySecurity AND never added to the table —
+	// one author, one lapse — boots and serves mutations to the read key.
+	t.Run("unlisted operation fails", func(t *testing.T) {
+		api := newTestAPI(t, huma.Operation{
+			OperationID: "delete-slip", Method: http.MethodDelete, Path: "/v1/slips/{correlationID}",
+			Security: []map[string][]string{{"apiKey": {}}},
+		})
+		err := verifyRouteSecurity(api, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "DELETE /v1/slips/{correlationID}")
+		assert.Contains(t, err.Error(), "absent from operationTiers")
+	})
+
+	// A public-tier row whose route was renamed AND given a Security declaration. Each
+	// half alone is caught (by the stale arm and the contradicted arm respectively); the
+	// combination slips between them, and the result is a 401 to both kubelet probes.
+	t.Run("public-tier row demanding a credential fails", func(t *testing.T) {
+		api := newTestAPI(t, huma.Operation{
+			OperationID: "health-check", Method: http.MethodGet, Path: "/healthz",
+			Security: []map[string][]string{{"apiKey": {}}},
+		})
+		err := verifyRouteSecurity(api, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "GET /healthz")
+		assert.Contains(t, err.Error(), "public-tier")
+	})
+
+	// The mirror of the public-tier check, and the only one of the pair whose failure is
+	// an OPEN ROUTE rather than an outage: a row that is not public-tier, at a route that
+	// IS allowlisted, declaring no Security. Case 2 skips it (the route is allowlisted),
+	// and the tier arms only fire for tierPublic and tierWrite — so a read-tier operation
+	// lands on the allowlist and serves to anyone while the inventory says it needs a key.
+	t.Run("non-public-tier row served with no credential fails", func(t *testing.T) {
+		api := newTestAPI(t, huma.Operation{
+			OperationID: "get-slip", Method: http.MethodGet, Path: "/health",
+		})
+		err := verifyRouteSecurity(api, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "GET /health")
+		assert.Contains(t, err.Error(), "no credential")
+	})
+
+	// Every class is reported, not just the first: under a boot guard each hidden class
+	// costs a full build-and-deploy cycle to discover.
+	t.Run("multiple classes are all reported", func(t *testing.T) {
+		mux := http.NewServeMux()
+		api := humago.New(mux, huma.DefaultConfig("Test", "1.0.0"))
+		register := func(op huma.Operation) {
+			huma.Register(api, op, func(_ context.Context, _ *struct{}) (*struct{ Body string }, error) {
+				return &struct{ Body string }{Body: "ok"}, nil
+			})
+		}
+		register(huma.Operation{ // unlisted
+			OperationID: "delete-slip", Method: http.MethodDelete, Path: "/v1/slips/{id}",
+			Security: []map[string][]string{{"apiKey": {}}},
+		})
+		register(huma.Operation{ // mistiered
+			OperationID: "create-slip", Method: http.MethodPost, Path: "/v1/slips",
+			Security: []map[string][]string{{"apiKey": {}}},
+		})
+
+		err := verifyRouteSecurity(api, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "absent from operationTiers")
+		assert.Contains(t, err.Error(), "write-tier in operationTiers")
 	})
 
 	t.Run("renamed health route fails", func(t *testing.T) {
@@ -359,7 +429,11 @@ func TestVerifyRouteSecurity(t *testing.T) {
 		err := verifyRouteSecurity(api, nil)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "GET /health")
-		assert.Contains(t, err.Error(), "publicRoutes")
+		// Both 401 classes mention publicRoutes and interpolate the route, so assert on
+		// the phrase unique to this one — otherwise a swap of the two case bodies would
+		// pass here while handing the operator the exactly-inverted remediation.
+		assert.Contains(t, err.Error(), "declare a Security requirement",
+			"must be diagnosed as allowlisted-but-secured, not as undeclared")
 	})
 
 	// A write-tier operation served at the read tier is silent privilege escalation:
@@ -409,6 +483,35 @@ func TestVerifyRouteSecurity(t *testing.T) {
 		})
 		// Every gate down, including gateAlways, so no row is expected to be present.
 		assert.NoError(t, verifyRouteSecurity(api, map[string]bool{}))
+	})
+
+	// The partial wiring buildHandler's own doc comment documents as supported: the
+	// run-summary reader present, the per-test drill-down reader absent.
+	// RegisterAutomationTestResultsRoutes registers the parent route unconditionally and
+	// the two drill-downs behind `h.testsReader != nil`, so those two rows need their own
+	// gate. Conflating them made this shape refuse to boot — and nothing caught it,
+	// because every other fixture supplies both readers together.
+	t.Run("automation drill-down reader absent is accepted", func(t *testing.T) {
+		cfg := &config.Config{APIKey: "test-key", WriteAPIKey: "write-key", Port: 8080}
+		h, err := buildHandler(handlerDeps{
+			cfg:                         cfg,
+			reader:                      newStubSlipReader(),
+			writer:                      &stubSlipWriter{},
+			imageTagReader:              &stubImageTagReader{},
+			ciJobLogReader:              &stubCIJobLogReader{},
+			automationTestResultsReader: &stubAutomationTestResultsReader{},
+			automationTestsReader:       nil, // drill-down routes not registered
+			diagnosticsHandler:          handler.NewDiagnosticsHandler(mockClickHouseSession(), "slippy"),
+		})
+		require.NoError(t, err,
+			"the parent-reader-only wiring is documented as supported and must still boot")
+		require.NotNil(t, h)
+	})
+
+	// Every gate an operationTiers row names must be a declared constant, or the
+	// stale-row check skips that row forever.
+	t.Run("every tier row names a known gate", func(t *testing.T) {
+		require.NoError(t, verifyGateNames())
 	})
 
 	// The degraded shape buildHandler actually produces: ClickHouse-backed readers and
@@ -1349,15 +1452,16 @@ func TestBuildHandler_SecurityHeaders(t *testing.T) {
 	h := buildFullyWiredHandler(t, nil)
 
 	tests := []struct {
-		name  string
-		path  string
-		token string
+		name       string
+		path       string
+		token      string
+		wantStatus int
 	}{
-		{"slip read (200)", "/v1/slips/test-corr-001", "test-key"},
-		{"auth failure (401)", "/v1/slips/test-corr-001", ""},
-		{"health (200, no credential)", "/health", ""},
-		{"openapi (adapter route)", "/openapi.json", ""},
-		{"schemas (adapter route)", "/schemas/ErrorModel.json", ""},
+		{"slip read (200)", "/v1/slips/test-corr-001", "test-key", http.StatusOK},
+		{"auth failure (401)", "/v1/slips/test-corr-001", "", http.StatusUnauthorized},
+		{"health (200, no credential)", "/health", "", http.StatusOK},
+		{"openapi (adapter route)", "/openapi.json", "", http.StatusOK},
+		{"schemas (adapter route)", "/schemas/ErrorModel.json", "", http.StatusOK},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1368,10 +1472,14 @@ func TestBuildHandler_SecurityHeaders(t *testing.T) {
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, req)
 
+			// The headers are set outside the mux, so a 404 would carry them too. Pin the
+			// status so each case proves it exercised the response path it names.
+			require.Equal(t, tt.wantStatus, w.Code)
 			assert.Equal(t, "nosniff", w.Header().Get("X-Content-Type-Options"))
 			assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
 			assert.Equal(t, "no-referrer", w.Header().Get("Referrer-Policy"))
 			assert.Contains(t, w.Header().Get("Content-Security-Policy"), "frame-ancestors 'none'")
+			assert.Equal(t, "max-age=31536000; includeSubDomains", w.Header().Get("Strict-Transport-Security"))
 		})
 	}
 

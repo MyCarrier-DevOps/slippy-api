@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
@@ -75,7 +76,7 @@ func Load() (*Config, error) {
 	if v := os.Getenv("PORT"); v != "" {
 		port, err := strconv.Atoi(v)
 		if err != nil {
-			return nil, fmt.Errorf("PORT must be a valid integer: %w", err)
+			return nil, fmt.Errorf("PORT must be a valid integer")
 		}
 		cfg.Port = port
 	}
@@ -89,7 +90,7 @@ func Load() (*Config, error) {
 	if v := os.Getenv("DRAGONFLY_PORT"); v != "" {
 		port, err := strconv.Atoi(v)
 		if err != nil {
-			return nil, fmt.Errorf("DRAGONFLY_PORT must be a valid integer: %w", err)
+			return nil, fmt.Errorf("DRAGONFLY_PORT must be a valid integer")
 		}
 		cfg.DragonflyPort = port
 	}
@@ -101,7 +102,7 @@ func Load() (*Config, error) {
 	if v := os.Getenv("CACHE_TTL"); v != "" {
 		ttl, err := time.ParseDuration(v)
 		if err != nil {
-			return nil, fmt.Errorf("CACHE_TTL must be a valid duration (e.g. 10m): %w", err)
+			return nil, fmt.Errorf("CACHE_TTL must be a valid duration (e.g. 10m)")
 		}
 		cfg.CacheTTL = ttl
 	}
@@ -112,7 +113,7 @@ func Load() (*Config, error) {
 	} else {
 		id, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("SLIPPY_GITHUB_APP_ID must be a valid integer: %w", err)
+			return nil, fmt.Errorf("SLIPPY_GITHUB_APP_ID must be a valid integer")
 		}
 		cfg.GitHubAppID = id
 	}
@@ -130,7 +131,7 @@ func Load() (*Config, error) {
 	if v := os.Getenv("SLIPPY_ANCESTRY_DEPTH"); v != "" {
 		depth, err := strconv.Atoi(v)
 		if err != nil {
-			return nil, fmt.Errorf("SLIPPY_ANCESTRY_DEPTH must be a valid integer: %w", err)
+			return nil, fmt.Errorf("SLIPPY_ANCESTRY_DEPTH must be a valid integer")
 		}
 		if depth < 1 {
 			return nil, fmt.Errorf("SLIPPY_ANCESTRY_DEPTH must be at least 1")
@@ -144,12 +145,35 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("SLIPPY_WRITE_API_KEY is required")
 	}
 
+	// Reject a padded key before comparing the two. The middleware trims the presented
+	// bearer token (extractBearerToken), so a key carrying surrounding whitespace is not
+	// the value that comparison actually sees. Two consequences, both bad: a read key
+	// equal to the write key plus a trailing newline is byte-different here — passing the
+	// distinctness check below — while still authenticating at the write tier; and a
+	// padded WRITE key can never authenticate at all, because the trimmed token never
+	// equals the untrimmed key. A Secret created from a file routinely ends in a newline,
+	// so this is an ordinary operator slip, not a contrived one.
+	//
+	// Refusing is better than trimming for the caller: silently accepting a padded value
+	// would mean the credential the operator issued is not the credential that works.
+	for _, key := range []struct{ name, value string }{
+		{"SLIPPY_API_KEY", cfg.APIKey},
+		{"SLIPPY_WRITE_API_KEY", cfg.WriteAPIKey},
+	} {
+		if strings.TrimSpace(key.value) != key.value {
+			return nil, fmt.Errorf(
+				"%s has leading or trailing whitespace: the bearer token is trimmed before "+
+					"comparison, so a padded key either fails to authenticate or silently matches a "+
+					"differently-padded key", key.name)
+		}
+	}
+
 	// Refuse rather than warn. Identical keys collapse the read/write tier boundary,
 	// and the collapse is invisible once the process is serving: the middleware's
 	// tiering still evaluates correctly, it just returns the same answer for both keys,
 	// so no request is rejected and nothing is logged. A pod that will not start is
-	// loud, bounded, and leaves the previous ReplicaSet serving; a silently collapsed
-	// authorization boundary is none of those and would be discovered only by audit.
+	// loud and bounded; a silently collapsed authorization boundary is neither, and
+	// would be discovered only by audit.
 	if cfg.TiersCollapsed() {
 		return nil, fmt.Errorf(
 			"SLIPPY_API_KEY and SLIPPY_WRITE_API_KEY must be distinct: identical values make the " +
@@ -179,13 +203,20 @@ func (c *Config) CacheEnabled() bool {
 // SLIPPY_WRITE_API_KEY belongs to in-cluster pipeline components. Collapsing them
 // silently grants the Actions-runner population write access to the slip state machine.
 //
-// Comparison is constant-time for the same reason the middleware's is. An unset key
-// returns false rather than matching another unset key: Load rejects an empty key
-// first with a more specific message, and a hand-built Config should not report a
-// collapsed tier it does not have.
+// Values are trimmed before comparison so this agrees with the credential the middleware
+// actually compares — extractBearerToken trims the presented bearer token, which makes
+// two keys differing only by surrounding whitespace the same credential in practice.
+// Load rejects padded keys outright, so on a loaded Config the trim is a no-op; it
+// matters for a hand-built Config, which must not miss a collapse it does have.
+//
+// Comparison is constant-time by convention rather than necessity — both operands are
+// local, and no remote caller can time a startup check. An unset key returns false
+// rather than matching another unset key: Load rejects an empty key first with a more
+// specific message.
 func (c *Config) TiersCollapsed() bool {
-	if c.APIKey == "" || c.WriteAPIKey == "" {
+	read, write := strings.TrimSpace(c.APIKey), strings.TrimSpace(c.WriteAPIKey)
+	if read == "" || write == "" {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(c.APIKey), []byte(c.WriteAPIKey)) == 1
+	return subtle.ConstantTimeCompare([]byte(read), []byte(write)) == 1
 }

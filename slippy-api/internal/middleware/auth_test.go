@@ -285,10 +285,10 @@ func TestKnownSecuritySchemes(t *testing.T) {
 	assert.Equal(t, []string{"apiKey", "writeApiKey"}, KnownSecuritySchemes())
 }
 
-// TestServedAtWriteTier pins the exported view of the tiering decision. The startup
-// route check asks this rather than inspecting scheme names itself, so it must track
-// requiresWriteKey exactly — a divergence here is the drift the export exists to avoid.
-func TestServedAtWriteTier(t *testing.T) {
+// TestServedAtWriteTier_ExportedSurface pins the tiering decision as the startup route
+// check sees it, which is the same function the middleware uses — there is no second
+// implementation to drift from.
+func TestServedAtWriteTier_ExportedSurface(t *testing.T) {
 	tests := []struct {
 		name     string
 		security []map[string][]string
@@ -302,9 +302,7 @@ func TestServedAtWriteTier(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			op := &huma.Operation{Security: tt.security}
-			assert.Equal(t, tt.expected, ServedAtWriteTier(op))
-			assert.Equal(t, requiresWriteKey(op), ServedAtWriteTier(op),
-				"the exported predicate must not diverge from the one the middleware uses")
+			assert.Equal(t, tt.expected, RequiresWriteKey(op))
 		})
 	}
 }
@@ -584,7 +582,7 @@ func TestRequiresWriteKey(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			op := &huma.Operation{Security: tt.security}
-			assert.Equal(t, tt.expected, requiresWriteKey(op))
+			assert.Equal(t, tt.expected, RequiresWriteKey(op))
 		})
 	}
 }
