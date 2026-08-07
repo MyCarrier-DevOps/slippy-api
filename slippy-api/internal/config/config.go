@@ -144,6 +144,18 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("SLIPPY_WRITE_API_KEY is required")
 	}
 
+	// Refuse rather than warn. Identical keys collapse the read/write tier boundary,
+	// and the collapse is invisible once the process is serving: the middleware's
+	// tiering still evaluates correctly, it just returns the same answer for both keys,
+	// so no request is rejected and nothing is logged. A pod that will not start is
+	// loud, bounded, and leaves the previous ReplicaSet serving; a silently collapsed
+	// authorization boundary is none of those and would be discovered only by audit.
+	if cfg.TiersCollapsed() {
+		return nil, fmt.Errorf(
+			"SLIPPY_API_KEY and SLIPPY_WRITE_API_KEY must be distinct: identical values make the " +
+				"read/write tier split inert, so every read-key holder can mutate routing slips")
+	}
+
 	return cfg, nil
 }
 
@@ -153,7 +165,8 @@ func (c *Config) CacheEnabled() bool {
 }
 
 // TiersCollapsed reports whether both API keys are set to the same value, which makes
-// the read/write tier split inert: every read-key holder can mutate slips.
+// the read/write tier split inert: every read-key holder can mutate slips. Load refuses
+// to return a Config in that state.
 //
 // The condition is invisible from inside the request path. The middleware's tiering
 // still evaluates correctly — it just produces the same outcome for both keys — so no
@@ -167,8 +180,8 @@ func (c *Config) CacheEnabled() bool {
 // silently grants the Actions-runner population write access to the slip state machine.
 //
 // Comparison is constant-time for the same reason the middleware's is. An unset key
-// returns false rather than matching another unset key: Load requires both, so a
-// loaded Config cannot hit that case, and a hand-built one should not report a
+// returns false rather than matching another unset key: Load rejects an empty key
+// first with a more specific message, and a hand-built Config should not report a
 // collapsed tier it does not have.
 func (c *Config) TiersCollapsed() bool {
 	if c.APIKey == "" || c.WriteAPIKey == "" {

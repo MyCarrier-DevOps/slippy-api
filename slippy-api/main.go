@@ -39,20 +39,39 @@ func main() {
 	}
 }
 
-// newServeMux builds the router buildHandler registers on. Extracted as a package
-// variable so TestBuildHandler_CredentialFreeSurfaceIsClosed can substitute a recording
-// mux and observe the routes huma registers straight on the adapter, outside the
-// middleware chain. Those never enter the OpenAPI document, so there is no other way to
-// enumerate them.
+// handlerDeps carries everything buildHandler wires together.
 //
-// This is NOT the seam redisDial uses. redisDial is injected as a parameter —
-// connectCache takes a dial func and run() passes redisDial to it — and is never
-// reassigned; every test supplies its own closure as an argument. A package-level var
-// that a test mutates is the weaker form: it forecloses t.Parallel() anywhere in package
-// main, and `reassign` cannot flag it because .golangci.yml sets `tests: false`. Thread
-// the mux through the parameter list the next time buildHandler's signature is revisited
-// — the sole consumer of this seam is one test.
-var newServeMux = func() humago.Mux { return http.NewServeMux() }
+// A struct rather than a positional list because the list had already reached nine
+// parameters, most of them nil at most call sites — `buildHandler(cfg, reader, nil, nil,
+// nil, nil, nil, nil, nil)` says nothing about which nil is which. Named fields also let
+// a caller supply exactly the collaborators it needs without counting commas.
+//
+// Every field is injected, following connectCache's dial parameter rather than a package
+// global: a collaborator reached for from package scope is invisible at the call site,
+// forecloses t.Parallel(), and — for a var a test reassigns — escapes the `reassign`
+// linter entirely, since .golangci.yml sets `tests: false`.
+type handlerDeps struct {
+	cfg *config.Config
+
+	// mux is the router to register on. Nil means a fresh http.ServeMux, which is what
+	// run() wants; TestBuildHandler_CredentialFreeSurfaceIsClosed passes a recording mux
+	// to enumerate the routes huma registers straight on the adapter, outside the
+	// middleware chain. Those never enter the OpenAPI document, so there is no other way
+	// to see them.
+	mux humago.Mux
+
+	reader domain.SlipReader
+
+	// Optional. A nil field leaves the corresponding routes unregistered, which is how
+	// the service runs degraded when ClickHouse is unavailable.
+	writer                      domain.SlipWriter
+	imageTagReader              domain.ImageTagReader
+	ciJobLogReader              domain.CIJobLogReader
+	automationTestResultsReader domain.AutomationTestResultsReader
+	automationTestsReader       domain.AutomationTestsReader
+	pipelineCfg                 *slippy.PipelineConfig
+	diagnosticsHandler          *handler.DiagnosticsHandler
+}
 
 // Access tiers an operation can be served at, as enforced by the middleware.
 const (
@@ -60,6 +79,31 @@ const (
 	tierRead   = "read"   // apiKey — either key accepted
 	tierWrite  = "write"  // writeApiKey — write key only
 )
+
+// Gates naming the optional collaborator whose presence registers an operation.
+//
+// buildHandler registers conditionally: when ClickHouse is unavailable it leaves five
+// collaborators nil and their routes go unregistered, which main.go documents as a
+// supported degraded mode. Recording which gate gates which row is what lets the startup
+// guard check the reverse direction of operationTiers — that every row still names a
+// registered operation — without turning that degraded boot into a crashloop. A row
+// whose gate is down is expected to be absent; a row whose gate is up and is absent
+// anyway is a stale entry.
+const (
+	gateAlways      = ""                            // registered unconditionally
+	gateImageTags   = "imageTagReader"              // ci.buildinfo / ci.repoproperties
+	gateCIJobLogs   = "ciJobLogReader"              // observability.ciJob
+	gateAutomation  = "automationTestResultsReader" // autotest_results.*
+	gateWrites      = "writer"                      // slip mutations
+	gateDiagnostics = "diagnosticsHandler"          // legacy CH schema-version probe
+)
+
+// operationPolicy is the tier an operation must be served at, plus the gate that decides
+// whether it is registered at all.
+type operationPolicy struct {
+	tier string
+	gate string
+}
 
 // operationTiers is the tier every registered operation must be served at.
 //
@@ -75,41 +119,44 @@ const (
 // Tiers are never inferred from the HTTP method: find-by-commits and find-all-by-commits
 // are read-tier POSTs.
 //
-// This table is read in two places with deliberately different strictness.
-// verifyRouteSecurity checks only the escalation direction at startup (see there for
-// why); the route audit in main_test.go checks every tier in both directions against the
-// fully-wired fixture.
-var operationTiers = map[string]string{
-	"health-check":    tierPublic,
-	"v1-health-check": tierPublic,
+// This table is the single inventory of the service's route policy. verifyRouteSecurity
+// enforces it at startup; the route audit in main_test.go re-checks it against the
+// fully-wired fixture, where every gate is up and read-tier declarations can be pinned
+// exactly.
+var operationTiers = map[string]operationPolicy{
+	"health-check":    {tierPublic, gateAlways},
+	"v1-health-check": {tierPublic, gateAlways},
 
-	"get-slip":                                     tierRead,
-	"v1-get-slip":                                  tierRead,
-	"get-slip-by-commit":                           tierRead,
-	"v1-get-slip-by-commit":                        tierRead,
-	"find-by-commits":                              tierRead,
-	"v1-find-by-commits":                           tierRead,
-	"find-all-by-commits":                          tierRead,
-	"v1-find-all-by-commits":                       tierRead,
-	"get-image-tags":                               tierRead,
-	"v1-get-image-tags":                            tierRead,
-	"get-logs":                                     tierRead,
-	"v1-get-logs":                                  tierRead,
-	"get-pipeline-config":                          tierRead,
-	"get-step-prerequisites":                       tierRead,
-	"get-automation-test-results":                  tierRead,
-	"get-automation-test-results-tests":            tierRead,
-	"get-automation-test-result-by-id-correlation": tierRead,
-	"get-clickhouse-schema-version":                tierRead,
+	"get-slip":               {tierRead, gateAlways},
+	"v1-get-slip":            {tierRead, gateAlways},
+	"get-slip-by-commit":     {tierRead, gateAlways},
+	"v1-get-slip-by-commit":  {tierRead, gateAlways},
+	"find-by-commits":        {tierRead, gateAlways},
+	"v1-find-by-commits":     {tierRead, gateAlways},
+	"find-all-by-commits":    {tierRead, gateAlways},
+	"v1-find-all-by-commits": {tierRead, gateAlways},
+	"get-pipeline-config":    {tierRead, gateAlways},
+	"get-step-prerequisites": {tierRead, gateAlways},
 
-	"create-slip":   tierWrite,
-	"start-step":    tierWrite,
-	"complete-step": tierWrite,
-	"fail-step":     tierWrite,
-	"skip-step":     tierWrite,
-	"set-image-tag": tierWrite,
-	"promote-slip":  tierWrite,
-	"abandon-slip":  tierWrite,
+	"get-image-tags":    {tierRead, gateImageTags},
+	"v1-get-image-tags": {tierRead, gateImageTags},
+	"get-logs":          {tierRead, gateCIJobLogs},
+	"v1-get-logs":       {tierRead, gateCIJobLogs},
+
+	"get-automation-test-results":                  {tierRead, gateAutomation},
+	"get-automation-test-results-tests":            {tierRead, gateAutomation},
+	"get-automation-test-result-by-id-correlation": {tierRead, gateAutomation},
+
+	"get-clickhouse-schema-version": {tierRead, gateDiagnostics},
+
+	"create-slip":   {tierWrite, gateWrites},
+	"start-step":    {tierWrite, gateWrites},
+	"complete-step": {tierWrite, gateWrites},
+	"fail-step":     {tierWrite, gateWrites},
+	"skip-step":     {tierWrite, gateWrites},
+	"set-image-tag": {tierWrite, gateWrites},
+	"promote-slip":  {tierWrite, gateWrites},
+	"abandon-slip":  {tierWrite, gateWrites},
 }
 
 // verifyRouteSecurity reports an error when the registered routes contradict the auth
@@ -136,21 +183,24 @@ var operationTiers = map[string]string{
 // (Dropping a prefix instead is harmless: the route is de-registered from the mux
 // entirely, so requests 404 and the middleware never runs.)
 //
-// Deliberately NOT checked here, though the audit checks both against the wired fixture:
+//  4. Listed in operationTiers with a live gate but not registered → a stale row. The
+//     table is the inventory the other three checks are read against, so a row that no
+//     longer matches anything silently narrows all of them.
 //
-//   - The reverse direction of operationTiers — that every row names a registered
-//     operation. buildHandler registers conditionally: when ClickHouse is unavailable it
-//     leaves five collaborators nil and eight rows match nothing. That degraded mode is
-//     supported, so asserting it at startup would convert a documented fallback into a
-//     crashloop — inverting the availability benefit this guard exists to provide.
-//   - Read-tier declarations. A read-tier operation declaring something else costs one
-//     route a 403, not a fleet-wide outage, and refusing to boot would be the heavier
-//     failure of the two.
+// Gates are what make (4) safe. buildHandler registers conditionally — a ClickHouse
+// outage leaves five collaborators nil and their routes unregistered — so the check runs
+// only for rows whose gate is up. A degraded boot stays a boot.
+//
+// Read-tier declarations are deliberately NOT checked here, though the audit checks them
+// against the fully-wired fixture: a read-tier operation declaring something else costs
+// one route a 403 rather than a fleet-wide outage, and refusing to boot would be the
+// heavier of the two failures.
 //
 // This walks the OpenAPI document, so it shares that document's blind spot for
 // operations marked Hidden. Those are still enforced by the middleware at runtime.
-func verifyRouteSecurity(api huma.API) error {
+func verifyRouteSecurity(api huma.API, liveGates map[string]bool) error {
 	var undeclared, contradicted, mistiered []string
+	registered := map[string]struct{}{}
 	for path, item := range api.OpenAPI().Paths {
 		// PathItem has no operation iterator, so the verbs are enumerated explicitly.
 		for _, op := range []*huma.Operation{
@@ -160,6 +210,7 @@ func verifyRouteSecurity(api huma.API) error {
 			if op == nil {
 				continue
 			}
+			registered[op.OperationID] = struct{}{}
 			route := fmt.Sprintf("%s %s (operationId %q)", strings.ToUpper(op.Method), path, op.OperationID)
 			needsCredential := middleware.RequiresCredential(op)
 			switch {
@@ -167,9 +218,19 @@ func verifyRouteSecurity(api huma.API) error {
 				contradicted = append(contradicted, route)
 			case !middleware.IsPublicRoute(op.Method, op.Path) && !needsCredential:
 				undeclared = append(undeclared, route)
-			case operationTiers[op.OperationID] == tierWrite && !middleware.ServedAtWriteTier(op):
+			case operationTiers[op.OperationID].tier == tierWrite && !middleware.ServedAtWriteTier(op):
 				mistiered = append(mistiered, route)
 			}
+		}
+	}
+
+	var stale []string
+	for opID, policy := range operationTiers {
+		if !liveGates[policy.gate] {
+			continue
+		}
+		if _, ok := registered[opID]; !ok {
+			stale = append(stale, opID)
 		}
 	}
 
@@ -196,6 +257,14 @@ func verifyRouteSecurity(api huma.API) error {
 				"read tier: %s — the declaration must name writeApiKey, otherwise SLIPPY_API_KEY is "+
 				"accepted for a mutation",
 			len(mistiered), strings.Join(mistiered, ", "))
+	case len(stale) > 0:
+		sort.Strings(stale)
+		return fmt.Errorf(
+			"refusing to start: %d operationTiers row(s) have a live gate but name no registered "+
+				"operation: %s — the table is the inventory every other route-security check is read "+
+				"against, so a stale row silently narrows all of them. Remove the row, or restore the "+
+				"route",
+			len(stale), strings.Join(stale, ", "))
 	}
 	return nil
 }
@@ -208,18 +277,21 @@ func verifyRouteSecurity(api huma.API) error {
 //
 // It returns an error when the registered routes fail verifyRouteSecurity, so a
 // wiring mistake stops the process at boot instead of serving 401s.
-func buildHandler(
-	cfg *config.Config,
-	reader domain.SlipReader,
-	writer domain.SlipWriter,
-	imageTagReader domain.ImageTagReader,
-	ciJobLogReader domain.CIJobLogReader,
-	automationTestResultsReader domain.AutomationTestResultsReader,
-	automationTestsReader domain.AutomationTestsReader,
-	pipelineCfg *slippy.PipelineConfig,
-	diagnosticsHandler *handler.DiagnosticsHandler,
-) (http.Handler, error) {
-	mux := newServeMux()
+func buildHandler(deps handlerDeps) (http.Handler, error) {
+	cfg := deps.cfg
+	reader := deps.reader
+	writer := deps.writer
+	imageTagReader := deps.imageTagReader
+	ciJobLogReader := deps.ciJobLogReader
+	automationTestResultsReader := deps.automationTestResultsReader
+	automationTestsReader := deps.automationTestsReader
+	pipelineCfg := deps.pipelineCfg
+	diagnosticsHandler := deps.diagnosticsHandler
+
+	mux := deps.mux
+	if mux == nil {
+		mux = http.NewServeMux()
+	}
 	apiConfig := huma.DefaultConfig("Slippy API", "1.0.0")
 	apiConfig.Info.Description = "API for CI/CD routing slips"
 
@@ -293,12 +365,50 @@ func buildHandler(
 
 	// Fail the wiring rather than the requests: a route that requires no credential
 	// and is not allowlisted would 401 for everyone, health probes included.
-	if err := verifyRouteSecurity(api); err != nil {
+	//
+	// The gate map is built from the same nil checks that decided registration above, so
+	// the guard's view of which operations *should* exist is exact in a degraded boot as
+	// well as a full one.
+	if err := verifyRouteSecurity(api, map[string]bool{
+		gateAlways:      true,
+		gateImageTags:   imageTagReader != nil,
+		gateCIJobLogs:   ciJobLogReader != nil,
+		gateAutomation:  automationTestResultsReader != nil,
+		gateWrites:      writer != nil,
+		gateDiagnostics: diagnosticsHandler != nil,
+	}); err != nil {
 		return nil, err
 	}
 
-	// Wrap with OpenTelemetry instrumentation.
-	return otelhttp.NewHandler(mux, "slippy-api"), nil
+	// Wrap with security headers and OpenTelemetry instrumentation.
+	return otelhttp.NewHandler(securityHeaders(mux), "slippy-api"), nil
+}
+
+// securityHeaders sets response headers on every route.
+//
+// It wraps the mux rather than joining huma's middleware chain because that chain only
+// covers operations registered through huma.Register — the six spec and docs routes
+// huma registers straight on the adapter would otherwise be uncovered, and those are
+// exactly the routes served without a credential.
+//
+// Headers are set before the inner handler runs, so a handler that sets its own value
+// wins. That matters for /docs: huma installs a Content-Security-Policy pinning
+// script-src and style-src to the Stoplight bundle it loads, and a default-src 'none'
+// policy would blank the page. Everything else keeps the restrictive default.
+//
+// Cache-Control: no-store is belt-and-braces. RFC 9111 §3.5 already bars a shared cache
+// from reusing a response to a request carrying Authorization, but slip payloads carry
+// repository names, commit SHAs and pipeline state, and the routes that need no
+// credential are not covered by that rule at all.
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Cache-Control", "no-store")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // redisDial is the default factory for creating Redis clients.
@@ -408,15 +518,6 @@ func run() error {
 	}
 	log.Printf("config loaded (port=%d, cache=%v, db=%s)",
 		cfg.Port, cfg.CacheEnabled(), cfg.SlipDatabase)
-	// Warn rather than refuse: the deployed values live in Vault/ManagementInfra, so a
-	// hard failure here could take every replica down on a config this process cannot
-	// verify from the inside. The condition is otherwise undetectable at runtime — the
-	// tiering evaluates correctly and simply returns the same answer for both keys.
-	if cfg.TiersCollapsed() {
-		log.Printf(
-			"WARNING: SLIPPY_API_KEY equals SLIPPY_WRITE_API_KEY — the read/write tier split is " +
-				"inert and every read-key holder can mutate slips; issue distinct keys")
-	}
 
 	// --- Library logger ---
 	// Single shared logger for the slippy library, ClickHouse store, migrations,
@@ -595,10 +696,17 @@ func run() error {
 	log.Printf("write endpoints enabled")
 
 	// --- HTTP Server ---
-	otelHandler, err := buildHandler(
-		cfg, reader, writer, imageTagReader, ciJobLogReader,
-		automationTestResultsReader, automationTestsReader, pipelineCfg, diagnosticsH,
-	)
+	otelHandler, err := buildHandler(handlerDeps{
+		cfg:                         cfg,
+		reader:                      reader,
+		writer:                      writer,
+		imageTagReader:              imageTagReader,
+		ciJobLogReader:              ciJobLogReader,
+		automationTestResultsReader: automationTestResultsReader,
+		automationTestsReader:       automationTestsReader,
+		pipelineCfg:                 pipelineCfg,
+		diagnosticsHandler:          diagnosticsH,
+	})
 	if err != nil {
 		return err
 	}

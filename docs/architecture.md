@@ -77,9 +77,16 @@ Six further routes are served with no credential and are **not** allowlisted, be
 
 The route audit in `main_test.go` walks the generated OpenAPI document and fails the build on any operation that is neither secured nor allowlisted, on any allowlist entry that matches no route, on any security declaration the middleware cannot enforce, and on any operation whose declared scheme does not match the tier `operationTiers` says it must be served at. That last check is what catches a mutating route declaring `apiKeySecurity` — `apiKey` is a *known* scheme, so the middleware serves it at the read tier by design and every other assertion passes.
 
-`buildHandler` repeats the parts of that audit whose failure the middleware cannot mitigate at request time, and returns an error so the process refuses to boot. The CI assertion alone is not enough: the branch ruleset requires the unit-test check but carries bypass actors with `bypass_mode: always`. Three conditions are checked — a route that requires no credential and is not allowlisted; a route that is allowlisted but requires a credential (the allowlist entry goes dead and it 401s everyone, the same probe outage from the other direction); and a route listed write-tier in `operationTiers` that would be served at the read tier (silent privilege escalation, since the route keeps working). A boot failure leaves the previous ReplicaSet serving.
+`buildHandler` repeats the parts of that audit whose failure the middleware cannot mitigate at request time, and returns an error so the process refuses to boot. The CI assertion alone is not enough: the branch ruleset requires the unit-test check but carries bypass actors with `bypass_mode: always`. Four conditions are checked:
 
-`operationTiers` lives in `main.go` rather than the test file because the guard consults it. It is read with deliberately different strictness in the two places: the guard checks only the escalation direction on whatever is registered, while the audit checks every tier in both directions against the fully-wired fixture. Hoisting the reverse direction would break the supported degraded-ClickHouse boot, where eight rows name routes that are intentionally unregistered.
+1. A route that requires no credential and is not allowlisted — 401 for everyone.
+2. A route that is allowlisted but requires a credential — the allowlist entry goes dead and it 401s everyone, the same probe outage from the other direction.
+3. A route listed write-tier in `operationTiers` that would be served at the read tier — silent privilege escalation, since the route keeps working.
+4. An `operationTiers` row with a live gate that names no registered operation — a stale row, which silently narrows every check read against the table.
+
+A boot failure leaves the previous ReplicaSet serving.
+
+`operationTiers` lives in `main.go` rather than the test file because the guard consults it. Each row carries a **gate** naming the optional collaborator whose presence registers it, so check (4) runs only for rows whose gate is up — a ClickHouse outage leaves five collaborators nil and their routes unregistered, and that degraded mode stays bootable. The gate map is built from the same nil checks that decided registration, so the guard's view of what *should* exist is exact in both full and degraded boots. Read-tier declarations are checked only by the audit, against the fully-wired fixture, since a mistake there costs one route a 403 rather than the fleet.
 
 The audit's blind spots are `Hidden` operations and routes behind config branches the test fixture does not enable — both still subject to the middleware at runtime, so omission is fail-closed rather than fail-open. `TestBuildHandler_CredentialFreeSurfaceIsClosed` covers the first by set-differencing the registered mux patterns against the documented operations, which also detects a huma upgrade adding a seventh adapter route.
 
@@ -301,7 +308,7 @@ main() → run()
 - **Keys**:
   - `SLIPPY_API_KEY` — grants access to read endpoints only
   - `SLIPPY_WRITE_API_KEY` (optional) — grants access to both read and write endpoints (superset)
-  - The two must be **distinct values**. Setting them equal makes the tier split inert — every read-key holder can mutate slips — and nothing in the request path can detect it, because the tiering still evaluates correctly and simply returns the same answer for both. `Config.TiersCollapsed` catches it and `run()` logs a startup warning; it warns rather than refuses because the deployed values live in Vault/ManagementInfra and a hard failure could take every replica down on a config the process cannot verify from the inside
+  - The two must be **distinct values**, and `config.Load` **refuses to start** when they are equal. Identical keys make the tier split inert — every read-key holder can mutate slips — and nothing in the request path can detect it, because the tiering still evaluates correctly and simply returns the same answer for both. A pod that will not start is loud, bounded, and leaves the previous ReplicaSet serving; a silently collapsed authorization boundary is none of those
 - **Validation**: Constant-time comparison (`subtle.ConstantTimeCompare`) to prevent timing attacks
 - **Security scheme detection**: Middleware inspects `ctx.Operation().Security` map keys. An operation is served at the read tier only when every requirement names exactly `apiKey`; any other scheme name — including a typo such as `writeAPIKey` — escalates to the write tier rather than falling through to the weaker check
 - **Behavior**:

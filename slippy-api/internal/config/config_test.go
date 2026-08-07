@@ -288,3 +288,39 @@ func TestTiersCollapsed(t *testing.T) {
 		})
 	}
 }
+
+// TestLoad_IdenticalKeysRefused pins the refusal. Identical keys make the read/write
+// tier split inert, and the condition is invisible from the request path — the tiering
+// evaluates correctly and simply returns the same answer for both. A pod that will not
+// start is recoverable; a silently collapsed authorization boundary is not.
+func TestLoad_IdenticalKeysRefused(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("SLIPPY_API_KEY", "same-key-for-both")
+	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
+	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
+	t.Setenv("SLIPPY_WRITE_API_KEY", "same-key-for-both")
+
+	cfg, err := Load()
+
+	require.Error(t, err)
+	assert.Nil(t, cfg)
+	assert.Contains(t, err.Error(), "SLIPPY_API_KEY")
+	assert.Contains(t, err.Error(), "SLIPPY_WRITE_API_KEY")
+	assert.Contains(t, err.Error(), "distinct")
+}
+
+// TestLoad_DistinctKeysAccepted is the control: the refusal must key on equality, not
+// on both variables merely being set.
+func TestLoad_DistinctKeysAccepted(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("SLIPPY_API_KEY", "read-key")
+	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
+	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
+	t.Setenv("SLIPPY_WRITE_API_KEY", "write-key")
+
+	cfg, err := Load()
+
+	require.NoError(t, err)
+	assert.Equal(t, "read-key", cfg.APIKey)
+	assert.Equal(t, "write-key", cfg.WriteAPIKey)
+}

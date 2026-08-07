@@ -135,7 +135,7 @@ func TestBuildHandler_HealthEndpoint(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h, err := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
+	h, err := buildHandler(handlerDeps{cfg: cfg, reader: reader})
 	require.NoError(t, err)
 	require.NotNil(t, h)
 
@@ -154,7 +154,7 @@ func TestBuildHandler_AuthRequired(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h, err := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
+	h, err := buildHandler(handlerDeps{cfg: cfg, reader: reader})
 	require.NoError(t, err)
 
 	// Request without auth header should be rejected
@@ -168,7 +168,7 @@ func TestBuildHandler_AuthSuccess(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h, err := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
+	h, err := buildHandler(handlerDeps{cfg: cfg, reader: reader})
 	require.NoError(t, err)
 
 	// Request with valid auth header should succeed
@@ -187,7 +187,7 @@ func TestBuildHandler_OpenAPISpec(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h, err := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
+	h, err := buildHandler(handlerDeps{cfg: cfg, reader: reader})
 	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
@@ -210,7 +210,7 @@ func TestBuildHandler_V1HealthEndpoint(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h, err := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
+	h, err := buildHandler(handlerDeps{cfg: cfg, reader: reader})
 	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
@@ -228,7 +228,7 @@ func TestBuildHandler_V1AuthRequired(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h, err := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
+	h, err := buildHandler(handlerDeps{cfg: cfg, reader: reader})
 	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/slips/test-corr-001", nil)
@@ -241,7 +241,7 @@ func TestBuildHandler_V1AuthSuccess(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h, err := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
+	h, err := buildHandler(handlerDeps{cfg: cfg, reader: reader})
 	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/slips/test-corr-001", nil)
@@ -259,7 +259,7 @@ func TestBuildHandler_OpenAPISpecContainsV1Routes(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h, err := buildHandler(cfg, reader, nil, nil, nil, nil, nil, nil, nil)
+	h, err := buildHandler(handlerDeps{cfg: cfg, reader: reader})
 	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
@@ -305,7 +305,7 @@ func TestVerifyRouteSecurity(t *testing.T) {
 		api := newTestAPI(t, huma.Operation{
 			OperationID: "health-check", Method: http.MethodGet, Path: "/health",
 		})
-		assert.NoError(t, verifyRouteSecurity(api))
+		assert.NoError(t, verifyRouteSecurity(api, nil))
 	})
 
 	t.Run("secured route passes", func(t *testing.T) {
@@ -313,7 +313,7 @@ func TestVerifyRouteSecurity(t *testing.T) {
 			OperationID: "get-thing", Method: http.MethodGet, Path: "/thing",
 			Security: []map[string][]string{{"apiKey": {}}},
 		})
-		assert.NoError(t, verifyRouteSecurity(api))
+		assert.NoError(t, verifyRouteSecurity(api, nil))
 	})
 
 	t.Run("renamed health route fails", func(t *testing.T) {
@@ -321,7 +321,7 @@ func TestVerifyRouteSecurity(t *testing.T) {
 		api := newTestAPI(t, huma.Operation{
 			OperationID: "health-check", Method: http.MethodGet, Path: "/healthz",
 		})
-		err := verifyRouteSecurity(api)
+		err := verifyRouteSecurity(api, nil)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "GET /healthz")
 		assert.Contains(t, err.Error(), "publicRoutes")
@@ -332,7 +332,7 @@ func TestVerifyRouteSecurity(t *testing.T) {
 			OperationID: "get-optional", Method: http.MethodGet, Path: "/optional",
 			Security: []map[string][]string{{}},
 		})
-		err := verifyRouteSecurity(api)
+		err := verifyRouteSecurity(api, nil)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "GET /optional")
 	})
@@ -341,7 +341,7 @@ func TestVerifyRouteSecurity(t *testing.T) {
 		api := newTestAPI(t, huma.Operation{
 			OperationID: "post-thing", Method: http.MethodPost, Path: "/thing",
 		})
-		err := verifyRouteSecurity(api)
+		err := verifyRouteSecurity(api, nil)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "POST /thing")
 	})
@@ -356,7 +356,7 @@ func TestVerifyRouteSecurity(t *testing.T) {
 			OperationID: "health-check", Method: http.MethodGet, Path: "/health",
 			Security: []map[string][]string{{"apiKey": {}}},
 		})
-		err := verifyRouteSecurity(api)
+		err := verifyRouteSecurity(api, nil)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "GET /health")
 		assert.Contains(t, err.Error(), "publicRoutes")
@@ -371,7 +371,7 @@ func TestVerifyRouteSecurity(t *testing.T) {
 			OperationID: "create-slip", Method: http.MethodPost, Path: "/v1/slips",
 			Security: []map[string][]string{{"apiKey": {}}},
 		})
-		err := verifyRouteSecurity(api)
+		err := verifyRouteSecurity(api, nil)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "POST /v1/slips")
 		assert.Contains(t, err.Error(), "writeApiKey")
@@ -382,26 +382,54 @@ func TestVerifyRouteSecurity(t *testing.T) {
 			OperationID: "create-slip", Method: http.MethodPost, Path: "/v1/slips",
 			Security: []map[string][]string{{"writeApiKey": {}}},
 		})
-		assert.NoError(t, verifyRouteSecurity(api))
+		assert.NoError(t, verifyRouteSecurity(api, nil))
 	})
 
-	// Degraded boot (ClickHouse unavailable) leaves five collaborators nil, so eight
-	// operationTiers rows name no registered operation. That is a supported mode —
-	// main.go documents it — so the startup guard must not walk the table's reverse
-	// direction. The audit in this file keeps that check against the wired fixture.
-	t.Run("tier rows naming no registered operation are tolerated", func(t *testing.T) {
+	// The reverse direction: a row whose gate is up but which matches no registered
+	// operation is stale, and stale rows silently narrow every other check read against
+	// the table.
+	t.Run("stale row with a live gate fails", func(t *testing.T) {
 		api := newTestAPI(t, huma.Operation{
 			OperationID: "health-check", Method: http.MethodGet, Path: "/health",
 		})
-		assert.NoError(t, verifyRouteSecurity(api),
-			"a mostly-empty route set must still boot; the reverse direction is CI-only")
+		err := verifyRouteSecurity(api, map[string]bool{gateAlways: true})
+		require.Error(t, err)
+		// v1-health-check and the ten other gateAlways rows are unregistered here.
+		assert.Contains(t, err.Error(), "v1-health-check")
+		assert.Contains(t, err.Error(), "stale row")
+	})
+
+	// Degraded boot (ClickHouse unavailable) leaves five collaborators nil and their
+	// routes unregistered. main.go documents that as supported, so rows behind a gate
+	// that is down must not fail the boot — otherwise the guard converts a fallback into
+	// a crashloop, inverting the availability benefit it exists to provide.
+	t.Run("rows behind a down gate are tolerated", func(t *testing.T) {
+		api := newTestAPI(t, huma.Operation{
+			OperationID: "health-check", Method: http.MethodGet, Path: "/health",
+		})
+		// Every gate down, including gateAlways, so no row is expected to be present.
+		assert.NoError(t, verifyRouteSecurity(api, map[string]bool{}))
+	})
+
+	// The degraded shape buildHandler actually produces: ClickHouse-backed readers and
+	// the diagnostics handler nil, writes still wired.
+	t.Run("degraded ClickHouse boot is accepted", func(t *testing.T) {
+		cfg := &config.Config{APIKey: "test-key", WriteAPIKey: "write-key", Port: 8080}
+		h, err := buildHandler(handlerDeps{
+			cfg:    cfg,
+			reader: newStubSlipReader(),
+			writer: &stubSlipWriter{},
+			// ClickHouse-backed collaborators and the diagnostics handler stay nil.
+		})
+		require.NoError(t, err, "a ClickHouse outage must not stop the Postgres slip API from booting")
+		require.NotNil(t, h)
 	})
 }
 
 // TestBuildHandler_PassesStartupRouteSecurityGuard proves the guard is actually wired
 // into buildHandler for the shipped route set, not merely defined.
 func TestBuildHandler_PassesStartupRouteSecurityGuard(t *testing.T) {
-	require.NotNil(t, buildFullyWiredHandler(t))
+	require.NotNil(t, buildFullyWiredHandler(t, nil))
 }
 
 // --- Route security audit ---
@@ -445,21 +473,24 @@ func mockClickHouseSession() ch.ClickhouseSessionInterface {
 //
 // The diagnostics handler gets a mock ClickHouse session rather than nil so requests
 // that clear auth can reach it — see TestBuildHandler_DiagnosticRouteRequiresKey.
-func buildFullyWiredHandler(t *testing.T) http.Handler {
+//
+// mux may be nil, in which case buildHandler creates its own;
+// TestBuildHandler_CredentialFreeSurfaceIsClosed passes a recording mux.
+func buildFullyWiredHandler(t *testing.T, mux humago.Mux) http.Handler {
 	t.Helper()
 
 	cfg := &config.Config{APIKey: "test-key", WriteAPIKey: "write-key", Port: 8080}
-	h, err := buildHandler(
-		cfg,
-		newStubSlipReader(),
-		&stubSlipWriter{},
-		&stubImageTagReader{},
-		&stubCIJobLogReader{},
-		&stubAutomationTestResultsReader{},
-		&stubAutomationTestsReader{},
-		nil,
-		handler.NewDiagnosticsHandler(mockClickHouseSession(), "slippy"),
-	)
+	h, err := buildHandler(handlerDeps{
+		cfg:                         cfg,
+		mux:                         mux,
+		reader:                      newStubSlipReader(),
+		writer:                      &stubSlipWriter{},
+		imageTagReader:              &stubImageTagReader{},
+		ciJobLogReader:              &stubCIJobLogReader{},
+		automationTestResultsReader: &stubAutomationTestResultsReader{},
+		automationTestsReader:       &stubAutomationTestsReader{},
+		diagnosticsHandler:          handler.NewDiagnosticsHandler(mockClickHouseSession(), "slippy"),
+	})
 	require.NoError(t, err)
 	require.NotNil(t, h)
 	return h
@@ -488,7 +519,8 @@ func assertOperationTier(t *testing.T, method, path, opID string, security []any
 	t.Helper()
 
 	route := strings.ToUpper(method) + " " + path
-	wantTier, listed := operationTiers[opID]
+	policy, listed := operationTiers[opID]
+	wantTier := policy.tier
 	if !assert.True(t, listed,
 		"%s (operationId %q) is not in operationTiers. Every operation must declare its tier "+
 			"there, so a new route cannot inherit one by accident.", route, opID) {
@@ -570,7 +602,7 @@ func assertOperationTier(t *testing.T, method, path, opID string, security []any
 // still subject to the middleware at runtime, so omission from this audit is
 // fail-closed for them, not fail-open; only the adapter routes genuinely bypass auth.
 func TestBuildHandler_EveryOperationIsSecuredOrAllowlisted(t *testing.T) {
-	spec := fetchOpenAPISpec(t, buildFullyWiredHandler(t))
+	spec := fetchOpenAPISpec(t, buildFullyWiredHandler(t, nil))
 
 	paths, ok := spec["paths"].(map[string]any)
 	require.True(t, ok)
@@ -691,7 +723,7 @@ func TestBuildHandler_EveryOperationIsSecuredOrAllowlisted(t *testing.T) {
 // a seventh, or a config change moving one, shows up here instead of silently widening
 // the credential-free surface.
 func TestBuildHandler_CredentialFreeAdapterRoutes(t *testing.T) {
-	h := buildFullyWiredHandler(t)
+	h := buildFullyWiredHandler(t, nil)
 
 	adapterRoutes := []string{
 		"/openapi.json",
@@ -754,11 +786,7 @@ func (m *recordingMux) HandleFunc(pattern string, h func(http.ResponseWriter, *h
 // the router but never enters the document, so it lands in this difference.
 func TestBuildHandler_CredentialFreeSurfaceIsClosed(t *testing.T) {
 	rec := &recordingMux{ServeMux: http.NewServeMux()}
-	original := newServeMux
-	newServeMux = func() humago.Mux { return rec }
-	t.Cleanup(func() { newServeMux = original })
-
-	h := buildFullyWiredHandler(t)
+	h := buildFullyWiredHandler(t, rec)
 
 	documented := map[string]struct{}{}
 	paths, ok := fetchOpenAPISpec(t, h)["paths"].(map[string]any)
@@ -803,7 +831,7 @@ func TestBuildHandler_CredentialFreeSurfaceIsClosed(t *testing.T) {
 // regenerated spec. This asserts the difference is exactly the named exclusion — in
 // both directions — so a second omission cannot slip in unnoticed.
 func TestGenerateOpenAPISpec_PublishedSurfaceMatchesAudited(t *testing.T) {
-	audited := operationIDs(t, fetchOpenAPISpec(t, buildFullyWiredHandler(t)))
+	audited := operationIDs(t, fetchOpenAPISpec(t, buildFullyWiredHandler(t, nil)))
 	published := operationIDs(t, fetchOpenAPISpec(t, buildSpecGenerationHandler(t)))
 
 	for _, opID := range operationsExcludedFromPublishedSpec {
@@ -851,7 +879,7 @@ func operationIDs(t *testing.T, spec map[string]any) map[string]struct{} {
 // — a namespace that reads as privileged and invited genuinely administrative
 // (and unauthenticated) additions — and it now requires the read key.
 func TestBuildHandler_DiagnosticRouteIsRenamedAndSecured(t *testing.T) {
-	spec := fetchOpenAPISpec(t, buildFullyWiredHandler(t))
+	spec := fetchOpenAPISpec(t, buildFullyWiredHandler(t, nil))
 
 	paths, ok := spec["paths"].(map[string]any)
 	require.True(t, ok)
@@ -899,7 +927,7 @@ func TestBuildHandler_DiagnosticRouteRequiresKey(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := buildFullyWiredHandler(t)
+			h := buildFullyWiredHandler(t, nil)
 
 			req := httptest.NewRequest(http.MethodGet, diagnosticPath, nil)
 			if tt.token != "" {
@@ -919,7 +947,7 @@ func TestBuildHandler_DiagnosticRouteRequiresKey(t *testing.T) {
 	}
 
 	t.Run("retired admin path is gone", func(t *testing.T) {
-		h := buildFullyWiredHandler(t)
+		h := buildFullyWiredHandler(t, nil)
 
 		req := httptest.NewRequest(http.MethodGet, "/v1/admin/schema-version", nil)
 		req.Header.Set("Authorization", "Bearer test-key")
@@ -938,17 +966,15 @@ func TestBuildHandler_WithAllOptionalHandlers(t *testing.T) {
 	cfg := &config.Config{APIKey: "test-key", WriteAPIKey: "write-key", Port: 8080}
 	reader := newStubSlipReader()
 
-	h, err := buildHandler(
-		cfg,
-		reader,
-		&stubSlipWriter{},
-		&stubImageTagReader{},
-		&stubCIJobLogReader{},
-		&stubAutomationTestResultsReader{},
-		&stubAutomationTestsReader{},
-		nil,
-		nil,
-	)
+	h, err := buildHandler(handlerDeps{
+		cfg:                         cfg,
+		reader:                      reader,
+		writer:                      &stubSlipWriter{},
+		imageTagReader:              &stubImageTagReader{},
+		ciJobLogReader:              &stubCIJobLogReader{},
+		automationTestResultsReader: &stubAutomationTestResultsReader{},
+		automationTestsReader:       &stubAutomationTestsReader{},
+	})
 	require.NoError(t, err)
 	require.NotNil(t, h)
 
@@ -1004,17 +1030,15 @@ func buildSpecGenerationHandler(t *testing.T) http.Handler {
 	t.Helper()
 
 	cfg := &config.Config{APIKey: "dummy", Port: 8080}
-	h, err := buildHandler(
-		cfg,
-		newStubSlipReader(),
-		&stubSlipWriter{},
-		&stubImageTagReader{},
-		&stubCIJobLogReader{},
-		&stubAutomationTestResultsReader{},
-		&stubAutomationTestsReader{},
-		nil,
-		nil,
-	)
+	h, err := buildHandler(handlerDeps{
+		cfg:                         cfg,
+		reader:                      newStubSlipReader(),
+		writer:                      &stubSlipWriter{},
+		imageTagReader:              &stubImageTagReader{},
+		ciJobLogReader:              &stubCIJobLogReader{},
+		automationTestResultsReader: &stubAutomationTestResultsReader{},
+		automationTestsReader:       &stubAutomationTestsReader{},
+	})
 	require.NoError(t, err)
 	return h
 }
@@ -1311,4 +1335,56 @@ func TestIsEncryptingSSLMode(t *testing.T) {
 			t.Errorf("isEncryptingSSLMode(%q) = %v, want %v", tc.mode, got, tc.want)
 		}
 	}
+}
+
+// TestBuildHandler_SecurityHeaders pins the response headers on the whole surface, not
+// just the two errors writeError produces.
+//
+// The wrapper sits outside the mux so it also covers the six adapter-registered routes,
+// which never enter huma's middleware chain. huma's own /docs handler runs inside it and
+// calls Header().Set for its Content-Security-Policy, which replaces the value set here —
+// that is intended, since the Stoplight renderer needs script-src and style-src that a
+// default-src 'none' policy would block.
+func TestBuildHandler_SecurityHeaders(t *testing.T) {
+	h := buildFullyWiredHandler(t, nil)
+
+	tests := []struct {
+		name  string
+		path  string
+		token string
+	}{
+		{"slip read (200)", "/v1/slips/test-corr-001", "test-key"},
+		{"auth failure (401)", "/v1/slips/test-corr-001", ""},
+		{"health (200, no credential)", "/health", ""},
+		{"openapi (adapter route)", "/openapi.json", ""},
+		{"schemas (adapter route)", "/schemas/ErrorModel.json", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			if tt.token != "" {
+				req.Header.Set("Authorization", "Bearer "+tt.token)
+			}
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+
+			assert.Equal(t, "nosniff", w.Header().Get("X-Content-Type-Options"))
+			assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
+			assert.Equal(t, "no-referrer", w.Header().Get("Referrer-Policy"))
+			assert.Contains(t, w.Header().Get("Content-Security-Policy"), "frame-ancestors 'none'")
+		})
+	}
+
+	// huma's docs handler sets its own CSP, which must win: a default-src 'none' policy
+	// would block the Stoplight bundle the page loads.
+	t.Run("docs keeps huma's renderer CSP", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/docs", nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code)
+		csp := w.Header().Get("Content-Security-Policy")
+		assert.Contains(t, csp, "script-src", "huma's docs CSP must not be overwritten by the wrapper")
+		assert.Contains(t, csp, "frame-ancestors 'none'")
+	})
 }
