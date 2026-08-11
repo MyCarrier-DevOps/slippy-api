@@ -312,7 +312,7 @@ All configuration is via environment variables. No config files, no Vault.
 
 | Variable | Description | Example |
 |---|---|---|
-| `SLIPPY_API_KEY` | Bearer token for read endpoints; min 60 chars, must differ from the write key | `0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef` |
+| `SLIPPY_API_KEY` | Bearer token for read endpoints; min 60 chars, must differ from the write key | generate with `openssl rand -hex 32` |
 | `SLIPPY_PIPELINE_CONFIG` | Pipeline configuration (file path or inline JSON) | `/config/pipeline.json` |
 | `SLIPPY_GITHUB_APP_ID` | GitHub App ID for ancestry resolution | `2645252` |
 | `SLIPPY_GITHUB_APP_PRIVATE_KEY` | PEM-encoded private key or file path | `/config/github.pem` |
@@ -331,7 +331,7 @@ All configuration is via environment variables. No config files, no Vault.
 | `CLICKHOUSE_PORT` | ClickHouse port | `9440` |
 | `CLICKHOUSE_SKIP_VERIFY` | Skip TLS verification | `false` |
 | `K8S_NAMESPACE` | Kubernetes namespace; `-test` or `-dev` suffix selects `ci_test` database | _(ci)_ |
-| `SLIPPY_WRITE_API_KEY` | Bearer token for write endpoints; **required**, min 60 chars, must differ from the read key | `fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210` |
+| `SLIPPY_WRITE_API_KEY` | Bearer token for write endpoints; **required**, min 60 chars, must differ from the read key | generate with `openssl rand -hex 32` |
 | `SLIPPY_SKIP_MIGRATIONS` | Skip ClickHouse schema migrations at startup | `true` |
 | `DRAGONFLY_HOST` | Dragonfly/Redis host (enables caching when set) | _(disabled)_ |
 | `DRAGONFLY_PORT` | Dragonfly/Redis port | `6379` |
@@ -472,12 +472,20 @@ make fmt
 ```bash
 cd slippy-api
 docker build -t slippy-api .
+
+# Both keys are required, must be at least 60 characters, and must differ from each
+# other — config.Load refuses to start otherwise. `openssl rand -hex 32` gives 64.
+export SLIPPY_API_KEY="$(openssl rand -hex 32)"
+export SLIPPY_WRITE_API_KEY="$(openssl rand -hex 32)"
+
+# -e NAME with no value passes the variable through from the environment, so the
+# credentials stay out of the command line, the shell history and the process list.
 docker run -p 8080:8080 \
-  -e SLIPPY_API_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
-  -e SLIPPY_WRITE_API_KEY=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 \
+  -e SLIPPY_API_KEY \
+  -e SLIPPY_WRITE_API_KEY \
   -e CLICKHOUSE_HOSTNAME=clickhouse.example.com \
   -e CLICKHOUSE_USERNAME=slippy \
-  -e CLICKHOUSE_PASSWORD=secret \
+  -e CLICKHOUSE_PASSWORD \
   -e CLICKHOUSE_DATABASE=ci \
   slippy-api
 ```
