@@ -62,7 +62,15 @@ Recorded instances:
 - **DEVOPS-217** — API-key auth changed from opt-in per operation to fail-closed, and `GET /v1/admin/schema-version` (unauthenticated) was removed in favour of `GET /v1/diagnostics/clickhouse-schema-version` (read key required). Both the retirement and the added authentication land in `/v1` under this carve-out.
 - **DEVOPS-217 follow-up** — `maxItems: 1000` added to `commits` on `POST /v1/slips/find-by-commits` and `/find-all-by-commits`, so a request above that now returns `422` where it previously returned `200`. That matches "Changing error response codes for existing conditions" in the breaking list, and lands in `/v1` under this carve-out: the field was the input to an unbounded per-commit GitHub ancestry walk, and one 1 MiB request measured 262,133 outbound calls — more than the App's hourly budget, which fails ancestry resolution platform-wide.
 
-  Caller-visible effect: a request carrying more than 1000 commits is rejected with `422`; at or below 1000 nothing changes. The only production consumer is `slippy-find`, which sends `1 + (parents x depth)` — 51 at its default depth of 25, 101 at the `--depth 50` in its own help text — so the limit is roughly 10x the documented worst case. The generated `slippy-client` is byte-identical after regeneration, because oapi-codegen emits no validation for `maxItems`; only the published spec gains the constraint.
+  Caller-visible effect: a request carrying more than 10,000 commits is rejected with `422`; at or below that nothing changes. The only production consumer is `slippy-find`, which sends `1 + (parents x depth)` — 51 at its default depth of 25, 101 at the `--depth 50` in its own help text — so the limit is ~100x the documented worst case and the `422` is unreachable in practice — it is a resource bound on the `unnest` array, not a behavioural limit. The generated `slippy-client` is unaffected, because oapi-codegen emits no validation for `maxItems`; only the published spec gains the constraint.
+
+- **DEVOPS-217 hardening** — `maxLength` added across the write DTOs (`repository` 256, `branch` 512, `commit_sha` 64, `commit_message` 16384, `component_name` 256, `reason` 4096, `image_tag` 256, component `name` 256 / `dockerfile_path` 1024, `components` `maxItems` 100), and `maxLength`/`pattern` added to `promoted_to` and `superseded_by`. Requests exceeding a limit now return `422`.
+
+  Every bound is far above real traffic; the point is that these fields previously had none, and `reason` and `component_name` are appended to the `state_history` jsonb that the platform treats as the authority on step completion — a document rewritten whole on every append, so an unbounded field is unbounded quadratic growth.
+
+  `promoted_to` and `superseded_by` are the sharper fix: they *are* correlation IDs, naming the slip that supersedes this one, and received none of the validation applied to `correlation_id` itself. They now carry the same character set.
+
+  `correlation_id` was deliberately **left untagged** — `validateCorrelationIDFormat` already owns emptiness, length and character set for it and returns `400` with a precise message. Tagging it would have duplicated the rule and moved an existing `400` to a `422` for no gain.
 
 ## How to Add a New Major Version
 

@@ -1,7 +1,9 @@
 package middleware
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"log/slog"
@@ -18,6 +20,27 @@ import (
 
 // authTracerName is the instrumentation scope for authentication operations.
 const authTracerName = "slippy-api/auth"
+
+// bearerChallenge is the WWW-Authenticate value on a 401. RFC 9110 §11.6.1 requires the
+// header on every 401 so a client is told which scheme to use rather than guessing.
+const bearerChallenge = `Bearer realm="slippy-api"`
+
+// keyFingerprint returns a short, non-reversible handle for a presented credential.
+//
+// There is one shared bearer per tier, so without this the logs cannot distinguish a
+// leaked key from the pipeline's own traffic, and a rotation is invisible. A truncated
+// SHA-256 gives a stable identifier that separates key populations and makes "which
+// credential was this" answerable — while never recording the credential. Truncation is
+// deliberate: 48 bits is ample to tell a handful of keys apart and useless for recovering
+// one, and recovering a key from the full digest would be no easier than brute-forcing
+// the API directly.
+func keyFingerprint(token string) string {
+	if token == "" {
+		return "-"
+	}
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])[:12]
+}
 
 const (
 	// readAPIKeyScheme names the security scheme served at the read tier. It is the
@@ -107,11 +130,13 @@ func authorize(ctx huma.Context, op *huma.Operation, readKey, writeKey string) b
 	defer span.End()
 
 	token := extractBearerToken(ctx.Header("Authorization"))
+	fingerprint := keyFingerprint(token)
+	span.SetAttributes(attribute.String("auth.key_fingerprint", fingerprint))
 	if token == "" {
 		span.SetAttributes(attribute.String("auth.result", "missing_token"))
 		span.SetStatus(codes.Error, "missing or malformed Authorization header")
 		slog.WarnContext(spanCtx, "auth: missing bearer token",
-			"operation", opID, "result", "missing_token")
+			"operation", opID, "result", "missing_token", "key_fingerprint", fingerprint)
 		writeError(ctx, http.StatusUnauthorized, "missing or malformed Authorization header")
 		return false
 	}
@@ -122,7 +147,8 @@ func authorize(ctx huma.Context, op *huma.Operation, readKey, writeKey string) b
 			span.SetAttributes(attribute.String("auth.result", "invalid_token"))
 			span.SetStatus(codes.Error, "invalid API key")
 			slog.WarnContext(spanCtx, "auth: invalid token for write operation",
-				"operation", opID, "result", "invalid_token", "required_level", "write")
+				"operation", opID, "result", "invalid_token", "required_level", "write",
+				"key_fingerprint", fingerprint)
 			writeError(ctx, http.StatusForbidden, "invalid API key")
 			return false
 		}
@@ -131,7 +157,7 @@ func authorize(ctx huma.Context, op *huma.Operation, readKey, writeKey string) b
 			attribute.String("auth.access_level", "write"),
 		)
 		slog.InfoContext(spanCtx, "auth: token accepted",
-			"operation", opID, "access_level", "write")
+			"operation", opID, "access_level", "write", "key_fingerprint", fingerprint)
 	} else {
 		// Read operations: accept either the read key or the write key.
 		readMatch := subtle.ConstantTimeCompare([]byte(token), []byte(readKey))
@@ -143,7 +169,8 @@ func authorize(ctx huma.Context, op *huma.Operation, readKey, writeKey string) b
 			span.SetAttributes(attribute.String("auth.result", "invalid_token"))
 			span.SetStatus(codes.Error, "invalid API key")
 			slog.WarnContext(spanCtx, "auth: invalid token for read operation",
-				"operation", opID, "result", "invalid_token", "required_level", "read")
+				"operation", opID, "result", "invalid_token", "required_level", "read",
+				"key_fingerprint", fingerprint)
 			writeError(ctx, http.StatusForbidden, "invalid API key")
 			return false
 		}
@@ -157,7 +184,7 @@ func authorize(ctx huma.Context, op *huma.Operation, readKey, writeKey string) b
 			attribute.String("auth.access_level", level),
 		)
 		slog.InfoContext(spanCtx, "auth: token accepted",
-			"operation", opID, "access_level", level)
+			"operation", opID, "access_level", level, "key_fingerprint", fingerprint)
 	}
 
 	span.SetStatus(codes.Ok, "")
@@ -311,6 +338,11 @@ const errorContentType = "application/problem+json"
 func writeError(ctx huma.Context, status int, msg string) {
 	ctx.SetHeader("Content-Type", errorContentType)
 	ctx.SetHeader("X-Content-Type-Options", "nosniff")
+	// Only on 401. A 403 here means the credential was understood and refused, so offering
+	// a challenge would invite a pointless retry with the same key.
+	if status == http.StatusUnauthorized {
+		ctx.SetHeader("WWW-Authenticate", bearerChallenge)
+	}
 	ctx.SetStatus(status)
 	body := fmt.Sprintf(`{"status":%d,"title":%q}`, status, msg)
 	if _, writeErr := ctx.BodyWriter().Write([]byte(body)); writeErr != nil {

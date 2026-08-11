@@ -38,16 +38,16 @@ func TestLoad_MissingAPIKey(t *testing.T) {
 
 func TestLoad_Defaults(t *testing.T) {
 	clearEnv(t)
-	t.Setenv("SLIPPY_API_KEY", "test-key-123")
-	t.Setenv("SLIPPY_WRITE_API_KEY", "test-write-key")
+	t.Setenv("SLIPPY_API_KEY", testReadKey)
+	t.Setenv("SLIPPY_WRITE_API_KEY", testWriteKey)
 	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
 	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "test-pem")
 
 	cfg, err := Load()
 	require.NoError(t, err)
 
-	assert.Equal(t, "test-key-123", cfg.APIKey)
-	assert.Equal(t, "test-write-key", cfg.WriteAPIKey)
+	assert.Equal(t, testReadKey, cfg.APIKey)
+	assert.Equal(t, testWriteKey, cfg.WriteAPIKey)
 	assert.Equal(t, 8080, cfg.Port)
 	assert.Equal(t, "", cfg.DragonflyHost)
 	assert.Equal(t, 6379, cfg.DragonflyPort)
@@ -76,8 +76,8 @@ func TestLoad_SlipDatabase_DerivedFromNamespace(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.namespace, func(t *testing.T) {
 			clearEnv(t)
-			t.Setenv("SLIPPY_API_KEY", "key")
-			t.Setenv("SLIPPY_WRITE_API_KEY", "write-key")
+			t.Setenv("SLIPPY_API_KEY", testReadKey)
+			t.Setenv("SLIPPY_WRITE_API_KEY", testWriteKey)
 			t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
 			t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
 			if tt.namespace != "" {
@@ -93,8 +93,8 @@ func TestLoad_SlipDatabase_DerivedFromNamespace(t *testing.T) {
 
 func TestLoad_AllValues(t *testing.T) {
 	clearEnv(t)
-	t.Setenv("SLIPPY_API_KEY", "my-secret")
-	t.Setenv("SLIPPY_WRITE_API_KEY", "write-secret")
+	t.Setenv("SLIPPY_API_KEY", testReadKey)
+	t.Setenv("SLIPPY_WRITE_API_KEY", testWriteKey)
 	t.Setenv("PORT", "9090")
 	t.Setenv("DRAGONFLY_HOST", "dragonfly.local")
 	t.Setenv("DRAGONFLY_PORT", "6380")
@@ -106,7 +106,7 @@ func TestLoad_AllValues(t *testing.T) {
 	cfg, err := Load()
 	require.NoError(t, err)
 
-	assert.Equal(t, "my-secret", cfg.APIKey)
+	assert.Equal(t, testReadKey, cfg.APIKey)
 	assert.Equal(t, 9090, cfg.Port)
 	assert.Equal(t, "dragonfly.local", cfg.DragonflyHost)
 	assert.Equal(t, 6380, cfg.DragonflyPort)
@@ -116,7 +116,7 @@ func TestLoad_AllValues(t *testing.T) {
 
 func TestLoad_InvalidPort(t *testing.T) {
 	clearEnv(t)
-	t.Setenv("SLIPPY_API_KEY", "key")
+	t.Setenv("SLIPPY_API_KEY", testReadKey)
 	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
 	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
 	t.Setenv("PORT", "not-a-number")
@@ -128,7 +128,7 @@ func TestLoad_InvalidPort(t *testing.T) {
 
 func TestLoad_InvalidDragonflyPort(t *testing.T) {
 	clearEnv(t)
-	t.Setenv("SLIPPY_API_KEY", "key")
+	t.Setenv("SLIPPY_API_KEY", testReadKey)
 	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
 	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
 	t.Setenv("DRAGONFLY_PORT", "bad")
@@ -140,7 +140,7 @@ func TestLoad_InvalidDragonflyPort(t *testing.T) {
 
 func TestLoad_InvalidCacheTTL(t *testing.T) {
 	clearEnv(t)
-	t.Setenv("SLIPPY_API_KEY", "key")
+	t.Setenv("SLIPPY_API_KEY", testReadKey)
 	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
 	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
 	t.Setenv("CACHE_TTL", "not-a-duration")
@@ -169,7 +169,7 @@ func TestCacheEnabled(t *testing.T) {
 
 func TestLoad_MissingGitHubAppID(t *testing.T) {
 	clearEnv(t)
-	t.Setenv("SLIPPY_API_KEY", "key")
+	t.Setenv("SLIPPY_API_KEY", testReadKey)
 	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
 
 	cfg, err := Load()
@@ -179,7 +179,7 @@ func TestLoad_MissingGitHubAppID(t *testing.T) {
 
 func TestLoad_MissingGitHubPrivateKey(t *testing.T) {
 	clearEnv(t)
-	t.Setenv("SLIPPY_API_KEY", "key")
+	t.Setenv("SLIPPY_API_KEY", testReadKey)
 	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
 
 	cfg, err := Load()
@@ -189,8 +189,8 @@ func TestLoad_MissingGitHubPrivateKey(t *testing.T) {
 
 func TestLoad_GitHubConfig(t *testing.T) {
 	clearEnv(t)
-	t.Setenv("SLIPPY_API_KEY", "key")
-	t.Setenv("SLIPPY_WRITE_API_KEY", "write-key")
+	t.Setenv("SLIPPY_API_KEY", testReadKey)
+	t.Setenv("SLIPPY_WRITE_API_KEY", testWriteKey)
 	t.Setenv("SLIPPY_GITHUB_APP_ID", "12345")
 	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "test-key-pem")
 	t.Setenv("SLIPPY_GITHUB_ENTERPRISE_URL", "https://github.example.com")
@@ -207,7 +207,7 @@ func TestLoad_GitHubConfig(t *testing.T) {
 
 func TestLoad_InvalidGitHubAppID(t *testing.T) {
 	clearEnv(t)
-	t.Setenv("SLIPPY_API_KEY", "key")
+	t.Setenv("SLIPPY_API_KEY", testReadKey)
 	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
 	t.Setenv("SLIPPY_GITHUB_APP_ID", "not-a-number")
 
@@ -218,7 +218,7 @@ func TestLoad_InvalidGitHubAppID(t *testing.T) {
 
 func TestLoad_InvalidAncestryDepth(t *testing.T) {
 	clearEnv(t)
-	t.Setenv("SLIPPY_API_KEY", "key")
+	t.Setenv("SLIPPY_API_KEY", testReadKey)
 	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
 	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
 	t.Setenv("SLIPPY_ANCESTRY_DEPTH", "abc")
@@ -230,7 +230,7 @@ func TestLoad_InvalidAncestryDepth(t *testing.T) {
 
 func TestLoad_AncestryDepthTooSmall(t *testing.T) {
 	clearEnv(t)
-	t.Setenv("SLIPPY_API_KEY", "key")
+	t.Setenv("SLIPPY_API_KEY", testReadKey)
 	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
 	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
 	t.Setenv("SLIPPY_ANCESTRY_DEPTH", "0")
@@ -242,19 +242,19 @@ func TestLoad_AncestryDepthTooSmall(t *testing.T) {
 
 func TestLoad_WriteAPIKey(t *testing.T) {
 	clearEnv(t)
-	t.Setenv("SLIPPY_API_KEY", "read-key")
+	t.Setenv("SLIPPY_API_KEY", testReadKey)
 	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
 	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
-	t.Setenv("SLIPPY_WRITE_API_KEY", "write-key-abc")
+	t.Setenv("SLIPPY_WRITE_API_KEY", testWriteKey)
 
 	cfg, err := Load()
 	require.NoError(t, err)
-	assert.Equal(t, "write-key-abc", cfg.WriteAPIKey)
+	assert.Equal(t, testWriteKey, cfg.WriteAPIKey)
 }
 
 func TestLoad_MissingWriteAPIKey(t *testing.T) {
 	clearEnv(t)
-	t.Setenv("SLIPPY_API_KEY", "read-key")
+	t.Setenv("SLIPPY_API_KEY", testReadKey)
 	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
 	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
 
@@ -302,10 +302,10 @@ func TestTiersCollapsed(t *testing.T) {
 // start is recoverable; a silently collapsed authorization boundary is not.
 func TestLoad_IdenticalKeysRefused(t *testing.T) {
 	clearEnv(t)
-	t.Setenv("SLIPPY_API_KEY", "same-key-for-both")
+	t.Setenv("SLIPPY_API_KEY", "identical-key-for-both-0000000000000000000000000000000000000000")
 	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
 	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
-	t.Setenv("SLIPPY_WRITE_API_KEY", "same-key-for-both")
+	t.Setenv("SLIPPY_WRITE_API_KEY", "identical-key-for-both-0000000000000000000000000000000000000000")
 
 	cfg, err := Load()
 
@@ -320,16 +320,16 @@ func TestLoad_IdenticalKeysRefused(t *testing.T) {
 // on both variables merely being set.
 func TestLoad_DistinctKeysAccepted(t *testing.T) {
 	clearEnv(t)
-	t.Setenv("SLIPPY_API_KEY", "read-key")
+	t.Setenv("SLIPPY_API_KEY", testReadKey)
 	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
 	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
-	t.Setenv("SLIPPY_WRITE_API_KEY", "write-key")
+	t.Setenv("SLIPPY_WRITE_API_KEY", testWriteKey)
 
 	cfg, err := Load()
 
 	require.NoError(t, err)
-	assert.Equal(t, "read-key", cfg.APIKey)
-	assert.Equal(t, "write-key", cfg.WriteAPIKey)
+	assert.Equal(t, testReadKey, cfg.APIKey)
+	assert.Equal(t, testWriteKey, cfg.WriteAPIKey)
 }
 
 // TestLoad_WhitespaceKeyRefused pins the refusal of a padded key.
@@ -347,12 +347,12 @@ func TestLoad_WhitespaceKeyRefused(t *testing.T) {
 		write string
 		field string
 	}{
-		{"read key trailing newline", "read-key\n", "write-key", "SLIPPY_API_KEY"},
-		{"write key trailing newline", "read-key", "write-key\n", "SLIPPY_WRITE_API_KEY"},
-		{"read key leading space", " read-key", "write-key", "SLIPPY_API_KEY"},
+		{"read key trailing newline", testReadKey + "\n", testWriteKey, "SLIPPY_API_KEY"},
+		{"write key trailing newline", testReadKey, testWriteKey + "\n", "SLIPPY_WRITE_API_KEY"},
+		{"read key leading space", " " + testReadKey, testWriteKey, "SLIPPY_API_KEY"},
 		{
 			"read key is write key plus newline",
-			"write-key\n", "write-key", "SLIPPY_API_KEY",
+			testWriteKey + "\n", testWriteKey, "SLIPPY_API_KEY",
 		},
 	}
 	for _, tt := range tests {
@@ -375,4 +375,65 @@ func TestLoad_WhitespaceKeyRefused(t *testing.T) {
 			assert.NotContains(t, err.Error(), strings.TrimSpace(tt.write))
 		})
 	}
+}
+
+// testReadKey and testWriteKey are realistic-length credentials. Fixtures must clear
+// keyMinLength or they exercise the length refusal instead of the case under test.
+const (
+	testReadKey  = "test-read-key-0000000000000000000000000000000000000000000000000"
+	testWriteKey = "test-write-key-000000000000000000000000000000000000000000000000"
+)
+
+// TestLoad_ShortKeyRefused pins the entropy floor.
+//
+// Both keys are compared with subtle.ConstantTimeCompare against an attacker-supplied
+// bearer token, and there is no rate limiting anywhere in the service — so a short key is
+// brute-forceable online. Nothing previously stopped SLIPPY_API_KEY=x from booting.
+//
+// The floor is 60: the deployed read key is 62 characters and the write key is 64, so this
+// clears production with margin while rejecting anything resembling a placeholder.
+func TestLoad_ShortKeyRefused(t *testing.T) {
+	tests := []struct {
+		name  string
+		read  string
+		write string
+		field string
+	}{
+		{"tiny read key", "xy", testWriteKey, "SLIPPY_API_KEY"},
+		{"tiny write key", testReadKey, "xy", "SLIPPY_WRITE_API_KEY"},
+		{"one below the floor", strings.Repeat("a", 59), testWriteKey, "SLIPPY_API_KEY"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv("SLIPPY_API_KEY", tt.read)
+			t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
+			t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
+			t.Setenv("SLIPPY_WRITE_API_KEY", tt.write)
+
+			cfg, err := Load()
+
+			require.Error(t, err)
+			assert.Nil(t, cfg)
+			assert.Contains(t, err.Error(), tt.field)
+			assert.Contains(t, err.Error(), "60")
+			// Never echo the key material.
+			assert.NotContains(t, err.Error(), tt.read)
+			assert.NotContains(t, err.Error(), tt.write)
+		})
+	}
+}
+
+// TestLoad_KeyAtFloorAccepted is the boundary control: exactly 60 must pass.
+func TestLoad_KeyAtFloorAccepted(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("SLIPPY_API_KEY", strings.Repeat("a", 60))
+	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
+	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
+	t.Setenv("SLIPPY_WRITE_API_KEY", strings.Repeat("b", 60))
+
+	cfg, err := Load()
+
+	require.NoError(t, err)
+	assert.NotNil(t, cfg)
 }

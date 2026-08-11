@@ -13,6 +13,19 @@ import (
 
 const defaultAncestryDepth = 25
 
+// keyMinLength is the minimum length of either API key.
+//
+// Both keys are compared with subtle.ConstantTimeCompare against a caller-supplied bearer
+// token, and the service has no rate limiting — so a short key is brute-forceable online.
+// Nothing previously stopped SLIPPY_API_KEY=x from booting.
+//
+// 60 is chosen against the deployed values (read key 62 characters, write key 64), so it
+// clears production with margin while rejecting anything resembling a placeholder. It is a
+// length floor, not an entropy measure: it cannot tell a random 60-character key from a
+// repeated character. Real assurance comes from minting keys with a CSPRNG, which belongs
+// to the provisioning path rather than to this process.
+const keyMinLength = 60
+
 // Config holds all application configuration loaded from environment variables.
 type Config struct {
 	// Port is the HTTP server listen port (default: 8080)
@@ -165,6 +178,18 @@ func Load() (*Config, error) {
 				"%s has leading or trailing whitespace: the bearer token is trimmed before "+
 					"comparison, so a padded key either fails to authenticate or silently matches a "+
 					"differently-padded key", key.name)
+		}
+	}
+
+	for _, key := range []struct{ name, value string }{
+		{"SLIPPY_API_KEY", cfg.APIKey},
+		{"SLIPPY_WRITE_API_KEY", cfg.WriteAPIKey},
+	} {
+		if len(key.value) < keyMinLength {
+			return nil, fmt.Errorf(
+				"%s is shorter than the %d-character minimum: the key is compared against a "+
+					"caller-supplied bearer token and the service applies no rate limiting, so a "+
+					"short key is brute-forceable", key.name, keyMinLength)
 		}
 	}
 

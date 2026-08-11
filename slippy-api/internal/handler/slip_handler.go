@@ -53,16 +53,21 @@ type GetSlipByCommitInput struct {
 // FindByCommitsInput is the request body for commit-based lookups.
 //
 // maxItems bounds the request at the edge. Without it huma's 1 MiB body cap was the only
-// ceiling, which admits ~262,000 short refs — and the ancestry fallback resolves each one
-// through a GitHub round trip. 1000 is far above every real caller (slippy-find sends
-// 1+(parents x depth): 51 at its default depth of 25, 101 at the `--depth 50` in its own
-// help text) and is published in the OpenAPI document, so a caller learns the limit from
-// the contract rather than from a 422. The fallback carries its own, tighter cap — see
-// maxAncestryResolutions in internal/infrastructure/ancestry.go.
+// ceiling, which admits ~262,000 short refs, and the ancestry fallback resolved each one
+// through a GitHub round trip.
+//
+// The ceiling is deliberately far above any caller rather than close to them. Real traffic
+// is two orders of magnitude below it — slippy-find sends 1+(parents x depth), i.e. 51 at
+// its default depth of 25 and 101 at the `--depth 50` in its own help text — so the 422 is
+// unreachable in practice and this stays a resource bound rather than a behavioural limit.
+// What it still buys is keeping an absurd array out of the single unnest($2::text[]) query
+// against a table of ~12.5k rows. The real protection against the amplification is the
+// fallback's own, much tighter cap — see maxAncestryResolutions in
+// internal/infrastructure/ancestry.go.
 type FindByCommitsInput struct {
 	Body struct {
 		Repository string   `json:"repository" doc:"Full repository name (owner/repo)"`
-		Commits    []string `json:"commits" maxItems:"1000" doc:"List of commit SHAs to search"`
+		Commits    []string `json:"commits" maxItems:"10000" doc:"List of commit SHAs to search"`
 	}
 }
 

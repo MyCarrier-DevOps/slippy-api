@@ -158,7 +158,7 @@ type CreateSlipInputBody struct {
 	// CommitMessage Commit message (enables squash merge PR-based ancestry)
 	CommitMessage *string `json:"commit_message,omitempty"`
 
-	// CommitSha Full git commit SHA
+	// CommitSha Git commit SHA
 	CommitSha string `json:"commit_sha"`
 
 	// Components Components to track in aggregate steps

@@ -48,19 +48,29 @@ var writeApiKeySecurity = []map[string][]string{{"writeApiKey": {}}}
 // The upstream slippy.ComponentDefinition has no JSON tags, so we need this
 // local type for proper request deserialization.
 type ComponentDefinitionInput struct {
-	Name           string `json:"name"                      doc:"Component identifier"`
-	DockerfilePath string `json:"dockerfile_path,omitempty" doc:"Path to Dockerfile"`
+	Name           string `json:"name"                      maxLength:"256"  doc:"Component identifier"`
+	DockerfilePath string `json:"dockerfile_path,omitempty" maxLength:"1024" doc:"Path to Dockerfile"`
 }
 
 // CreateSlipInput captures the request body for creating a routing slip.
 type CreateSlipInput struct {
 	Body struct {
-		CorrelationID string                     `json:"correlation_id" doc:"Unique slip identifier (from Kafka event)"`
-		Repository    string                     `json:"repository" doc:"Full repository name (owner/repo)"`
-		Branch        string                     `json:"branch" doc:"Git branch name"`
-		CommitSHA     string                     `json:"commit_sha" doc:"Full git commit SHA"`
-		CommitMessage string                     `json:"commit_message,omitempty" doc:"Commit message (enables squash merge PR-based ancestry)"`
-		Components    []ComponentDefinitionInput `json:"components,omitempty" doc:"Components to track in aggregate steps"`
+		// Deliberately untagged: validateCorrelationIDFormat below already owns emptiness,
+		// length and the character set for this field, and returns 400 with a precise
+		// message. Duplicating the rule as schema tags would only move an existing 400 to
+		// a 422 and split the rule across two places. The *references* to a correlation ID
+		// — promoted_to, superseded_by — do carry tags, because nothing validated them.
+		CorrelationID string `json:"correlation_id" doc:"Unique slip identifier (from Kafka event)"`
+		Repository    string `json:"repository" maxLength:"256" doc:"Full repository name (owner/repo)"`
+		Branch        string `json:"branch" maxLength:"512" doc:"Git branch name"`
+		// No pattern on commit_sha: the resolver deliberately accepts short refs as well
+		// as full SHAs (isFullCommitSHA), so a strict 40-hex pattern would reject callers
+		// the service supports. 64 leaves room for SHA-256 object names.
+		CommitSHA string `json:"commit_sha" maxLength:"64" doc:"Git commit SHA"`
+		// Generous: commit messages drive squash-merge PR ancestry, so truncating them
+		// would degrade slip resolution. 16 KiB bounds the field without touching real use.
+		CommitMessage string                     `json:"commit_message,omitempty" maxLength:"16384" doc:"Commit message (enables squash merge PR-based ancestry)"`
+		Components    []ComponentDefinitionInput `json:"components,omitempty" maxItems:"100" doc:"Components to track in aggregate steps"`
 	}
 }
 
@@ -76,7 +86,7 @@ type CreateSlipOutput struct {
 
 // StepBody is the optional request body for step start/complete endpoints.
 type StepBody struct {
-	ComponentName string `json:"component_name,omitempty" doc:"Component name (required for aggregate steps, empty for pipeline steps)"`
+	ComponentName string `json:"component_name,omitempty" maxLength:"256" doc:"Component name (required for aggregate steps, empty for pipeline steps)"`
 }
 
 // StepInput captures path params and optional body for step start/complete.
@@ -101,8 +111,11 @@ type FailStepInput struct {
 	CorrelationID string `path:"correlationID" doc:"Routing slip correlation ID"`
 	StepName      string `path:"stepName"      doc:"Pipeline step name"`
 	Body          struct {
-		ComponentName string `json:"component_name,omitempty" doc:"Component name (required for aggregate steps, empty for pipeline steps)"`
-		Reason        string `json:"reason" doc:"Failure reason"`
+		ComponentName string `json:"component_name,omitempty" maxLength:"256" doc:"Component name (required for aggregate steps, empty for pipeline steps)"`
+		// Reasons are appended to the slip's state_history jsonb, which is rewritten whole
+		// on every append — so an unbounded reason is unbounded, quadratic growth in the
+		// document the platform treats as the authority on step completion.
+		Reason string `json:"reason" maxLength:"4096" doc:"Failure reason"`
 	}
 }
 
@@ -111,8 +124,8 @@ type SkipStepInput struct {
 	CorrelationID string `path:"correlationID" doc:"Routing slip correlation ID"`
 	StepName      string `path:"stepName"      doc:"Pipeline step name"`
 	Body          *struct {
-		ComponentName string `json:"component_name,omitempty" doc:"Component name (required for aggregate steps, empty for pipeline steps)"`
-		Reason        string `json:"reason,omitempty" doc:"Skip reason"`
+		ComponentName string `json:"component_name,omitempty" maxLength:"256" doc:"Component name (required for aggregate steps, empty for pipeline steps)"`
+		Reason        string `json:"reason,omitempty" maxLength:"4096" doc:"Skip reason"`
 	}
 }
 
@@ -136,7 +149,7 @@ func (s *SkipStepInput) reason() string {
 type PromoteSlipInput struct {
 	CorrelationID string `path:"correlationID" doc:"Routing slip correlation ID"`
 	Body          struct {
-		PromotedTo string `json:"promoted_to" doc:"Correlation ID of the new slip on the target branch"`
+		PromotedTo string `json:"promoted_to" maxLength:"128" pattern:"^[A-Za-z0-9._:-]+$" doc:"Correlation ID of the new slip on the target branch"`
 	}
 }
 
@@ -144,7 +157,7 @@ type PromoteSlipInput struct {
 type AbandonSlipInput struct {
 	CorrelationID string `path:"correlationID" doc:"Routing slip correlation ID"`
 	Body          struct {
-		SupersededBy string `json:"superseded_by" doc:"Correlation ID of the newer slip that supersedes this one"`
+		SupersededBy string `json:"superseded_by" maxLength:"128" pattern:"^[A-Za-z0-9._:-]+$" doc:"Correlation ID of the newer slip that supersedes this one"`
 	}
 }
 
@@ -153,7 +166,7 @@ type SetImageTagInput struct {
 	CorrelationID string `path:"correlationID" doc:"Routing slip correlation ID"`
 	ComponentName string `path:"componentName" doc:"Component name"`
 	Body          struct {
-		ImageTag string `json:"image_tag" doc:"Container image tag (e.g. 26.09.aef1234)"`
+		ImageTag string `json:"image_tag" maxLength:"256" doc:"Container image tag (e.g. 26.09.aef1234)"`
 	}
 }
 

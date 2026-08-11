@@ -718,3 +718,40 @@ func TestExtractBearerToken(t *testing.T) {
 		})
 	}
 }
+
+// --- Auth observability ---
+
+// TestAuthMiddleware_401CarriesWWWAuthenticate pins RFC 9110 §11.6.1: a 401 MUST carry a
+// WWW-Authenticate challenge naming the scheme.
+func TestAuthMiddleware_401CarriesWWWAuthenticate(t *testing.T) {
+	handler := setupAuthTestAPI("read-key", "write-key")
+
+	for _, path := range []string{"/protected", "/unsecured"} {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+
+			require.Equal(t, http.StatusUnauthorized, w.Code)
+			assert.Equal(t, `Bearer realm="slippy-api"`, w.Header().Get("WWW-Authenticate"))
+		})
+	}
+}
+
+// TestKeyFingerprint pins the shape of the value logged alongside every auth decision.
+//
+// With one shared bearer per tier there is otherwise nothing in the logs distinguishing a
+// leaked key from the pipeline's own traffic, and no way to see a rotation take effect. A
+// truncated SHA-256 gives a stable, non-reversible handle: it separates key populations
+// and makes "which credential is this" answerable without ever recording the credential.
+func TestKeyFingerprint(t *testing.T) {
+	a := keyFingerprint("some-token")
+	b := keyFingerprint("some-token")
+	c := keyFingerprint("different-token")
+
+	assert.Equal(t, a, b, "must be stable for the same token")
+	assert.NotEqual(t, a, c, "must distinguish different tokens")
+	assert.Len(t, a, 12, "truncated so it cannot be brute-forced back to the token")
+	assert.NotContains(t, a, "some-token", "must never contain the token")
+	assert.Equal(t, "-", keyFingerprint(""), "an absent token has no fingerprint")
+}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -28,6 +29,14 @@ import (
 	"github.com/MyCarrier-DevOps/slippy-api/internal/handler"
 	"github.com/MyCarrier-DevOps/slippy-api/internal/infrastructure"
 	"github.com/MyCarrier-DevOps/slippy-api/internal/middleware"
+)
+
+// runTestReadKey / runTestWriteKey are realistic-length credentials for tests that go
+// through config.Load, which enforces a 60-character floor. Handler-level fixtures build
+// *config.Config directly and are unaffected.
+const (
+	runTestReadKey  = "run-test-read-key-00000000000000000000000000000000000000000000"
+	runTestWriteKey = "run-test-write-key-0000000000000000000000000000000000000000000"
 )
 
 // --- Stub SlipReader for tests ---
@@ -1389,8 +1398,8 @@ func TestRun_MissingAPIKey(t *testing.T) {
 
 func TestRun_MissingPipelineConfig(t *testing.T) {
 	clearRunEnv(t)
-	t.Setenv("SLIPPY_API_KEY", "test-key")
-	t.Setenv("SLIPPY_WRITE_API_KEY", "write-key")
+	t.Setenv("SLIPPY_API_KEY", runTestReadKey)
+	t.Setenv("SLIPPY_WRITE_API_KEY", runTestWriteKey)
 	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
 	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
 
@@ -1403,8 +1412,8 @@ func TestRun_MissingPipelineConfig(t *testing.T) {
 
 func TestRun_MissingPostgresConfig(t *testing.T) {
 	clearRunEnv(t)
-	t.Setenv("SLIPPY_API_KEY", "test-key")
-	t.Setenv("SLIPPY_WRITE_API_KEY", "write-key")
+	t.Setenv("SLIPPY_API_KEY", runTestReadKey)
+	t.Setenv("SLIPPY_WRITE_API_KEY", runTestWriteKey)
 	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
 	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
 	// Provide a valid inline pipeline config so we get past the pipeline step.
@@ -1495,4 +1504,89 @@ func TestBuildHandler_SecurityHeaders(t *testing.T) {
 		assert.Contains(t, csp, "script-src", "huma's docs CSP must not be overwritten by the wrapper")
 		assert.Contains(t, csp, "frame-ancestors 'none'")
 	})
+}
+
+// TestBuildHandler_WriteDTOsAreBounded pins length limits on the write surface.
+//
+// Every write field except correlation_id was previously unbounded, and huma's 1 MiB body
+// cap was the only ceiling. That matters beyond hygiene: step names and reasons are
+// appended to the slip's state_history jsonb, which the platform treats as the
+// authoritative answer to "is this step actually done?" — so an unbounded reason is
+// unbounded growth in a document rewritten on every append.
+//
+// Limits are published in the OpenAPI document rather than enforced only in code, so a
+// caller and the generated client both learn them from the contract.
+func TestBuildHandler_WriteDTOsAreBounded(t *testing.T) {
+	h := buildFullyWiredHandler(t, nil)
+	big := strings.Repeat("A", 100_000)
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   map[string]any
+	}{
+		{"create-slip commit_message", http.MethodPost, "/v1/slips", map[string]any{
+			"correlation_id": "c1", "repository": "o/r", "branch": "main",
+			"commit_sha": "abc123", "commit_message": big,
+		}},
+		{"create-slip repository", http.MethodPost, "/v1/slips", map[string]any{
+			"correlation_id": "c1", "repository": big, "branch": "main", "commit_sha": "abc123",
+		}},
+		{"fail-step reason", http.MethodPost, "/v1/slips/c1/steps/builds/fail", map[string]any{
+			"reason": big,
+		}},
+		{"fail-step component_name", http.MethodPost, "/v1/slips/c1/steps/builds/fail", map[string]any{
+			"component_name": big, "reason": "x",
+		}},
+		{"set-image-tag image_tag", http.MethodPut, "/v1/slips/c1/components/svc/image-tag", map[string]any{
+			"image_tag": big,
+		}},
+		{"promote-slip promoted_to", http.MethodPost, "/v1/slips/c1/promote", map[string]any{
+			"promoted_to": big,
+		}},
+		{"abandon-slip superseded_by", http.MethodPost, "/v1/slips/c1/abandon", map[string]any{
+			"superseded_by": big,
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := json.Marshal(tt.body)
+			require.NoError(t, err)
+			req := httptest.NewRequest(tt.method, tt.path, bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer write-key")
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusUnprocessableEntity, w.Code,
+				"an oversized %s must be rejected by schema validation, not persisted", tt.name)
+		})
+	}
+}
+
+// TestBuildHandler_CorrelationIDRefsAreValidated pins that promoted_to and superseded_by
+// are held to the same shape as correlation_id itself. They ARE correlation IDs — they
+// name the slip that supersedes or replaces this one — but received none of the
+// validation applied to the field they mirror.
+func TestBuildHandler_CorrelationIDRefsAreValidated(t *testing.T) {
+	h := buildFullyWiredHandler(t, nil)
+
+	for _, tt := range []struct{ name, path, field string }{
+		{"promote-slip", "/v1/slips/c1/promote", "promoted_to"},
+		{"abandon-slip", "/v1/slips/c1/abandon", "superseded_by"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := json.Marshal(map[string]any{tt.field: "not a correlation id!"})
+			require.NoError(t, err)
+			req := httptest.NewRequest(http.MethodPost, tt.path, bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer write-key")
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusUnprocessableEntity, w.Code,
+				"%s must be held to the correlation_id character set", tt.field)
+		})
+	}
 }
