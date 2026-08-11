@@ -144,7 +144,7 @@ func (c *CachedSlipReader) FindAllByCommits(
 	ctx context.Context,
 	repository string,
 	commits []string,
-) ([]domain.SlipWithCommit, error) {
+) (domain.FindAllResult, error) {
 	ctx, span := otel.Tracer(cacheTracerName).Start(ctx, "cache.FindAllByCommits",
 		trace.WithAttributes(
 			attribute.String("cache.system", "dragonfly"),
@@ -160,7 +160,7 @@ func (c *CachedSlipReader) FindAllByCommits(
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return nil, err
+		return domain.FindAllResult{}, err
 	}
 	return results, nil
 }

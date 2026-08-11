@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -136,6 +137,43 @@ func TestLoad_InvalidDragonflyPort(t *testing.T) {
 	cfg, err := Load()
 	assert.Nil(t, cfg)
 	assert.ErrorContains(t, err, "DRAGONFLY_PORT must be a valid integer")
+}
+
+// strconv.Atoi accepts these happily, and DRAGONFLY_PORT has no late backstop the way PORT
+// does — an unusable value only fails the Redis ping, which is logged as ordinary optional
+// dependency degradation while silently taking the slip-creation dedup lock down with it.
+func TestLoad_OutOfRangeDragonflyPort(t *testing.T) {
+	for _, port := range []string{"0", "-1", "99999"} {
+		t.Run(port, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv("SLIPPY_API_KEY", testReadKey)
+			t.Setenv("SLIPPY_WRITE_API_KEY", testWriteKey)
+			t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
+			t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
+			t.Setenv("DRAGONFLY_PORT", port)
+
+			cfg, err := Load()
+			assert.Nil(t, cfg)
+			assert.ErrorContains(t, err, "DRAGONFLY_PORT must be between 1 and 65535")
+		})
+	}
+}
+
+func TestLoad_BoundaryDragonflyPortsAccepted(t *testing.T) {
+	for _, port := range []string{"1", "6379", "65535"} {
+		t.Run(port, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv("SLIPPY_API_KEY", testReadKey)
+			t.Setenv("SLIPPY_WRITE_API_KEY", testWriteKey)
+			t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
+			t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
+			t.Setenv("DRAGONFLY_PORT", port)
+
+			cfg, err := Load()
+			require.NoError(t, err)
+			assert.Equal(t, port, strconv.Itoa(cfg.DragonflyPort))
+		})
+	}
 }
 
 func TestLoad_InvalidCacheTTL(t *testing.T) {

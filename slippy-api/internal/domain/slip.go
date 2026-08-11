@@ -64,7 +64,23 @@ type SlipReader interface {
 	FindByCommits(ctx context.Context, repository string, commits []string) (*Slip, string, error)
 
 	// FindAllByCommits finds all slips matching any commit in the ordered list.
-	FindAllByCommits(ctx context.Context, repository string, commits []string) ([]SlipWithCommit, error)
+	FindAllByCommits(ctx context.Context, repository string, commits []string) (FindAllResult, error)
+}
+
+// FindAllResult is the outcome of a FindAllByCommits lookup.
+//
+// Truncated reports that the ancestry fallback hit its resolution cap before it had
+// covered every requested commit, so Slips may omit slips the caller asked about. It is a
+// field rather than an error because the partial answer is still worth returning — for the
+// single-lineage caller the dropped tail is entirely redundant, since resolution walks
+// backwards from each ref — but an operation that promises to find *all* matches must not
+// return a short answer that reads as a complete one.
+//
+// Only the ancestry fallback can set it. The direct store lookup answers every commit in
+// one query, so a result served from Postgres is always complete.
+type FindAllResult struct {
+	Slips     []SlipWithCommit
+	Truncated bool
 }
 
 // Invalidator is a post-write hook that removes cached entries for a slip.

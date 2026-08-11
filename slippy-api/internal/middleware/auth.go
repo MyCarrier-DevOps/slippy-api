@@ -144,10 +144,20 @@ func authorize(ctx huma.Context, op *huma.Operation, readKey, writeKey string) b
 	if RequiresWriteKey(op) {
 		// Write operations: only the write key is accepted.
 		if writeKey == "" || subtle.ConstantTimeCompare([]byte(token), []byte(writeKey)) != 1 {
-			span.SetAttributes(attribute.String("auth.result", "invalid_token"))
+			// Separate a valid read key presented at the write tier from a token this
+			// service does not recognise at all. The caller cannot tell the difference —
+			// status, body and the absent challenge are identical, deliberately — but the
+			// audit trail can, and without it a leaked read key probing mutations looks
+			// exactly like ordinary garbage. That attribution is the reason the tier split
+			// exists, so the refusal should record which of the two it was.
+			result := "invalid_token"
+			if readKey != "" && subtle.ConstantTimeCompare([]byte(token), []byte(readKey)) == 1 {
+				result = "wrong_tier"
+			}
+			span.SetAttributes(attribute.String("auth.result", result))
 			span.SetStatus(codes.Error, "invalid API key")
-			slog.WarnContext(spanCtx, "auth: invalid token for write operation",
-				"operation", opID, "result", "invalid_token", "required_level", "write",
+			slog.WarnContext(spanCtx, "auth: token refused for write operation",
+				"operation", opID, "result", result, "required_level", "write",
 				"key_fingerprint", fingerprint)
 			writeError(ctx, http.StatusForbidden, "invalid API key")
 			return false
@@ -338,8 +348,15 @@ const errorContentType = "application/problem+json"
 func writeError(ctx huma.Context, status int, msg string) {
 	ctx.SetHeader("Content-Type", errorContentType)
 	ctx.SetHeader("X-Content-Type-Options", "nosniff")
-	// Only on 401. A 403 here means the credential was understood and refused, so offering
-	// a challenge would invite a pointless retry with the same key.
+	// Only on 401, which is the sole status RFC 9110 §11.6.1 attaches the challenge to.
+	//
+	// A 403 is left unchallenged because the caller has already presented a credential and
+	// a challenge would only prompt re-presenting it. Note what this does NOT assert: the
+	// middleware never determines whether the credential was *understood*. The write arm
+	// refuses a valid read key and an unrecognised string with the same status, the same
+	// body and the same silence — only the auth.result attribute (wrong_tier vs
+	// invalid_token) and the key fingerprint separate them, and both go to the audit trail
+	// rather than the wire.
 	if status == http.StatusUnauthorized {
 		ctx.SetHeader("WWW-Authenticate", bearerChallenge)
 	}

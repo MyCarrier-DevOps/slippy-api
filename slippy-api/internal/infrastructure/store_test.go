@@ -334,8 +334,9 @@ func TestSlipStoreAdapter_FindAllByCommits_Success(t *testing.T) {
 	adapter := NewSlipStoreAdapter(store)
 	results, err := adapter.FindAllByCommits(context.Background(), "org/repo", []string{"c1", "c2"})
 	require.NoError(t, err)
-	assert.Len(t, results, 2)
-	assert.Equal(t, "a", results[0].Slip.CorrelationID)
+	assert.Len(t, results.Slips, 2)
+	assert.False(t, results.Truncated, "the direct store lookup answers every commit in one query")
+	assert.Equal(t, "a", results.Slips[0].Slip.CorrelationID)
 }
 
 func TestSlipStoreAdapter_FindAllByCommits_EmptyResult(t *testing.T) {
@@ -348,7 +349,7 @@ func TestSlipStoreAdapter_FindAllByCommits_EmptyResult(t *testing.T) {
 	adapter := NewSlipStoreAdapter(store)
 	results, err := adapter.FindAllByCommits(context.Background(), "org/repo", []string{"c1"})
 	require.NoError(t, err)
-	assert.Empty(t, results)
+	assert.Empty(t, results.Slips)
 }
 
 func TestSlipStoreAdapter_FindAllByCommits_StoreError(t *testing.T) {
@@ -362,7 +363,7 @@ func TestSlipStoreAdapter_FindAllByCommits_StoreError(t *testing.T) {
 	results, err := adapter.FindAllByCommits(context.Background(), "org/repo", []string{"c1"})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "connection refused")
-	assert.Nil(t, results)
+	assert.Empty(t, results.Slips)
 }
 
 func TestSlipStoreAdapter_Close_Success(t *testing.T) {

@@ -617,6 +617,7 @@
           },
           "repository": {
             "description": "Full repository name (owner/repo)",
+            "maxLength": 256,
             "type": "string"
           }
         },
@@ -1534,7 +1535,15 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-Slippy-Results-Truncated": {
+                "schema": {
+                  "description": "true when the commit list exceeded the ancestry resolution cap, so the result may omit matching slips",
+                  "type": "boolean"
+                }
+              }
+            }
           },
           "default": {
             "content": {
@@ -2382,7 +2391,15 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-Slippy-Results-Truncated": {
+                "schema": {
+                  "description": "true when the commit list exceeded the ancestry resolution cap, so the result may omit matching slips",
+                  "type": "boolean"
+                }
+              }
+            }
           },
           "default": {
             "content": {

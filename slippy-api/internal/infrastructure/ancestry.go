@@ -317,13 +317,14 @@ func (a *SlipResolverAdapter) FindAllByCommits(
 	ctx context.Context,
 	repository string,
 	commits []string,
-) ([]domain.SlipWithCommit, error) {
-	// Try the direct ClickHouse lookup first.
+) (domain.FindAllResult, error) {
+	// Try the direct lookup first. It answers every commit in one query, so a hit here is
+	// always complete regardless of how long the list is.
 	results, err := a.reader.FindAllByCommits(ctx, repository, commits)
 	if err != nil {
-		return nil, err
+		return domain.FindAllResult{}, err
 	}
-	if len(results) > 0 {
+	if len(results.Slips) > 0 {
 		return results, nil
 	}
 
@@ -340,11 +341,17 @@ func (a *SlipResolverAdapter) FindAllByCommits(
 		"requested_repository", repository, "commits_count", len(commits))
 
 	var allResults []domain.SlipWithCommit
-	for _, commit := range boundedCommits(ctx, repository, commits) {
+	resolving := boundedCommits(ctx, repository, commits)
+	// Report the cap to the caller rather than only to the log. For a single-lineage
+	// caller the dropped tail is redundant, but commits drawn from disjoint branches
+	// resolve to distinct slips, and dropping those behind a 200 makes a partial answer
+	// indistinguishable from a complete one on an operation that promises "all".
+	truncated := len(resolving) < len(commits)
+	for _, commit := range resolving {
 		// See FindByCommits: stop the fan-out once the caller is gone.
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			span.SetStatus(codes.Error, "context done")
-			return nil, ctxErr
+			return domain.FindAllResult{}, ctxErr
 		}
 		result, resolveErr := a.resolver.ResolveSlip(ctx, slippy.ResolveOptions{
 			Repository: repository,
@@ -369,15 +376,19 @@ func (a *SlipResolverAdapter) FindAllByCommits(
 				"requested_repository", repository, "commit", commit, "error", resolveErr)
 			span.RecordError(resolveErr)
 			span.SetStatus(codes.Error, "resolver error")
-			return nil, resolveErr
+			return domain.FindAllResult{}, resolveErr
 		}
 	}
 
 	slog.InfoContext(ctx, "ancestry: resolved slips for find-all",
-		"requested_repository", repository, "results_count", len(allResults))
-	span.SetAttributes(attribute.Int("slip.results_count", len(allResults)))
+		"requested_repository", repository,
+		"results_count", len(allResults), "truncated", truncated)
+	span.SetAttributes(
+		attribute.Int("slip.results_count", len(allResults)),
+		attribute.Bool("slip.results_truncated", truncated),
+	)
 	span.SetStatus(codes.Ok, "resolved")
-	return allResults, nil
+	return domain.FindAllResult{Slips: allResults, Truncated: truncated}, nil
 }
 
 // isFullCommitSHA reports whether ref is an unambiguous full git commit SHA:

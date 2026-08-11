@@ -131,7 +131,7 @@ func (a *SlipStoreAdapter) FindAllByCommits(
 	ctx context.Context,
 	repository string,
 	commits []string,
-) ([]domain.SlipWithCommit, error) {
+) (domain.FindAllResult, error) {
 	ctx, span := otel.Tracer(storeTracerName).Start(ctx, "postgres.FindAllByCommits",
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(
@@ -146,10 +146,11 @@ func (a *SlipStoreAdapter) FindAllByCommits(
 	results, err := a.store.FindAllByCommits(ctx, repository, commits)
 	if err != nil {
 		recordStoreError(span, err)
-		return nil, err
+		return domain.FindAllResult{}, err
 	}
 	span.SetAttributes(attribute.Int("slip.results_count", len(results)))
-	return results, nil
+	// Never truncated: one unnest($2::text[]) query covers every commit the caller sent.
+	return domain.FindAllResult{Slips: results}, nil
 }
 
 // Close releases resources held by the underlying store.

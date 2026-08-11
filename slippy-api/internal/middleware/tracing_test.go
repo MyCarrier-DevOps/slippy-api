@@ -43,6 +43,65 @@ func setupTracingTestAPI(apiKey string) http.Handler {
 	return mux
 }
 
+// setupWriteTierTestAPI registers a write-tier operation so the write arm's refusals can
+// be told apart.
+func setupWriteTierTestAPI(readKey, writeKey string) http.Handler {
+	mux := http.NewServeMux()
+	api := humago.New(mux, huma.DefaultConfig("Test", "1.0.0"))
+	api.UseMiddleware(NewAPIKeyAuth(readKey, writeKey))
+
+	huma.Register(api, huma.Operation{
+		OperationID: "write-op",
+		Method:      http.MethodPost,
+		Path:        "/mutate",
+		Security:    []map[string][]string{{"writeApiKey": {}}},
+	}, func(_ context.Context, _ *struct{}) (*struct{ Body string }, error) {
+		return &struct{ Body string }{Body: "ok"}, nil
+	})
+
+	return mux
+}
+
+// A valid read key presented at the write tier and an unrecognised string are refused
+// identically on the wire — same 403, same body, no challenge — so the only place the two
+// can be told apart is the audit trail. Without the distinction a leaked read key probing
+// mutations is indistinguishable from ordinary garbage, which is the attribution the tier
+// split exists to provide.
+func TestAuth_ReadKeyAtWriteTier_IsAttributedAsWrongTier(t *testing.T) {
+	recorder, cleanup := telemetry.SetupTestTracing()
+	defer cleanup()
+
+	handler := setupWriteTierTestAPI("read-key", "write-key")
+
+	for _, tc := range []struct {
+		name, token, wantResult string
+	}{
+		{"valid read key at write tier", "read-key", "wrong_tier"},
+		{"unrecognised token", "total-garbage", "invalid_token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/mutate", nil)
+			req.Header.Set("Authorization", "Bearer "+tc.token)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			// The caller learns nothing either way — that part is deliberate.
+			assert.Equal(t, http.StatusForbidden, rec.Code)
+			assert.Empty(t, rec.Header().Get("WWW-Authenticate"))
+
+			var found bool
+			for _, span := range recorder.Ended() {
+				if span.Name() == "auth.validateAPIKey" {
+					found = true
+					assertAuthAttr(t, span.Attributes(), "auth.result", tc.wantResult)
+				}
+			}
+			require.True(t, found, "expected an auth.validateAPIKey span")
+			recorder.Reset()
+		})
+	}
+}
+
 func TestAuth_Success_CreatesSpan(t *testing.T) {
 	recorder, cleanup := telemetry.SetupTestTracing()
 	defer cleanup()

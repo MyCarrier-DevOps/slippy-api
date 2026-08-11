@@ -46,8 +46,11 @@ func (m *mockReader) FindAllByCommits(
 	ctx context.Context,
 	repo string,
 	commits []string,
-) ([]domain.SlipWithCommit, error) {
-	return m.findAllByCommitsFn(ctx, repo, commits)
+) (domain.FindAllResult, error) {
+	// The func field still returns the slice: the adapters under test care about the
+	// slips, and leaving it alone keeps every case table below unchanged.
+	slips, err := m.findAllByCommitsFn(ctx, repo, commits)
+	return domain.FindAllResult{Slips: slips}, err
 }
 
 // setupTestAPI creates a huma API with slip routes for testing (no auth middleware).

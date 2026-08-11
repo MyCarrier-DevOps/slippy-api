@@ -26,7 +26,6 @@ import (
 
 	"github.com/MyCarrier-DevOps/slippy-api/internal/config"
 	"github.com/MyCarrier-DevOps/slippy-api/internal/domain"
-	"github.com/MyCarrier-DevOps/slippy-api/internal/handler"
 	"github.com/MyCarrier-DevOps/slippy-api/internal/infrastructure"
 	"github.com/MyCarrier-DevOps/slippy-api/internal/middleware"
 )
@@ -77,8 +76,8 @@ func (s *stubSlipReader) FindByCommits(_ context.Context, _ string, _ []string) 
 	return nil, "", errors.New("not implemented")
 }
 
-func (s *stubSlipReader) FindAllByCommits(_ context.Context, _ string, _ []string) ([]domain.SlipWithCommit, error) {
-	return nil, errors.New("not implemented")
+func (s *stubSlipReader) FindAllByCommits(_ context.Context, _ string, _ []string) (domain.FindAllResult, error) {
+	return domain.FindAllResult{}, errors.New("not implemented")
 }
 
 // --- Stub readers for optional handlers (used in spec generation) ---
@@ -392,7 +391,7 @@ func TestVerifyRouteSecurity(t *testing.T) {
 		err := verifyRouteSecurity(api, nil)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "absent from operationTiers")
-		assert.Contains(t, err.Error(), "write-tier in operationTiers")
+		assert.Contains(t, err.Error(), "does not name them read or public")
 	})
 
 	t.Run("renamed health route fails", func(t *testing.T) {
@@ -468,6 +467,56 @@ func TestVerifyRouteSecurity(t *testing.T) {
 		assert.NoError(t, verifyRouteSecurity(api, nil))
 	})
 
+	// policy.tier is a free-form string and check (6) used to fire only on tier ==
+	// tierWrite, so a typo matched no arm at all: the row was listed, satisfying (3), and
+	// then never tier-checked — silently removing the one automated check against a
+	// mutation declaring apiKeySecurity. Escalation needs this defect AND a copy-pasted
+	// apiKeySecurity, which is exactly the second defect this check exists to catch.
+	t.Run("row naming an unrecognised tier fails", func(t *testing.T) {
+		const opID = "zz-typo-tier"
+		operationTiers[opID] = operationPolicy{"wrote", gateAlways}
+		t.Cleanup(func() { delete(operationTiers, opID) })
+
+		api := newTestAPI(t, huma.Operation{
+			OperationID: opID, Method: http.MethodPost, Path: "/v1/zz-typo",
+			Security: []map[string][]string{{"apiKey": {}}},
+		})
+		err := verifyRouteSecurity(api, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "POST /v1/zz-typo")
+		assert.Contains(t, err.Error(), "does not name them read or public")
+	})
+
+	// A read-tier row still short-circuits check (6), so the deliberate decision not to
+	// verify read-tier declarations at boot survives stating the check negatively.
+	t.Run("read-tier operation declaring writeApiKey passes", func(t *testing.T) {
+		api := newTestAPI(t, huma.Operation{
+			OperationID: "get-slip", Method: http.MethodGet, Path: "/slips/{id}",
+			Security: []map[string][]string{{"writeApiKey": {}}},
+		})
+		assert.NoError(t, verifyRouteSecurity(api, nil))
+	})
+
+	// Checks (5) and (6) are both true for a write-tier row on an allowlisted route
+	// declaring no Security. While (6) sat inside the exclusive switch only (5) reported,
+	// so the operator added Security, redeployed, and only then learned it named the wrong
+	// scheme — the one-class-per-boot cost errors.Join exists to avoid.
+	t.Run("allowlisted write-tier route with no Security reports both classes", func(t *testing.T) {
+		const opID = "zz-open-write"
+		operationTiers[opID] = operationPolicy{tierWrite, gateAlways}
+		t.Cleanup(func() { delete(operationTiers, opID) })
+
+		api := newTestAPI(t, huma.Operation{
+			OperationID: opID, Method: http.MethodGet, Path: "/health",
+		})
+		err := verifyRouteSecurity(api, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "require no credential",
+			"the open-route class must still report")
+		assert.Contains(t, err.Error(), "does not name them read or public",
+			"the mistier class must no longer be masked by the open-route class")
+	})
+
 	// The reverse direction: a row whose gate is up but which matches no registered
 	// operation is stale, and stale rows silently narrow every other check read against
 	// the table.
@@ -510,7 +559,8 @@ func TestVerifyRouteSecurity(t *testing.T) {
 			ciJobLogReader:              &stubCIJobLogReader{},
 			automationTestResultsReader: &stubAutomationTestResultsReader{},
 			automationTestsReader:       nil, // drill-down routes not registered
-			diagnosticsHandler:          handler.NewDiagnosticsHandler(mockClickHouseSession(), "slippy"),
+			chSession:                   mockClickHouseSession(),
+			slipDatabase:                "slippy",
 		})
 		require.NoError(t, err,
 			"the parent-reader-only wiring is documented as supported and must still boot")
@@ -520,7 +570,23 @@ func TestVerifyRouteSecurity(t *testing.T) {
 	// Every gate an operationTiers row names must be a declared constant, or the
 	// stale-row check skips that row forever.
 	t.Run("every tier row names a known gate", func(t *testing.T) {
-		require.NoError(t, verifyGateNames())
+		// gateStatus(handlerDeps{}) rather than a parallel set of names: its keys ARE the
+		// declared gates, so this exercises the real object the registration branches use.
+		require.NoError(t, verifyGateNames(gateStatus(handlerDeps{})))
+	})
+
+	// A gate constant that exists but was never given a gateStatus entry reads as
+	// permanently down, so the stale-row check skips its rows forever. Before gateStatus
+	// was the single definition, nothing compared the const block to the live map and this
+	// was silent.
+	t.Run("row naming a gate absent from gateStatus fails", func(t *testing.T) {
+		const opID = "zz-unknown-gate"
+		operationTiers[opID] = operationPolicy{tierRead, "readerNobodyDeclared"}
+		t.Cleanup(func() { delete(operationTiers, opID) })
+
+		err := verifyGateNames(gateStatus(handlerDeps{}))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "readerNobodyDeclared")
 	})
 
 	// The degraded shape buildHandler actually produces: ClickHouse-backed readers and
@@ -601,7 +667,8 @@ func buildFullyWiredHandler(t *testing.T, mux humago.Mux) http.Handler {
 		ciJobLogReader:              &stubCIJobLogReader{},
 		automationTestResultsReader: &stubAutomationTestResultsReader{},
 		automationTestsReader:       &stubAutomationTestsReader{},
-		diagnosticsHandler:          handler.NewDiagnosticsHandler(mockClickHouseSession(), "slippy"),
+		chSession:                   mockClickHouseSession(),
+		slipDatabase:                "slippy",
 	})
 	require.NoError(t, err)
 	require.NotNil(t, h)

@@ -134,7 +134,7 @@ func TestSlipStoreAdapter_FindAllByCommits_CreatesSpan(t *testing.T) {
 	adapter := NewSlipStoreAdapter(store)
 	results, err := adapter.FindAllByCommits(context.Background(), "org/repo", []string{"c1"})
 	require.NoError(t, err)
-	assert.Len(t, results, 1)
+	assert.Len(t, results.Slips, 1)
 
 	spans := recorder.Ended()
 	require.Len(t, spans, 1)

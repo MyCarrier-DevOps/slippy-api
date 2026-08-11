@@ -51,6 +51,8 @@ func main() {
 // forecloses t.Parallel(), and — for a var a test reassigns — escapes the `reassign`
 // linter entirely, since .golangci.yml sets `tests: false`.
 type handlerDeps struct {
+	// Required, and dereferenced before any route is registered — a nil panics on
+	// deps.cfg.APIKey rather than returning the error buildHandler otherwise returns.
 	cfg *config.Config
 
 	// mux is the router to register on. Nil means a fresh http.ServeMux, which is what
@@ -60,17 +62,34 @@ type handlerDeps struct {
 	// to see them.
 	mux humago.Mux
 
-	reader domain.SlipReader
+	// Required. Neither is gated: their operationTiers rows carry gateAlways and their
+	// Register* calls run unconditionally, so a nil here does not withhold a route — it
+	// leaves one registered that fails on every request. A nil pipelineCfg serves 500
+	// "pipeline config not available" from internal/handler/pipeline_config.go for both
+	// get-pipeline-config and get-step-prerequisites.
+	reader      domain.SlipReader
+	pipelineCfg *slippy.PipelineConfig
 
-	// Optional. A nil field leaves the corresponding routes unregistered, which is how
-	// the service runs degraded when ClickHouse is unavailable.
+	// Optional: a nil field leaves the corresponding routes unregistered. That is how the
+	// service runs degraded when ClickHouse is unavailable — with two exceptions worth
+	// naming, because the shorthand is wrong for both. writer is not a ClickHouse
+	// collaborator at all (writes go to Postgres); and automationTestsReader's routes are
+	// dropped one level down, by the `h.testsReader != nil` guard inside
+	// RegisterAutomationTestResultsRoutes, not by any nil check in buildHandler — which is
+	// precisely why gateAutomationTests has to mirror that check across a package boundary.
 	writer                      domain.SlipWriter
 	imageTagReader              domain.ImageTagReader
 	ciJobLogReader              domain.CIJobLogReader
 	automationTestResultsReader domain.AutomationTestResultsReader
 	automationTestsReader       domain.AutomationTestsReader
-	pipelineCfg                 *slippy.PipelineConfig
-	diagnosticsHandler          *handler.DiagnosticsHandler
+
+	// chSession backs the ClickHouse schema-version diagnostic, and slipDatabase names the
+	// database it probes. The session rather than a built *handler.DiagnosticsHandler: this
+	// struct carries collaborators and buildHandler owns handler construction — it builds
+	// the other seven — so receiving one pre-built made run() reach into the handler layer
+	// for no reason and left one field a product where every other is an ingredient.
+	chSession    clickhouse.ClickhouseSessionInterface
+	slipDatabase string
 }
 
 // Access tiers an operation can be served at, as enforced by the middleware.
@@ -105,33 +124,56 @@ const (
 	// with the same failure mode — it is a mirror, not a link.
 	gateAutomationTests = "automationTestsReader" // autotest_results.* per-test drill-down
 	gateWrites          = "writer"                // slip mutations
-	gateDiagnostics     = "diagnosticsHandler"    // legacy CH schema-version probe
+	gateDiagnostics     = "chSession"             // legacy CH schema-version probe
 )
 
-// knownGates is every gate an operationTiers row may name. A row naming anything else
-// would be skipped forever by the stale-row check, because a map lookup on a missing key
-// is indistinguishable from "gate is down" — the one fail-open default in a file whose
-// every other decision fails closed. buildHandler validates the table against this set.
-var knownGates = map[string]struct{}{
-	gateAlways:          {},
-	gateImageTags:       {},
-	gateCIJobLogs:       {},
-	gateAutomation:      {},
-	gateAutomationTests: {},
-	gateWrites:          {},
-	gateDiagnostics:     {},
+// gateStatus is the single definition of which gates exist and which of them are up.
+//
+// Both facts used to be written more than once. The five nil checks that decide
+// registration in buildHandler were restated — not derived — in the map handed to
+// verifyRouteSecurity a few lines below, and the set of gates appeared a third time in a
+// standalone knownGates. Both desync directions were reachable: a gate truer than its
+// registration fires the stale-row check during a *degraded* boot and turns a tolerated
+// ClickHouse outage into a crashloop, while a gate falser than its registration strands its
+// rows in silence — as does a gate added to the const block and forgotten in the map.
+//
+// Go cannot enforce the correspondence; there is no way to require a new constant to
+// acquire a map entry. What one definition buys is that there is nothing to keep in sync
+// rather than a rule to remember.
+//
+// The key set is the declared gate set no matter what is wired, which is what lets
+// verifyGateNames validate operationTiers against gateStatus(handlerDeps{}).
+func gateStatus(deps handlerDeps) map[string]bool {
+	automation := deps.automationTestResultsReader != nil
+	return map[string]bool{
+		gateAlways:     true,
+		gateImageTags:  deps.imageTagReader != nil,
+		gateCIJobLogs:  deps.ciJobLogReader != nil,
+		gateAutomation: automation,
+		// A conjunction, not just deps.automationTestsReader: the inner `h.testsReader != nil`
+		// guard inside RegisterAutomationTestResultsRoutes only runs when the outer check did.
+		// This is the one entry that genuinely mirrors a nil check across a package boundary
+		// with no compile-time link — see gateAutomationTests above.
+		gateAutomationTests: automation && deps.automationTestsReader != nil,
+		gateWrites:          deps.writer != nil,
+		gateDiagnostics:     deps.chSession != nil,
+	}
 }
 
-// verifyGateNames reports rows naming a gate that is not a declared constant.
+// verifyGateNames reports rows naming a gate that is not a declared constant. A row naming
+// anything else would be skipped forever by the stale-row check, because a map lookup on a
+// missing key is indistinguishable from "gate is down" — the one fail-open default in a
+// file whose every other decision fails closed.
 //
-// It checks membership in knownGates rather than in the liveGates map buildHandler
-// builds: liveGates legitimately omits nothing today, but requiring presence there would
-// change the guard's contract from "absent or false means down" to "must be present",
-// which would break the degraded-boot subtest that passes an empty map on purpose.
-func verifyGateNames() error {
+// gates supplies the declared set: buildHandler passes gateStatus(handlerDeps{}), whose key
+// set IS the gate constants, so there is no second list to drift from the first. Only the
+// keys are read here; the values belong to verifyRouteSecurity, which takes its own map, so
+// requiring presence in this function does not tighten that one's "absent or false means
+// down" contract or disturb the degraded-boot subtest that passes it an empty map.
+func verifyGateNames(gates map[string]bool) error {
 	var unknown []string
 	for opID, policy := range operationTiers {
-		if _, ok := knownGates[policy.gate]; !ok {
+		if _, ok := gates[policy.gate]; !ok {
 			unknown = append(unknown, fmt.Sprintf("%s (gate %q)", opID, policy.gate))
 		}
 	}
@@ -215,24 +257,45 @@ var operationTiers = map[string]operationPolicy{
 //
 //  1. Requires no credential and is not allowlisted → 401 for every caller. The shape
 //     is an in-place path rename that leaves the allowlist on the old path.
+//
 //  2. Allowlisted but requires a credential → also 401 for every caller. The middleware
 //     consults publicRoutes only for operations that require no credential, so the
 //     allowlist entry goes dead. This is the same probe outage as (1) arriving from the
 //     opposite direction: kubelet's liveness AND readiness, every replica, at once.
+//
 //  3. Registered but absent from operationTiers → never tier-checked at all, because the
 //     map lookup yields the zero policy whose tier matches nothing. A mutation that was
 //     copy-pasted with apiKeySecurity and never added to the table is served to the read
 //     key, and that is one author making one lapse.
+//
 //  4. Public-tier in operationTiers but demanding a credential → the probe outage of (1)
 //     and (2) arriving with the path renamed AND the declaration added. Each half alone is
 //     caught by an earlier check; the combination falls between them.
+//
 //  5. Not public-tier in operationTiers but requiring no credential → an OPEN ROUTE. The
 //     mirror of (4), and the only one of the pair that opens a route rather than closing
 //     one: the route is allowlisted so (2) skips it, and the tier arms below only fire for
 //     public and write rows, so a read-tier row lands on the allowlist and serves to anyone.
-//  6. Listed write-tier but not served at the write tier → silent privilege escalation.
-//     Unlike the outage classes the route keeps working, so nothing surfaces while the
-//     read key gains a mutation.
+//
+//  6. Listed, not named read or public, and not served at the write tier → silent
+//     privilege escalation. Unlike the outage classes the route keeps working, so nothing
+//     surfaces while the read key gains a mutation.
+//
+//     Stated negatively on purpose. `tier == tierWrite` would have matched only the two
+//     spellings it knows, and policy.tier is a free-form string: a typo, a rename, or a
+//     fourth tier constant added later falls through every arm, so the row is listed —
+//     satisfying (3) — yet never tier-checked, which silently removes the one automated
+//     check against a mutation declaring apiKeySecurity. Read-tier rows still short-circuit
+//     here, so the deliberate decision not to check them (below) is unchanged; what is
+//     newly refused is a row whose tier is not a name this function handles.
+//
+//     It also sits outside the switch. The chain is exclusive and (5) is simultaneously
+//     true for a write-tier row on an allowlisted route with no Security, so (5) alone
+//     reported and this class stayed hidden until the operator had fixed (5) and
+//     redeployed — the one-class-per-boot cost the errors.Join below exists to avoid. The
+//     `listed` guard keeps an unlisted route from being judged against a zero policy;
+//     (3) already owns that case.
+//
 //  7. Listed with a live gate but not registered → a stale row. The table is the inventory
 //     every other check is read against, so a row that no longer matches anything silently
 //     narrows all of them.
@@ -287,7 +350,12 @@ func verifyRouteSecurity(api huma.API, liveGates map[string]bool) error {
 				mispublic = append(mispublic, route)
 			case policy.tier != tierPublic && !needsCredential:
 				overexposed = append(overexposed, route)
-			case policy.tier == tierWrite && !middleware.RequiresWriteKey(op):
+			}
+
+			// Check (6), outside the exclusive chain and stated as "not read or public"
+			// rather than "is write" — see the numbered list above for both reasons.
+			if listed && policy.tier != tierRead && policy.tier != tierPublic &&
+				!middleware.RequiresWriteKey(op) {
 				mistiered = append(mistiered, route)
 			}
 		}
@@ -333,9 +401,11 @@ func verifyRouteSecurity(api huma.API, liveGates map[string]bool) error {
 				"only one of the pair that opens a route rather than closing one. Declare Security "+
 				"on the operation, or change the row's tier to public and keep the allowlist entry"),
 		routeSecurityError(mistiered,
-			"route(s) are write-tier in operationTiers but would be served at the read tier",
-			"the declaration must name writeApiKey, otherwise SLIPPY_API_KEY is accepted for a "+
-				"mutation"),
+			"route(s) would be served at the read tier but operationTiers does not name them read or public",
+			"the row is write-tier, is misspelled, or names a tier constant no arm in "+
+				"verifyRouteSecurity handles. Add writeApiKey to the declaration, correct the "+
+				"spelling, or add an arm before using a new tier constant — otherwise "+
+				"SLIPPY_API_KEY is accepted for a mutation"),
 		routeSecurityError(stale,
 			"operationTiers row(s) have a live gate but name no registered operation",
 			"the table is the inventory every other route-security check is read against, so a stale "+
@@ -356,7 +426,7 @@ func routeSecurityError(names []string, what, why string) error {
 // buildHandler creates the fully-wired HTTP handler with auth, routes, and
 // OpenTelemetry instrumentation. This is extracted from run() for testability.
 // The imageTagReader, ciJobLogReader, automationTestResultsReader,
-// automationTestsReader, and diagnosticsHandler are optional — if nil, their
+// automationTestsReader, and chSession are optional — if nil, their
 // endpoints are not registered.
 //
 // It returns an error when the registered routes fail verifyRouteSecurity, so a
@@ -377,6 +447,11 @@ func buildHandler(deps handlerDeps) (http.Handler, error) {
 
 	api := humago.New(mux, apiConfig)
 
+	// One evaluation of the nil checks, read by both the registration branches below and
+	// the startup guard, so the guard's view of which operations should exist cannot
+	// disagree with the code that registered them.
+	gates := gateStatus(deps)
+
 	// Register authentication middleware.
 	api.UseMiddleware(middleware.NewAPIKeyAuth(deps.cfg.APIKey, deps.cfg.WriteAPIKey))
 
@@ -390,13 +465,13 @@ func buildHandler(deps handlerDeps) (http.Handler, error) {
 	handler.RegisterRoutes(grp, h)
 
 	// Register image tag routes when a deps.reader is available.
-	if deps.imageTagReader != nil {
+	if gates[gateImageTags] {
 		ith := handler.NewImageTagHandler(deps.imageTagReader)
 		handler.RegisterImageTagRoutes(grp, ith)
 	}
 
 	// Register CI job log routes when a deps.reader is available.
-	if deps.ciJobLogReader != nil {
+	if gates[gateCIJobLogs] {
 		clh := handler.NewCIJobLogHandler(deps.ciJobLogReader)
 		handler.RegisterCIJobLogRoutes(grp, clh)
 	}
@@ -415,14 +490,14 @@ func buildHandler(deps handlerDeps) (http.Handler, error) {
 	// Automation test results: v1-only. The optional deps.automationTestsReader
 	// powers the per-test drill-down endpoints; when nil, only the parent
 	// run-summary routes are registered.
-	if deps.automationTestResultsReader != nil {
+	if gates[gateAutomation] {
 		atrh := handler.NewAutomationTestResultsHandler(deps.automationTestResultsReader, deps.automationTestsReader)
 		handler.RegisterAutomationTestResultsRoutes(v1Only, atrh)
 	}
 
 	// Write routes: v1-only.
 	// Extract cache invalidator from deps.reader when available (CachedSlipReader implements it).
-	if deps.writer != nil {
+	if gates[gateWrites] {
 		var inv domain.Invalidator
 		if i, ok := deps.reader.(domain.Invalidator); ok {
 			inv = i
@@ -433,29 +508,28 @@ func buildHandler(deps handlerDeps) (http.Handler, error) {
 
 	// Diagnostic routes: v1-only. Read-only probes of the service's own datastores;
 	// they require the read key like every other read operation.
-	if deps.diagnosticsHandler != nil {
-		handler.RegisterDiagnosticsRoutes(v1Only, deps.diagnosticsHandler)
+	if gates[gateDiagnostics] {
+		dh := handler.NewDiagnosticsHandler(deps.chSession, deps.slipDatabase)
+		handler.RegisterDiagnosticsRoutes(v1Only, dh)
 	}
 
 	// Fail the wiring rather than the requests: a route that requires no credential
 	// and is not allowlisted would 401 for everyone, health probes included.
 	//
-	// The gate map is built from the same nil checks that decided registration above, so
-	// the guard's view of which operations *should* exist is exact in a degraded boot as
-	// well as a full one.
+	// The guard reads the same gates map the registration branches above branched on — one
+	// evaluation, not a restatement — so its view of which operations *should* exist is
+	// exact in a degraded boot as well as a full one.
+	//
+	// verifyGateNames gets gateStatus(handlerDeps{}) rather than gates: it validates the
+	// table against the set of gates that EXIST, which must not vary with what happens to be
+	// wired on this boot.
+	//
 	// Joined, not sequential: an unknown gate would otherwise suppress every route-security
 	// class for that boot, which is the "one class per boot" cost the guard exists to avoid.
-	if err := errors.Join(verifyGateNames(), verifyRouteSecurity(api, map[string]bool{
-		gateAlways:     true,
-		gateImageTags:  deps.imageTagReader != nil,
-		gateCIJobLogs:  deps.ciJobLogReader != nil,
-		gateAutomation: deps.automationTestResultsReader != nil,
-		// A conjunction, not just deps.automationTestsReader: the inner `h.testsReader != nil`
-		// guard only runs when the outer `deps.automationTestResultsReader != nil` did.
-		gateAutomationTests: deps.automationTestResultsReader != nil && deps.automationTestsReader != nil,
-		gateWrites:          deps.writer != nil,
-		gateDiagnostics:     deps.diagnosticsHandler != nil,
-	})); err != nil {
+	if err := errors.Join(
+		verifyGateNames(gateStatus(handlerDeps{})),
+		verifyRouteSecurity(api, gates),
+	); err != nil {
 		return nil, err
 	}
 
@@ -743,7 +817,6 @@ func run() error {
 		ciJobLogReader              domain.CIJobLogReader
 		automationTestResultsReader domain.AutomationTestResultsReader
 		automationTestsReader       domain.AutomationTestsReader
-		diagnosticsH                *handler.DiagnosticsHandler
 	)
 	if chSession != nil {
 		imageTagReader = infrastructure.NewBuildInfoReader(
@@ -757,10 +830,6 @@ func run() error {
 		automationTestsReader = infrastructure.NewAutomationTestsStore(
 			chSession,
 		) // autotest_results.TestResults
-		diagnosticsH = handler.NewDiagnosticsHandler(
-			chSession,
-			cfg.SlipDatabase,
-		) // legacy CH schema-version diagnostic
 	}
 
 	// --- Write support ---
@@ -792,7 +861,8 @@ func run() error {
 		automationTestResultsReader: automationTestResultsReader,
 		automationTestsReader:       automationTestsReader,
 		pipelineCfg:                 pipelineCfg,
-		diagnosticsHandler:          diagnosticsH,
+		chSession:                   chSession,
+		slipDatabase:                cfg.SlipDatabase,
 	})
 	if err != nil {
 		return err

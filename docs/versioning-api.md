@@ -42,7 +42,12 @@ Both sets of routes use the same handlers. The legacy routes exist solely for ba
 - Adding a new endpoint
 - Adding a new optional query parameter
 - Adding a new optional request body field
+- Adding a response header
 - Returning additional enum values (if consumers are tolerant)
+
+Recorded instance:
+
+- **DEVOPS-217 review follow-up** — `POST /v1/slips/find-all-by-commits` now returns `X-Slippy-Results-Truncated: true` when the ancestry fallback hit its 256-resolution cap before covering every requested commit. The response body is byte-identical in both cases, so no consumer needs to change; a caller that wants to know whether "find all" actually found all can now read the header instead of being unable to tell. Previously the shortfall went only to the service's own log, so a partial answer and a complete one were indistinguishable behind a `200` and a nil error. Only the ancestry fallback can set it — a result served from the direct Postgres lookup answers every commit in one query and is always complete.
 
 ### Security-Corrective Changes (stay in current version)
 
@@ -60,13 +65,19 @@ What a security-corrective change requires instead:
 Recorded instances:
 
 - **DEVOPS-217** — API-key auth changed from opt-in per operation to fail-closed, and `GET /v1/admin/schema-version` (unauthenticated) was removed in favour of `GET /v1/diagnostics/clickhouse-schema-version` (read key required). Both the retirement and the added authentication land in `/v1` under this carve-out.
-- **DEVOPS-217 follow-up** — `maxItems: 1000` added to `commits` on `POST /v1/slips/find-by-commits` and `/find-all-by-commits`, so a request above that now returns `422` where it previously returned `200`. That matches "Changing error response codes for existing conditions" in the breaking list, and lands in `/v1` under this carve-out: the field was the input to an unbounded per-commit GitHub ancestry walk, and one 1 MiB request measured 262,133 outbound calls — more than the App's hourly budget, which fails ancestry resolution platform-wide.
+- **DEVOPS-217 follow-up** — `maxItems: 10000` added to `commits` on `POST /v1/slips/find-by-commits` and `/find-all-by-commits`, so a request above that now returns `422` where it previously returned `200`. That matches "Changing error response codes for existing conditions" in the breaking list, and lands in `/v1` under this carve-out: the field was the input to an unbounded per-commit GitHub ancestry walk, and one 1 MiB request measured 262,133 outbound calls — more than the App's hourly budget, which fails ancestry resolution platform-wide.
 
   Caller-visible effect: a request carrying more than 10,000 commits is rejected with `422`; at or below that nothing changes. The only production consumer is `slippy-find`, which sends `1 + (parents x depth)` — 51 at its default depth of 25, 101 at the `--depth 50` in its own help text — so the limit is ~100x the documented worst case and the `422` is unreachable in practice — it is a resource bound on the `unnest` array, not a behavioural limit. The generated `slippy-client` is unaffected, because oapi-codegen emits no validation for `maxItems`; only the published spec gains the constraint.
 
 - **DEVOPS-217 hardening** — `maxLength` added across the write DTOs (`repository` 256, `branch` 512, `commit_sha` 64, `commit_message` 16384, `component_name` 256, `reason` 4096, `image_tag` 256, component `name` 256 / `dockerfile_path` 1024, `components` `maxItems` 100), and `maxLength`/`pattern` added to `promoted_to` and `superseded_by`. Requests exceeding a limit now return `422`.
 
   Every bound is far above real traffic; the point is that these fields previously had none, and `reason` and `component_name` are appended to the `state_history` jsonb that the platform treats as the authority on step completion — a document rewritten whole on every append, so an unbounded field is unbounded quadratic growth.
+
+- **DEVOPS-217 review follow-up** — `maxLength: 256` added to `repository` on `POST /v1/slips/find-by-commits` and `/find-all-by-commits`. The same logical field already carried that bound on `CreateSlipInput`; the read DTO had none, so the two contracts disagreed about a value that reaches both Postgres and the GitHub GraphQL client.
+
+  Caller-visible effect: a `repository` longer than 256 characters now returns `422` where it previously returned `200`. GitHub itself caps owner at 39 characters and repo at 100, so no GitHub-backed caller can reach the limit — this is a floor for non-GitHub callers and an agreement between the two DTOs, not a behavioural change. The generated `slippy-client` is unchanged; only the published spec gains the constraint.
+
+  The `commits` *elements* were deliberately left unbounded. Each is an arbitrary git ref rather than a SHA — `goLibMyCarrier/slippy`'s `resolve.go` documents `HEAD`, `main` and branch names — and real branch names run past 64 characters, so transferring the write path's SHA-shaped bound would reject legitimate input.
 
   `promoted_to` and `superseded_by` are the sharper fix: they *are* correlation IDs, naming the slip that supersedes this one, and received none of the validation applied to `correlation_id` itself. They now carry the same character set.
 

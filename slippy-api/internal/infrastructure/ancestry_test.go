@@ -48,8 +48,11 @@ func (m *mockReader) FindAllByCommits(
 	ctx context.Context,
 	repo string,
 	commits []string,
-) ([]domain.SlipWithCommit, error) {
-	return m.findAllByCommitsFn(ctx, repo, commits)
+) (domain.FindAllResult, error) {
+	// The func field still returns the slice: the adapters under test care about the
+	// slips, and leaving it alone keeps every case table below unchanged.
+	slips, err := m.findAllByCommitsFn(ctx, repo, commits)
+	return domain.FindAllResult{Slips: slips}, err
 }
 
 // --- Mock SlipResolver ---
@@ -570,8 +573,70 @@ func TestAdapter_FindAllByCommits_DirectHit(t *testing.T) {
 	adapter := NewSlipResolverAdapter(&mockSlipResolver{}, reader)
 	results, err := adapter.FindAllByCommits(context.Background(), "org/repo", []string{"c1"})
 	require.NoError(t, err)
-	assert.Len(t, results, 1)
-	assert.Equal(t, "a", results[0].Slip.CorrelationID)
+	assert.Len(t, results.Slips, 1)
+	assert.False(t, results.Truncated)
+	assert.Equal(t, "a", results.Slips[0].Slip.CorrelationID)
+}
+
+// The fallback resolves at most maxAncestryResolutions commits, so a longer list comes back
+// short. find-all-by-commits promises to find *all* matches, and for commits drawn from
+// disjoint lineages the dropped tail is distinct slips rather than the redundant duplicates
+// a single-lineage caller would lose — so the shortfall has to reach the caller, not just
+// the log. Before this it was a 200 with a nil error and no way to tell.
+func TestAdapter_FindAllByCommits_ReportsTruncation(t *testing.T) {
+	reader := &mockReader{
+		findAllByCommitsFn: func(_ context.Context, _ string, _ []string) ([]domain.SlipWithCommit, error) {
+			return nil, nil // force the ancestry fallback
+		},
+	}
+	resolver := &mockSlipResolver{
+		resolveSlipFn: func(_ context.Context, opts slippy.ResolveOptions) (*slippy.ResolveResult, error) {
+			return &slippy.ResolveResult{
+				Slip:          &domain.Slip{CorrelationID: "slip-" + opts.Ref},
+				ResolvedBy:    "ancestry",
+				MatchedCommit: opts.Ref,
+			}, nil
+		},
+	}
+	// Disjoint lineages: every commit resolves to its own slip, so truncation loses slips
+	// that exist rather than duplicates.
+	commits := make([]string, maxAncestryResolutions+44)
+	for i := range commits {
+		commits[i] = fmt.Sprintf("sha%d", i)
+	}
+
+	adapter := NewSlipResolverAdapter(resolver, reader)
+	results, err := adapter.FindAllByCommits(context.Background(), "org/repo", commits)
+	require.NoError(t, err)
+	assert.True(t, results.Truncated,
+		"a short answer must be distinguishable from a complete one")
+	assert.Len(t, results.Slips, maxAncestryResolutions)
+}
+
+// Exactly at the cap is a complete answer; the flag must not cry wolf.
+func TestAdapter_FindAllByCommits_AtCapIsNotTruncated(t *testing.T) {
+	reader := &mockReader{
+		findAllByCommitsFn: func(_ context.Context, _ string, _ []string) ([]domain.SlipWithCommit, error) {
+			return nil, nil
+		},
+	}
+	resolver := &mockSlipResolver{
+		resolveSlipFn: func(_ context.Context, opts slippy.ResolveOptions) (*slippy.ResolveResult, error) {
+			return &slippy.ResolveResult{
+				Slip: &domain.Slip{CorrelationID: "slip-" + opts.Ref}, MatchedCommit: opts.Ref,
+			}, nil
+		},
+	}
+	commits := make([]string, maxAncestryResolutions)
+	for i := range commits {
+		commits[i] = fmt.Sprintf("sha%d", i)
+	}
+
+	adapter := NewSlipResolverAdapter(resolver, reader)
+	results, err := adapter.FindAllByCommits(context.Background(), "org/repo", commits)
+	require.NoError(t, err)
+	assert.False(t, results.Truncated)
+	assert.Len(t, results.Slips, maxAncestryResolutions)
 }
 
 func TestAdapter_FindAllByCommits_AncestryFallback(t *testing.T) {
@@ -594,8 +659,9 @@ func TestAdapter_FindAllByCommits_AncestryFallback(t *testing.T) {
 	adapter := NewSlipResolverAdapter(resolver, reader)
 	results, err := adapter.FindAllByCommits(context.Background(), "org/repo", []string{"sha1", "sha2"})
 	require.NoError(t, err)
-	assert.Len(t, results, 2)
-	assert.Equal(t, "ancestor-slip", results[0].Slip.CorrelationID)
+	assert.Len(t, results.Slips, 2)
+	assert.False(t, results.Truncated)
+	assert.Equal(t, "ancestor-slip", results.Slips[0].Slip.CorrelationID)
 }
 
 func TestAdapter_FindAllByCommits_AncestryPartialMatch(t *testing.T) {
@@ -621,8 +687,8 @@ func TestAdapter_FindAllByCommits_AncestryPartialMatch(t *testing.T) {
 	adapter := NewSlipResolverAdapter(resolver, reader)
 	results, err := adapter.FindAllByCommits(context.Background(), "org/repo", []string{"sha1", "sha2"})
 	require.NoError(t, err)
-	assert.Len(t, results, 1)
-	assert.Equal(t, "sha1", results[0].MatchedCommit)
+	assert.Len(t, results.Slips, 1)
+	assert.Equal(t, "sha1", results.Slips[0].MatchedCommit)
 }
 
 func TestAdapter_FindAllByCommits_ReaderError(t *testing.T) {
@@ -636,7 +702,7 @@ func TestAdapter_FindAllByCommits_ReaderError(t *testing.T) {
 	adapter := NewSlipResolverAdapter(&mockSlipResolver{}, reader)
 	results, err := adapter.FindAllByCommits(context.Background(), "org/repo", []string{"sha1"})
 	assert.ErrorIs(t, err, readerErr)
-	assert.Nil(t, results)
+	assert.Empty(t, results.Slips)
 }
 
 func TestAdapter_FindAllByCommits_ResolverError(t *testing.T) {
@@ -655,7 +721,8 @@ func TestAdapter_FindAllByCommits_ResolverError(t *testing.T) {
 	adapter := NewSlipResolverAdapter(resolver, reader)
 	results, err := adapter.FindAllByCommits(context.Background(), "org/repo", []string{"sha1"})
 	assert.ErrorIs(t, err, resolverErr)
-	assert.Nil(t, results)
+	assert.Empty(t, results.Slips)
+	assert.False(t, results.Truncated, "an error path must not also claim a partial answer")
 }
 
 // --- Ancestry fan-out bounds ---

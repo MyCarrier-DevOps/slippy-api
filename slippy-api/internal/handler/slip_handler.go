@@ -64,9 +64,20 @@ type GetSlipByCommitInput struct {
 // against a table of ~12.5k rows. The real protection against the amplification is the
 // fallback's own, much tighter cap — see maxAncestryResolutions in
 // internal/infrastructure/ancestry.go.
+// Repository carries the same 256 bound as its counterpart on CreateSlipInput — it is the
+// same logical field, reaching Postgres and the GitHub GraphQL client, and had none. In
+// practice GitHub caps owner at 39 characters and repo at 100, so this is close to a no-op;
+// what it buys is that the two DTOs agree and that a non-GitHub caller has a floor.
+//
+// Commits elements are deliberately NOT bounded. Each is an arbitrary git ref rather than a
+// SHA — goLibMyCarrier/slippy's resolve.go documents "HEAD", "main" and branch names — and
+// real branch names run past 64 characters, so transferring the write path's SHA-shaped
+// bound here would reject legitimate input. Aggregate size is already capped by maxItems
+// above and huma's 1 MiB body limit, and both sinks are parameterised (unnest($2::text[])
+// via pgx, a githubv4 variable), so there is no injection channel a length bound narrows.
 type FindByCommitsInput struct {
 	Body struct {
-		Repository string   `json:"repository" doc:"Full repository name (owner/repo)"`
+		Repository string   `json:"repository" maxLength:"256" doc:"Full repository name (owner/repo)"`
 		Commits    []string `json:"commits" maxItems:"10000" doc:"List of commit SHAs to search"`
 	}
 }
@@ -86,8 +97,14 @@ type FindAllByCommitsItem struct {
 }
 
 // FindAllByCommitsOutput returns all matched slips.
+//
+// Truncated is a response HEADER, not a body field, and deliberately so: Body is a slice,
+// so the 200 is a top-level JSON array. Wrapping it in an object to carry a flag would
+// change the response shape and break every consumer that decodes an array, slippy-client's
+// generated FindAllByCommitsResponse included.
 type FindAllByCommitsOutput struct {
-	Body []FindAllByCommitsItem
+	Truncated bool `header:"X-Slippy-Results-Truncated" doc:"true when the commit list exceeded the ancestry resolution cap, so the result may omit matching slips"`
+	Body      []FindAllByCommitsItem
 }
 
 // --- Route Registration --------------------------------------------------
@@ -255,20 +272,24 @@ func (h *SlipHandler) findAllByCommits(
 			"commits_count", len(input.Body.Commits), "error", err)
 		return nil, mapError(err)
 	}
-	span.SetAttributes(attribute.Int("slip.results_count", len(results)))
+	span.SetAttributes(
+		attribute.Int("slip.results_count", len(results.Slips)),
+		attribute.Bool("slip.results_truncated", results.Truncated),
+	)
 	span.SetStatus(codes.Ok, "")
 	slog.InfoContext(ctx, "slip: find all by commits returned",
 		"requested_repository", input.Body.Repository,
 		"commits_count", len(input.Body.Commits),
-		"results_count", len(results))
-	items := make([]FindAllByCommitsItem, len(results))
-	for i, r := range results {
+		"results_count", len(results.Slips),
+		"truncated", results.Truncated)
+	items := make([]FindAllByCommitsItem, len(results.Slips))
+	for i, r := range results.Slips {
 		items[i] = FindAllByCommitsItem{
 			Slip:          r.Slip,
 			MatchedCommit: r.MatchedCommit,
 		}
 	}
-	return &FindAllByCommitsOutput{Body: items}, nil
+	return &FindAllByCommitsOutput{Truncated: results.Truncated, Body: items}, nil
 }
 
 // --- Error Mapping -------------------------------------------------------

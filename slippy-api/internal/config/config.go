@@ -100,10 +100,22 @@ func Load() (*Config, error) {
 	}
 
 	// Optional: DRAGONFLY_PORT
+	//
+	// Range-checked because this variable has no late backstop and its failure is silent.
+	// PORT eventually self-diagnoses at ListenAndServe ("address 99999: invalid port"), but
+	// DRAGONFLY_PORT only ever builds a dial string, so an unusable value fails the Redis
+	// ping, connectCache logs "caching disabled" and returns a nil client, and run() then
+	// skips the Locker entirely — "slip-creation dedup lock disabled (no cache)". A
+	// one-character typo would silently turn off both the cache and the duplicate-webhook
+	// protection that stops two routing slips being created for one commit, and both log
+	// lines read like ordinary optional-dependency degradation.
 	if v := os.Getenv("DRAGONFLY_PORT"); v != "" {
 		port, err := strconv.Atoi(v)
 		if err != nil {
 			return nil, fmt.Errorf("DRAGONFLY_PORT must be a valid integer")
+		}
+		if port < 1 || port > 65535 {
+			return nil, fmt.Errorf("DRAGONFLY_PORT must be between 1 and 65535")
 		}
 		cfg.DragonflyPort = port
 	}

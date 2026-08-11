@@ -46,8 +46,11 @@ func (m *mockSlipReader) FindAllByCommits(
 	ctx context.Context,
 	repo string,
 	commits []string,
-) ([]domain.SlipWithCommit, error) {
-	return m.findAllByCommitsFn(ctx, repo, commits)
+) (domain.FindAllResult, error) {
+	// The func field still returns the slice: the adapters under test care about the
+	// slips, and leaving it alone keeps every case table below unchanged.
+	slips, err := m.findAllByCommitsFn(ctx, repo, commits)
+	return domain.FindAllResult{Slips: slips}, err
 }
 
 // --- CachedSlipReader Unit Tests ---
@@ -201,7 +204,7 @@ func TestCachedSlipReader_FindAllByCommitsDelegates(t *testing.T) {
 	cached := NewCachedSlipReader(mock, nil, 10*time.Minute)
 	results, err := cached.FindAllByCommits(context.Background(), "org/repo", []string{"c1", "c2"})
 	require.NoError(t, err)
-	assert.Len(t, results, 2)
+	assert.Len(t, results.Slips, 2)
 	assert.Equal(t, 1, callCount)
 }
 
@@ -215,7 +218,7 @@ func TestCachedSlipReader_FindAllByCommitsPropagatesError(t *testing.T) {
 	cached := NewCachedSlipReader(mock, nil, 10*time.Minute)
 	results, err := cached.FindAllByCommits(context.Background(), "org/repo", []string{"c1"})
 	assert.Error(t, err)
-	assert.Nil(t, results)
+	assert.Empty(t, results.Slips)
 }
 
 func TestCachedSlipReader_FindAllByCommits_EmptyResult(t *testing.T) {
@@ -228,5 +231,5 @@ func TestCachedSlipReader_FindAllByCommits_EmptyResult(t *testing.T) {
 	cached := NewCachedSlipReader(mock, nil, 10*time.Minute)
 	results, err := cached.FindAllByCommits(context.Background(), "org/repo", []string{"c1"})
 	require.NoError(t, err)
-	assert.Empty(t, results)
+	assert.Empty(t, results.Slips)
 }
