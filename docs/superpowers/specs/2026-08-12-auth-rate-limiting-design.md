@@ -24,8 +24,8 @@ credential-probing visible in telemetry.
 
 | Attacker | Shape | What stops them |
 |---|---|---|
-| Single host, fast | Floods guesses from one address | Ladder reaches the 7-day cap in ~31 requests, then every packet resets the clock |
-| Single host, patient | Paces guesses to stay under the ladder | ~30 guesses costs ~15.6 days; then 2 guesses per 7-day silence |
+| Single host, fast | Floods guesses from one address | Ladder reaches the 7-day cap in 26 failures — under a second at any real rate — and every further packet restarts the clock |
+| Single host, patient | Paces guesses to stay under the ladder | ~25 guesses cost ~14 days; escaping then needs 10x the current lockout in silence, 70 days at the cap |
 | Distributed botnet | Many addresses, few guesses each | Per-IP ladder caps each source; total throughput stays negligible against the keyspace |
 | Holder of a leaked key | Authenticates successfully | **Out of scope** — rate limiting does not address this. Rotation does. |
 
