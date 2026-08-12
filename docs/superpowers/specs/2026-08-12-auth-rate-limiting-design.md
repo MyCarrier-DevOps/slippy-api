@@ -68,20 +68,41 @@ carries no injection label), and is routed by a `VirtualService` bound to
 `istio-system/default`. Two replicas is why counter state must be shared rather than
 per-process.
 
-### Open item — must be closed before enforcement
+### Confirmed at the pod
 
-**What `X-Forwarded-For` the pod itself receives has not been observed.** The gateway may
-rewrite the header before forwarding upstream, and `numTrustedProxies: 2` does not obviously
-match a 2-entry chain. Everything above was measured *at the gateway*.
+The above was measured at the *gateway*. What the pod actually receives was then observed
+directly, with a filtered packet capture in an ephemeral debug container on
+`slippy-api-test` (allowlisting only forwarding headers, so no `Authorization` value was
+ever captured).
 
-Before this control enforces in production, the resolved client IP must be logged in the
-test environment and compared against a request from a known address. Until that comparison
-is made, the identity resolution below is a hypothesis, however well-evidenced.
+Forged request — `X-Forwarded-For: 1.2.3.4, 5.6.7.8` — as received by the application:
 
-Separately worth raising with whoever owns the mesh: on the forged-XFF probe, the third
-entry from the right was `1.2.3.4` — the attacker's value. Whether Envoy resolves to it is
-not established here, but the configured hop count and the measured chain length do not line
-up.
+```
+x-forwarded-for:          1.2.3.4, 5.6.7.8,184.97.153.128,172.68.35.82
+cf-connecting-ip:         184.97.153.128
+x-envoy-external-address: 172.68.35.82
+```
+
+| Header | Value | Usable as identity? |
+|---|---|---|
+| `CF-Connecting-IP` | real client | **Yes** — unaffected by XFF forgery, and forging it directly is 403'd at the edge |
+| `X-Forwarded-For` | real client 2nd-from-right | **Yes**, indexed from the right only |
+| `X-Envoy-External-Address` | Cloudflare edge | **No** |
+
+### Finding for the mesh owners
+
+`X-Envoy-External-Address` resolves to the **Cloudflare edge address, not the client**,
+which confirms `gatewayTopology.numTrustedProxies: 2` over-skips: there is one proxy
+(Cloudflare) in front of the gateway, so the value should be `1`.
+
+Anything relying on Envoy's computed client address today — Istio-level rate limiting, IP
+allowlists, `AuthorizationPolicy` source ranges — is keying on the Cloudflare edge rather
+than the caller. The edge address is also not stable per client (`172.68.35.82` and
+`172.68.3.179` were both observed for the same source within a minute), so it is not usable
+as an identity even incidentally.
+
+This is out of scope for this change and should be raised separately. It is also the reason
+identity is resolved in the application rather than delegated to Envoy.
 
 ## Design
 
@@ -110,12 +131,17 @@ separately.
 ### The ladder
 
 ```
-F = 2                      free failures before any delay
-CAP = 604800               7 days, the maximum lockout duration
+BASE = 10s                 the unit the multiplier scales
+F    = 2                   free failures before any delay
+CAP  = 604800              7 days, the maximum lockout duration
 n                          consecutive failures for this identity
 
-delay(n) = fib(n - F), iterating until the value exceeds CAP, then CAP
+delay(n) = BASE × fib(n - F), iterating until the value exceeds CAP, then CAP
 ```
+
+The multiplier scales a 10-second base rather than one second. The floor matters far more
+than the top of the ladder: a first penalty of 10s versus 1s is the difference between a
+meaningful cost and a rounding error, and everything downstream inherits it.
 
 The cap applies to the **resulting duration**, not to the Fibonacci index. This is what
 makes the computation safe: the sequence is generated iteratively and the loop exits as soon
@@ -124,12 +150,14 @@ away. `n` itself continues incrementing without limit.
 
 | failure | delay | failure | delay |
 |---|---|---|---|
-| 1–2 | free | 22 | 3.0h |
-| 3 | 1s | 25 | 12.9h |
-| 6 | 5s | 27 | 1.4d |
-| 10 | 34s | 29 | 3.7d |
-| 15 | 6.3m | 30 | 5.95d |
-| 19 | 43m | **31+** | **7d** |
+| 1–2 | free | 18 | 4.4h |
+| 3 | 10s | 21 | 18.8h |
+| 5 | 30s | 24 | 3.3d |
+| 8 | 130s | 25 | 5.4d |
+| 12 | 14.8m | **26+** | **7d** |
+| 15 | 62.8m | | |
+
+Reaching the cap takes 25 failures over ~14 days of perfectly-paced attempts.
 
 **Attempts made while already locked out count.** Each one increments `n` and resets
 `lockUntil = now + delay(n)`. Persistence is therefore self-defeating: a flood reaches the
@@ -152,25 +180,46 @@ attacker one budget per pod and reset on every deploy.
 ```
 key:  rl:auth:<sha256(identity)[:12]>
 val:  { n, lockUntil }
-TTL:  604800 (7 days), refreshed on every attempt — NOT the current lockout duration
+TTL:  ten times the current lockout, and never less than 1 hour
+      (refreshed on every attempt)
 ```
 
-**The TTL is a flat 7 days from the last attempt, deliberately decoupled from the lockout
-duration.** Tying it to the lockout would defeat the ladder entirely: a record expiring when
-its own 1-second lockout expires means a patient attacker waits one second, the record
-vanishes, `n` resets to zero, and they collect 2 free guesses plus another every second
-indefinitely. The ladder would never climb past its first rung.
+Two different limits, easy to conflate:
 
-Holding the record for the full cap regardless of current depth is what makes the ladder
-monotonic — any attempt within 7 days of the previous one continues climbing from where it
-left off. It also gives the design its exact intended property: **escaping requires
-abandoning the address for 7 full days**, at every depth, not just at the cap.
+- the **lockout** is how long the caller is refused, and it is *capped* at 7 days;
+- the **TTL** is how long `n` is remembered, and it has a *floor* of 1 hour and no ceiling
+  beyond what the lockout cap implies (70 days once the lockout reaches 7).
+
+| failures | lockout | record TTL |
+|---|---|---|
+| 1–2 | none | 1h — the floor, since 10 × 0 = 0 |
+| 10 | 340s | 1h — floor still binding |
+| 12 | 890s | 2.5h — the 10× rule takes over |
+| 21 | 18.8h | 7.8d |
+| 26+ | 7d (capped) | 70d |
+
+**The TTL must outlive the lockout by a wide margin, or the ladder cannot climb.** If a
+record expired when its own lockout did, a patient attacker would wait out a 10-second
+lockout, watch the record vanish, and start again from `n = 0` — collecting free guesses
+forever without ever passing the first rung.
+
+Holding the record for 10× the lockout closes that: an attacker who waits only 1× still
+finds the record alive, so `n` advances instead of resetting, at every depth. Escaping means
+staying silent for **10× the current lockout** — 70 days once the cap is reached.
+
+The 10× rule also scales retention to how much an identity has earned. Noise — a scanner
+poking twice, a one-off typo — ages out in minutes rather than squatting for a week, while
+persistent attackers accrue progressively longer memory. That is better for Dragonfly than
+any flat constant: footprint tracks *sustained* attack traffic, not every address that ever
+mistyped a key.
+
+The **1-hour floor** exists for the free-allowance phase, where `lockout` is zero and `10 × 0`
+would forget the first two failures instantly — letting an attacker sit at 2 guesses per
+expiry forever, never entering the ladder at all. The floor holds that strategy to 2
+guesses/hour/identity (~48/day) rather than ~1,700/day.
 
 The TTL is self-managing: refreshed on every attempt, aged out naturally once the caller
-stops. No sweeper, no separate decay timer. It also bounds Dragonfly's footprint to *seven
-days of distinct failing addresses* rather than cumulative history — without a bound, every
-address that ever failed twice would leave a permanent entry, which is attacker-controlled
-unbounded memory growth in the instance also serving the slip cache.
+stops. No sweeper, no separate decay timer.
 
 Read-check-write is a single Lua script so the increment, the lockout extension and the TTL
 refresh are atomic across both replicas.
@@ -258,7 +307,9 @@ vector.
 
 1. Ship with enforcement disabled, logging the resolved client IP and the ladder depth that
    *would* have applied.
-2. Verify the resolved IP against real traffic in test — this closes the open item above.
+2. Confirm the logged IP matches `CF-Connecting-IP` across real traffic. The header
+   behaviour is already measured at the pod (see Confirmed at the pod), so this is
+   validating the implementation, not the assumption.
 3. Compare observed auth-failure volume against the ladder to confirm no legitimate caller
    would have been throttled.
 4. Enable in test, then production.
