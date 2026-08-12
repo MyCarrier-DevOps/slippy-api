@@ -14,6 +14,10 @@ import (
 
 const defaultAncestryDepth = 25
 
+// defaultXFFDepth indexes X-Forwarded-For from the right when resolving a client address.
+// See middleware.clientIdentity for why the right-hand end is the only safe one to index.
+const defaultXFFDepth = 2
+
 // keyMinLength is the minimum length of either API key.
 //
 // Both keys are compared with subtle.ConstantTimeCompare against a caller-supplied bearer
@@ -64,6 +68,18 @@ type Config struct {
 
 	// WriteAPIKey is the bearer token for write endpoints (required).
 	WriteAPIKey string
+
+	// RateLimitEnabled turns on per-identity Fibonacci backoff for failed authentication.
+	// Defaults to false so the control ships inert and is enabled deliberately, per the
+	// rollout in docs/superpowers/specs/2026-08-12-auth-rate-limiting-design.md.
+	RateLimitEnabled bool
+
+	// XFFDepth indexes X-Forwarded-For from the RIGHT when resolving the client. Default 2,
+	// measured against the real edge: Cloudflare appends the true client and the gateway
+	// appends Cloudflare, so the caller sits second from the right. Configurable because it
+	// is a property of the deployment topology and the value most likely to need changing
+	// if a proxy is added or removed in front.
+	XFFDepth int
 }
 
 // Load reads configuration from environment variables.
@@ -78,6 +94,7 @@ func Load() (*Config, error) {
 		CacheTTL:      10 * time.Minute,
 		AncestryDepth: defaultAncestryDepth,
 		SlipDatabase:  slippy.DefaultConfig().Database,
+		XFFDepth:      defaultXFFDepth,
 	}
 
 	// Required
@@ -163,6 +180,32 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("SLIPPY_ANCESTRY_DEPTH must be at least 1")
 		}
 		cfg.AncestryDepth = depth
+	}
+
+	// Optional: SLIPPY_RATE_LIMIT_ENABLED
+	if v := os.Getenv("SLIPPY_RATE_LIMIT_ENABLED"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("SLIPPY_RATE_LIMIT_ENABLED must be a boolean")
+		}
+		cfg.RateLimitEnabled = enabled
+	}
+
+	// Optional: SLIPPY_XFF_DEPTH
+	//
+	// Range-checked for the same reason DRAGONFLY_PORT is: a wrong value here fails silently
+	// and in the worst direction. Too small and every external caller collapses onto the
+	// Cloudflare edge address, so one attacker throttles the whole fleet; too large and the
+	// index lands on an attacker-supplied entry, so the limiter never fires at all.
+	if v := os.Getenv("SLIPPY_XFF_DEPTH"); v != "" {
+		depth, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("SLIPPY_XFF_DEPTH must be a valid integer: %w", errors.Unwrap(err))
+		}
+		if depth < 1 || depth > 10 {
+			return nil, fmt.Errorf("SLIPPY_XFF_DEPTH must be between 1 and 10")
+		}
+		cfg.XFFDepth = depth
 	}
 
 	// Required: SLIPPY_WRITE_API_KEY

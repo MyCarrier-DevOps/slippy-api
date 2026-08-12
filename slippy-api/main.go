@@ -90,6 +90,11 @@ type handlerDeps struct {
 	// for no reason and left one field a product where every other is an ingredient.
 	chSession    clickhouse.ClickhouseSessionInterface
 	slipDatabase string
+
+	// rateLimiter applies per-identity backoff to failed authentication. Nil disables it,
+	// which is the default until SLIPPY_RATE_LIMIT_ENABLED is set — and also what happens
+	// when Dragonfly is unavailable, since the counters have nowhere shared to live.
+	rateLimiter *middleware.RateLimiter
 }
 
 // Access tiers an operation can be served at, as enforced by the middleware.
@@ -474,8 +479,13 @@ func buildHandler(deps handlerDeps) (http.Handler, error) {
 	// disagree with the code that registered them.
 	gates := gateStatus(deps)
 
-	// Register authentication middleware.
-	api.UseMiddleware(middleware.NewAPIKeyAuth(deps.cfg.APIKey, deps.cfg.WriteAPIKey))
+	// Register authentication middleware. The limiter is an option rather than a parameter
+	// so a nil one simply means "no backoff" without a second constructor.
+	authOpts := []middleware.AuthOption{}
+	if deps.rateLimiter != nil {
+		authOpts = append(authOpts, middleware.WithRateLimit(deps.rateLimiter))
+	}
+	api.UseMiddleware(middleware.NewAPIKeyAuth(deps.cfg.APIKey, deps.cfg.WriteAPIKey, authOpts...))
 
 	// Register routes on both unversioned (legacy) and /v1 paths.
 	// The empty prefix keeps existing routes unchanged for backward compatibility.
@@ -873,6 +883,21 @@ func run() error {
 	writer := infrastructure.NewSlipWriterAdapter(slippyClient, locker, reader)
 	log.Printf("write endpoints enabled")
 
+	// Auth rate limiting. Counters live in the shared cache because the service runs more
+	// than one replica: per-process state would hand an attacker one budget per pod and
+	// reset the ladder on every deploy. No cache means no limiter — the same fail-open
+	// stance the dedup lock takes, and auth itself still fails closed without it.
+	var rateLimiter *middleware.RateLimiter
+	switch {
+	case !cfg.RateLimitEnabled:
+		log.Printf("auth rate limiting disabled (SLIPPY_RATE_LIMIT_ENABLED not set)")
+	case rdb == nil:
+		log.Printf("warning: auth rate limiting requested but no cache is available — running without it")
+	default:
+		rateLimiter = middleware.NewRateLimiter(infrastructure.NewRedisRateLimitStore(rdb), cfg.XFFDepth)
+		log.Printf("auth rate limiting enabled (xff_depth=%d)", cfg.XFFDepth)
+	}
+
 	// --- HTTP Server ---
 	otelHandler, err := buildHandler(handlerDeps{
 		cfg:                         cfg,
@@ -883,6 +908,7 @@ func run() error {
 		automationTestResultsReader: automationTestResultsReader,
 		automationTestsReader:       automationTestsReader,
 		pipelineCfg:                 pipelineCfg,
+		rateLimiter:                 rateLimiter,
 		chSession:                   chSession,
 		slipDatabase:                cfg.SlipDatabase,
 	})

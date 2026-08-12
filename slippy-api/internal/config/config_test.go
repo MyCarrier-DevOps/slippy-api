@@ -20,6 +20,7 @@ func clearEnv(t *testing.T) {
 		"CACHE_TTL",
 		"SLIPPY_GITHUB_APP_ID", "SLIPPY_GITHUB_APP_PRIVATE_KEY",
 		"SLIPPY_GITHUB_ENTERPRISE_URL", "SLIPPY_ANCESTRY_DEPTH",
+		"SLIPPY_RATE_LIMIT_ENABLED", "SLIPPY_XFF_DEPTH",
 		"K8S_NAMESPACE",
 	} {
 		t.Setenv(key, "")
@@ -512,4 +513,89 @@ func TestLoad_KeyAtFloorAccepted(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.NotNil(t, cfg)
+}
+
+func TestLoad_RateLimitEnabled(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{{"true", true}, {"1", true}, {"false", false}, {"0", false}} {
+		t.Run(tc.value, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv("SLIPPY_API_KEY", testReadKey)
+			t.Setenv("SLIPPY_WRITE_API_KEY", testWriteKey)
+			t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
+			t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
+			t.Setenv("SLIPPY_RATE_LIMIT_ENABLED", tc.value)
+
+			cfg, err := Load()
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, cfg.RateLimitEnabled)
+		})
+	}
+}
+
+// Ships inert: the control is enabled deliberately after the resolved client address has
+// been confirmed against real traffic, not by defaulting on.
+func TestLoad_RateLimitDefaultsOff(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("SLIPPY_API_KEY", testReadKey)
+	t.Setenv("SLIPPY_WRITE_API_KEY", testWriteKey)
+	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
+	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.False(t, cfg.RateLimitEnabled)
+	assert.Equal(t, defaultXFFDepth, cfg.XFFDepth)
+}
+
+func TestLoad_InvalidRateLimitEnabled(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("SLIPPY_API_KEY", testReadKey)
+	t.Setenv("SLIPPY_WRITE_API_KEY", testWriteKey)
+	t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
+	t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
+	t.Setenv("SLIPPY_RATE_LIMIT_ENABLED", "yes-please")
+
+	cfg, err := Load()
+	assert.Nil(t, cfg)
+	assert.ErrorContains(t, err, "SLIPPY_RATE_LIMIT_ENABLED must be a boolean")
+	assert.NotContains(t, err.Error(), "yes-please", "the rejected value must not reach the log")
+}
+
+// A wrong depth fails silently and in the worst direction either way — too small collapses
+// every external caller onto the Cloudflare edge, too large lands on an attacker-supplied
+// entry — so it is range-checked at boot rather than discovered in production.
+func TestLoad_XFFDepth(t *testing.T) {
+	for _, tc := range []struct {
+		name, value string
+		wantErr     string
+		want        int
+	}{
+		{name: "accepted", value: "1", want: 1},
+		{name: "accepted upper bound", value: "10", want: 10},
+		{name: "zero rejected", value: "0", wantErr: "between 1 and 10"},
+		{name: "negative rejected", value: "-1", wantErr: "between 1 and 10"},
+		{name: "absurd rejected", value: "99", wantErr: "between 1 and 10"},
+		{name: "non-numeric rejected", value: "two", wantErr: "must be a valid integer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv("SLIPPY_API_KEY", testReadKey)
+			t.Setenv("SLIPPY_WRITE_API_KEY", testWriteKey)
+			t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
+			t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
+			t.Setenv("SLIPPY_XFF_DEPTH", tc.value)
+
+			cfg, err := Load()
+			if tc.wantErr != "" {
+				assert.Nil(t, cfg)
+				assert.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, cfg.XFFDepth)
+		})
+	}
 }

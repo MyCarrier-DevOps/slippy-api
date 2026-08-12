@@ -1,6 +1,6 @@
 # Auth rate limiting with Fibonacci backoff — design
 
-**Status:** approved, not yet implemented
+**Status:** implemented in PR #48, shipped disabled (`SLIPPY_RATE_LIMIT_ENABLED=false`)
 **Ticket:** DEVOPS-217 follow-up
 **Date:** 2026-08-12
 

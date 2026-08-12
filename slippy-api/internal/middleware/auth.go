@@ -82,6 +82,23 @@ var publicRoutes = map[string]struct{}{
 	"GET /v1/health": {},
 }
 
+// AuthOption configures the middleware. Variadic rather than a wider signature so the
+// existing call sites and every test fixture keep working unchanged.
+type AuthOption func(*authConfig)
+
+type authConfig struct {
+	limiter *RateLimiter
+}
+
+// WithRateLimit applies per-identity Fibonacci backoff to failed authentication.
+//
+// Only failures accrue, so legitimate traffic never enters the ladder however much of it
+// there is — which is the property that lets a limiter sit in front of a credential shared
+// by the entire CI fleet without throttling it.
+func WithRateLimit(limiter *RateLimiter) AuthOption {
+	return func(c *authConfig) { c.limiter = limiter }
+}
+
 // NewAPIKeyAuth returns a huma middleware that validates Bearer tokens using a
 // two-key scheme. Operations declaring "apiKey" security accept either the read
 // key or the write key. Operations declaring "writeApiKey" security accept only
@@ -89,11 +106,20 @@ var publicRoutes = map[string]struct{}{
 //
 // Auth is fail-closed: an operation that does not require a credential is rejected
 // with 401 unless its route is allowlisted in publicRoutes.
-func NewAPIKeyAuth(readKey, writeKey string) func(ctx huma.Context, next func(huma.Context)) {
+func NewAPIKeyAuth(readKey, writeKey string, opts ...AuthOption) func(ctx huma.Context, next func(huma.Context)) {
+	cfg := &authConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
 	return func(ctx huma.Context, next func(huma.Context)) {
 		op := ctx.Operation()
 
 		// Requires no credential: serve it only if the route is explicitly public.
+		//
+		// Public routes never reach the limiter, and cannot: they have no credential to get
+		// wrong, so they can never fail authentication. Kubelet probes are unaffected at
+		// any ladder depth.
 		if !RequiresCredential(op) {
 			if IsPublicRoute(op.Method, op.Path) {
 				next(ctx)
@@ -103,7 +129,7 @@ func NewAPIKeyAuth(readKey, writeKey string) func(ctx huma.Context, next func(hu
 			return
 		}
 
-		if !authorize(ctx, op, readKey, writeKey) {
+		if !authorize(ctx, op, readKey, writeKey, cfg.limiter) {
 			return
 		}
 		next(ctx)
@@ -119,7 +145,12 @@ func NewAPIKeyAuth(readKey, writeKey string) func(ctx huma.Context, next func(hu
 // next inside the span — the shape this replaced — kept it open across the handler, the
 // cache and the database, so auth.validateAPIKey reported total request latency while
 // sitting as a fully-overlapping sibling of the handler span rather than its parent.
-func authorize(ctx huma.Context, op *huma.Operation, readKey, writeKey string) bool {
+func authorize(
+	ctx huma.Context,
+	op *huma.Operation,
+	readKey, writeKey string,
+	limiter *RateLimiter,
+) bool {
 	opID := op.OperationID
 	spanCtx, span := otel.Tracer(authTracerName).Start(ctx.Context(), "auth.validateAPIKey",
 		trace.WithAttributes(
@@ -132,11 +163,56 @@ func authorize(ctx huma.Context, op *huma.Operation, readKey, writeKey string) b
 	token := extractBearerToken(ctx.Header("Authorization"))
 	fingerprint := keyFingerprint(token)
 	span.SetAttributes(attribute.String("auth.key_fingerprint", fingerprint))
+
+	// The lockout is consulted BEFORE the credential comparison. Checking the credential
+	// first would hand an attacker unlimited guesses, because the comparison is the very
+	// thing being rate limited.
+	limitState, limitErr := limiter.Peek(spanCtx, ctx)
+	switch {
+	case limitErr != nil:
+		// Fail open. A cache outage must not become an API outage, and authentication
+		// itself still fails closed below — an unrecognised credential is rejected whether
+		// or not the limiter is working.
+		slog.WarnContext(spanCtx, "auth: rate limiter unavailable, serving without it",
+			"operation", opID, "error", limitErr)
+	case limitState.Locked():
+		// Attempts made while ALREADY locked count and extend the lockout, so persistence
+		// is self-defeating rather than merely futile: a caller hammering through a
+		// penalty drives its own ladder up instead of waiting for it to drain.
+		if extended, err := limiter.Fail(spanCtx, ctx); err == nil {
+			limitState = extended
+		}
+		span.SetAttributes(
+			attribute.String("auth.result", "rate_limited"),
+			attribute.Int("auth.failure_count", limitState.Failures),
+		)
+		span.SetStatus(codes.Error, "rate limited")
+		slog.WarnContext(spanCtx, "auth: rate limited",
+			"operation", opID, "result", "rate_limited", "key_fingerprint", fingerprint,
+			"failures", limitState.Failures,
+			"retry_after_seconds", int(limitState.RetryAfter.Seconds()))
+		setRateLimitHeaders(ctx, limitState)
+		// 429 immediately, never a server-side sleep: holding the connection open to
+		// enforce the delay would hand the attacker a resource-exhaustion primitive
+		// against the control meant to protect the service.
+		writeError(ctx, http.StatusTooManyRequests, "too many failed authentication attempts")
+		return false
+	}
+
+	// recordFailure charges one rung and publishes the caller's standing. Every credential
+	// rejection below goes through it, so no failure path can forget to count.
+	recordFailure := func() {
+		if st, err := limiter.Fail(spanCtx, ctx); err == nil {
+			setRateLimitHeaders(ctx, st)
+		}
+	}
+
 	if token == "" {
 		span.SetAttributes(attribute.String("auth.result", "missing_token"))
 		span.SetStatus(codes.Error, "missing or malformed Authorization header")
 		slog.WarnContext(spanCtx, "auth: missing bearer token",
 			"operation", opID, "result", "missing_token", "key_fingerprint", fingerprint)
+		recordFailure()
 		writeError(ctx, http.StatusUnauthorized, "missing or malformed Authorization header")
 		return false
 	}
@@ -159,6 +235,7 @@ func authorize(ctx huma.Context, op *huma.Operation, readKey, writeKey string) b
 			slog.WarnContext(spanCtx, "auth: token refused for write operation",
 				"operation", opID, "result", result, "required_level", "write",
 				"key_fingerprint", fingerprint)
+			recordFailure()
 			writeError(ctx, http.StatusForbidden, "invalid API key")
 			return false
 		}
@@ -181,6 +258,7 @@ func authorize(ctx huma.Context, op *huma.Operation, readKey, writeKey string) b
 			slog.WarnContext(spanCtx, "auth: invalid token for read operation",
 				"operation", opID, "result", "invalid_token", "required_level", "read",
 				"key_fingerprint", fingerprint)
+			recordFailure()
 			writeError(ctx, http.StatusForbidden, "invalid API key")
 			return false
 		}
@@ -195,6 +273,17 @@ func authorize(ctx huma.Context, op *huma.Operation, readKey, writeKey string) b
 		)
 		slog.InfoContext(spanCtx, "auth: token accepted",
 			"operation", opID, "access_level", level, "key_fingerprint", fingerprint)
+	}
+
+	// A correct key restores service immediately: the record is dropped rather than left to
+	// expire, so an identity that was climbing the ladder is clean the moment it presents a
+	// valid credential. Skipped when no record existed, which is the overwhelmingly common
+	// case, so normal traffic costs one read and no write.
+	if limitState.Exists {
+		if err := limiter.Clear(spanCtx, ctx); err != nil {
+			slog.WarnContext(spanCtx, "auth: could not clear rate-limit record",
+				"operation", opID, "error", err)
+		}
 	}
 
 	span.SetStatus(codes.Ok, "")
