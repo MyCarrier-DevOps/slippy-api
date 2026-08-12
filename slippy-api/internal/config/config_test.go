@@ -139,6 +139,44 @@ func TestLoad_InvalidDragonflyPort(t *testing.T) {
 	assert.ErrorContains(t, err, "DRAGONFLY_PORT must be a valid integer")
 }
 
+// A typo and an overflow are different operator problems and must not read identically.
+// The four strconv sites drop %w so a mis-wired secretKeyRef cannot echo a credential into
+// the pod log (strconv's *NumError carries the rejected input in .Num). Unwrapping first
+// keeps the sentinel — which contains no input — so the cause survives both in the message
+// and for errors.Is.
+func TestLoad_StrconvFailuresPreserveTheirCause(t *testing.T) {
+	for _, tc := range []struct {
+		name, envKey, value string
+		wantSentinel        error
+		wantText            string
+	}{
+		{"syntax", "DRAGONFLY_PORT", "6379x", strconv.ErrSyntax, "invalid syntax"},
+		{"range", "DRAGONFLY_PORT", "99999999999999999999", strconv.ErrRange, "value out of range"},
+		{"syntax on PORT", "PORT", "80x", strconv.ErrSyntax, "invalid syntax"},
+		{"range on app id", "SLIPPY_GITHUB_APP_ID", "99999999999999999999", strconv.ErrRange, "value out of range"},
+		{"syntax on depth", "SLIPPY_ANCESTRY_DEPTH", "25x", strconv.ErrSyntax, "invalid syntax"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv("SLIPPY_API_KEY", testReadKey)
+			t.Setenv("SLIPPY_WRITE_API_KEY", testWriteKey)
+			t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
+			t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
+			t.Setenv(tc.envKey, tc.value)
+
+			_, err := Load()
+			require.Error(t, err)
+			assert.ErrorIs(t, err, tc.wantSentinel,
+				"the cause must survive so callers can distinguish a typo from an overflow")
+			assert.Contains(t, err.Error(), tc.wantText,
+				"the operator-facing message must say which failure it was")
+			assert.Contains(t, err.Error(), tc.envKey, "the message must name the variable")
+			assert.NotContains(t, err.Error(), tc.value,
+				"the rejected input must never reach the log — it may be a mis-wired credential")
+		})
+	}
+}
+
 // strconv.Atoi accepts these happily, and DRAGONFLY_PORT has no late backstop the way PORT
 // does — an unusable value only fails the Redis ping, which is logged as ordinary optional
 // dependency degradation while silently taking the slip-creation dedup lock down with it.

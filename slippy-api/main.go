@@ -127,6 +127,28 @@ const (
 	gateDiagnostics     = "chSession"             // legacy CH schema-version probe
 )
 
+// clickHouseSessionOrNil converts the concrete session run() receives into the interface
+// handlerDeps carries, returning a genuinely nil interface when there is no usable session.
+//
+// This exists because the conversion is a trap rather than a formality. A nil *pointer*
+// stored in an interface produces a NON-nil interface, so assigning a failed
+// *clickhouse.ClickhouseSession straight into an interface-typed field makes every
+// `!= nil` check downstream read true. The gate would come up during a ClickHouse outage,
+// registering and publishing a diagnostics route whose handler dereferences the nil session
+// and drops the connection — the opposite of the degraded-boot behaviour main.go documents.
+//
+// Taking the concrete type as a parameter is what makes the nil check here a real pointer
+// comparison, and what makes the trap unit-testable without reflection.
+func clickHouseSessionOrNil(
+	sess *clickhouse.ClickhouseSession,
+	err error,
+) clickhouse.ClickhouseSessionInterface {
+	if err != nil || sess == nil {
+		return nil
+	}
+	return sess
+}
+
 // gateStatus is the single definition of which gates exist and which of them are up.
 //
 // Both facts used to be written more than once. The five nil checks that decide
@@ -180,7 +202,7 @@ func verifyGateNames(gates map[string]bool) error {
 	return routeSecurityError(unknown,
 		"operationTiers row(s) name a gate that is not a declared constant",
 		"an unknown gate reads as permanently down, so the stale-row check silently skips those "+
-			"rows. Add the gate to the const block and to buildHandler's liveGates map")
+			"rows. Add the gate to the const block and give it an entry in gateStatus")
 }
 
 // operationPolicy is the tier an operation must be served at, plus the gate that decides
@@ -765,13 +787,13 @@ func run() error {
 	// unregistered → 404) while the Postgres slip endpoints serve normally.
 	chConnectCtx, chConnectCancel := context.WithTimeout(context.Background(), startupConnectTimeout)
 	defer chConnectCancel()
-	chSession, chErr := clickhouse.NewClickhouseSession(chCfg, chConnectCtx)
-	if chErr != nil {
+	chSess, chErr := clickhouse.NewClickhouseSession(chCfg, chConnectCtx)
+	chSession := clickHouseSessionOrNil(chSess, chErr)
+	if chSession == nil {
 		log.Printf("warning: clickhouse session unavailable — non-slip readers + diagnostics run degraded: %v", chErr)
-		chSession = nil
 	} else {
 		defer func() {
-			if closeErr := chSession.Close(); closeErr != nil {
+			if closeErr := chSess.Close(); closeErr != nil {
 				log.Printf("warning: clickhouse session close: %v", closeErr)
 			}
 		}()

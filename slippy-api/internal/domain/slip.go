@@ -3,6 +3,7 @@ package domain
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
 )
@@ -82,6 +83,31 @@ type FindAllResult struct {
 	Slips     []SlipWithCommit
 	Truncated bool
 }
+
+// TruncatedSearchError qualifies a not-found produced without examining every commit the
+// caller supplied.
+//
+// FindByCommits shares FindAllByCommits' 256-resolution cap, but has no result struct to
+// carry a flag — it returns (slip, matchedCommit, error). A bare ErrSlipNotFound there
+// renders as a plain 404, which reads as "no slip exists for any of these commits" when the
+// truth is "none of the first N; the rest were never looked at". The distinction matters
+// beyond tidiness: a consumer treating 404 as "no slip yet" may create a second slip for a
+// commit that already has one — the phantom-slip condition the Redis dedup lock exists to
+// prevent, reached by a path the lock cannot see, because the lock keys on repo:sha for the
+// creating request and cannot know a lookup was silently shortened.
+//
+// It unwraps to slippy.ErrSlipNotFound, so every existing errors.Is check and the 404
+// mapping keep working unchanged; only callers that ask for the detail see it.
+type TruncatedSearchError struct {
+	Resolved  int // commits actually examined
+	Requested int // commits the caller supplied
+}
+
+func (e *TruncatedSearchError) Error() string {
+	return fmt.Sprintf("no slip found in the first %d of %d commits", e.Resolved, e.Requested)
+}
+
+func (e *TruncatedSearchError) Unwrap() error { return slippy.ErrSlipNotFound }
 
 // Invalidator is a post-write hook that removes cached entries for a slip.
 // Implementations must treat failures as non-fatal and log rather than propagate.

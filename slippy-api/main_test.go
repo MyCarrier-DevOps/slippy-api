@@ -602,6 +602,31 @@ func TestVerifyRouteSecurity(t *testing.T) {
 		require.NoError(t, err, "a ClickHouse outage must not stop the Postgres slip API from booting")
 		require.NotNil(t, h)
 	})
+
+	// The subtest above omits chSession entirely, which yields a genuinely nil interface and
+	// behaves correctly. run() does something different: it holds a *clickhouse.ClickhouseSession
+	// and assigns it into an interface-typed field. A nil *pointer* stored in an interface is
+	// NOT a nil interface, so that path read the gate as UP during an outage — registering and
+	// publishing a diagnostics route whose handler dereferences the nil session and kills the
+	// connection. The fixture and production disagreed about the one value that decides the gate.
+	t.Run("a failed ClickHouse connection leaves the diagnostics gate down", func(t *testing.T) {
+		var failed *ch.ClickhouseSession // exactly what run() holds when the dial fails
+
+		sess := clickHouseSessionOrNil(failed, errors.New("dial tcp: connection refused"))
+		require.Nil(t, sess, "a failed dial must produce a nil interface, not a typed nil")
+
+		gates := gateStatus(handlerDeps{chSession: sess})
+		assert.False(t, gates[gateDiagnostics],
+			"gate must read down, or the route is registered against a nil session")
+	})
+
+	// The same trap without an error: a nil session and nil error still must not gate up.
+	t.Run("a nil session with no error leaves the diagnostics gate down", func(t *testing.T) {
+		var failed *ch.ClickhouseSession
+
+		gates := gateStatus(handlerDeps{chSession: clickHouseSessionOrNil(failed, nil)})
+		assert.False(t, gates[gateDiagnostics])
+	})
 }
 
 // TestBuildHandler_PassesStartupRouteSecurityGuard proves the guard is actually wired
@@ -756,6 +781,19 @@ func assertOperationTier(t *testing.T, method, path, opID string, security []any
 					"themselves are ignored there, and a non-empty array is the spec defect "+
 					"described above.",
 				route, opID, requirement)
+		default:
+			// Without this arm the audit fails open on exactly the input the boot guard
+			// cannot see. verifyRouteSecurity's check (6) short-circuits on
+			// !RequiresWriteKey, so a row whose tier is misspelled AND whose operation
+			// declares writeApiKey passes every boot check — the declaration governs at
+			// runtime, so it fails safe, but operationTiers is documented as "the single
+			// inventory of the service's route policy" and in that quadrant the inventory
+			// disagrees with what is enforced. Nothing else validates tier values against
+			// the three constants.
+			t.Errorf("%s (operationId %q): operationTiers names tier %q, which is not "+
+				"tierPublic, tierRead or tierWrite. The declaration governs at runtime, so "+
+				"this is an inventory defect rather than an auth defect — but the table is "+
+				"what every tier check is read against.", route, opID, wantTier)
 		}
 	}
 }

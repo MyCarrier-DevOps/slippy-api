@@ -2,6 +2,7 @@ package config
 
 import (
 	"crypto/subtle"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -89,7 +90,7 @@ func Load() (*Config, error) {
 	if v := os.Getenv("PORT"); v != "" {
 		port, err := strconv.Atoi(v)
 		if err != nil {
-			return nil, fmt.Errorf("PORT must be a valid integer")
+			return nil, fmt.Errorf("PORT must be a valid integer: %w", errors.Unwrap(err))
 		}
 		cfg.Port = port
 	}
@@ -112,7 +113,7 @@ func Load() (*Config, error) {
 	if v := os.Getenv("DRAGONFLY_PORT"); v != "" {
 		port, err := strconv.Atoi(v)
 		if err != nil {
-			return nil, fmt.Errorf("DRAGONFLY_PORT must be a valid integer")
+			return nil, fmt.Errorf("DRAGONFLY_PORT must be a valid integer: %w", errors.Unwrap(err))
 		}
 		if port < 1 || port > 65535 {
 			return nil, fmt.Errorf("DRAGONFLY_PORT must be between 1 and 65535")
@@ -138,7 +139,7 @@ func Load() (*Config, error) {
 	} else {
 		id, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("SLIPPY_GITHUB_APP_ID must be a valid integer")
+			return nil, fmt.Errorf("SLIPPY_GITHUB_APP_ID must be a valid integer: %w", errors.Unwrap(err))
 		}
 		cfg.GitHubAppID = id
 	}
@@ -156,7 +157,7 @@ func Load() (*Config, error) {
 	if v := os.Getenv("SLIPPY_ANCESTRY_DEPTH"); v != "" {
 		depth, err := strconv.Atoi(v)
 		if err != nil {
-			return nil, fmt.Errorf("SLIPPY_ANCESTRY_DEPTH must be a valid integer")
+			return nil, fmt.Errorf("SLIPPY_ANCESTRY_DEPTH must be a valid integer: %w", errors.Unwrap(err))
 		}
 		if depth < 1 {
 			return nil, fmt.Errorf("SLIPPY_ANCESTRY_DEPTH must be at least 1")

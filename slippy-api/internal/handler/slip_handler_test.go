@@ -27,6 +27,12 @@ type mockReader struct {
 	loadByCommitExactFn func(ctx context.Context, repo, sha string) (*domain.Slip, error)
 	findByCommitsFn     func(ctx context.Context, repo string, commits []string) (*domain.Slip, string, error)
 	findAllByCommitsFn  func(ctx context.Context, repo string, commits []string) ([]domain.SlipWithCommit, error)
+
+	// findAllResultFn returns the whole domain.FindAllResult, so a test can pin Truncated.
+	// The slice-returning field above cannot: it forces Truncated to false, which made the
+	// flag's journey to the response header structurally untestable in this package — the
+	// statement executed, so coverage counted it, while nothing asserted its value.
+	findAllResultFn func(ctx context.Context, repo string, commits []string) (domain.FindAllResult, error)
 }
 
 func (m *mockReader) Load(ctx context.Context, id string) (*domain.Slip, error) {
@@ -47,8 +53,10 @@ func (m *mockReader) FindAllByCommits(
 	repo string,
 	commits []string,
 ) (domain.FindAllResult, error) {
-	// The func field still returns the slice: the adapters under test care about the
-	// slips, and leaving it alone keeps every case table below unchanged.
+	if m.findAllResultFn != nil {
+		return m.findAllResultFn(ctx, repo, commits)
+	}
+	// Fall back to the slice-returning field so every existing case table stays unchanged.
 	slips, err := m.findAllByCommitsFn(ctx, repo, commits)
 	return domain.FindAllResult{Slips: slips}, err
 }
@@ -167,6 +175,98 @@ func TestFindByCommits_NotFound(t *testing.T) {
 	handler.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+// The handler's only job with Truncated is to carry it from the reader to the response
+// header. Nothing pinned that: the shared mock forced the flag to false, so mutating the
+// handler to hardcode `Truncated: false` left the suite green with byte-identical coverage —
+// the statement ran, so the gate counted it, while no assertion touched its value.
+//
+// Asserted on the wire rather than on the output struct, because the header tag is the part
+// that can silently stop working.
+func TestFindAllByCommits_TruncationReachesTheResponseHeader(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		truncated bool
+		want      string
+	}{
+		{"truncated answer", true, "true"},
+		{"complete answer", false, "false"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := &mockReader{
+				findAllResultFn: func(_ context.Context, _ string, _ []string) (domain.FindAllResult, error) {
+					return domain.FindAllResult{
+						Slips: []domain.SlipWithCommit{
+							{Slip: &domain.Slip{CorrelationID: "a"}, MatchedCommit: "c1"},
+						},
+						Truncated: tc.truncated,
+					}, nil
+				},
+			}
+
+			handler := setupTestAPI(mock)
+			req := httptest.NewRequest(http.MethodPost, "/slips/find-all-by-commits",
+				strings.NewReader(`{"repository":"org/repo","commits":["c1"]}`))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+
+			require.Equal(t, http.StatusOK, w.Code)
+			// huma emits bool headers unconditionally, so "false" is present rather than
+			// absent — which is the better contract: a caller can tell "complete answer"
+			// from "old build that cannot report truncation".
+			assert.Equal(t, tc.want, w.Header().Get("X-Slippy-Results-Truncated"),
+				"the reader's Truncated flag must reach the caller")
+		})
+	}
+}
+
+// find-by-commits shares the 256-resolution cap but has no result struct to carry a flag,
+// so a truncated search used to render as a bare 404 — indistinguishable from an
+// authoritative "no slip exists for any of these commits". A consumer reading that as "no
+// slip yet" can create a second slip for a commit that already has one, which is the
+// phantom-slip condition the dedup lock exists to prevent, reached by a path the lock
+// cannot observe.
+func TestFindByCommits_TruncatedSearchQualifiesThe404(t *testing.T) {
+	mock := &mockReader{
+		findByCommitsFn: func(_ context.Context, _ string, _ []string) (*domain.Slip, string, error) {
+			return nil, "", &domain.TruncatedSearchError{Resolved: 256, Requested: 300}
+		},
+	}
+
+	handler := setupTestAPI(mock)
+	req := httptest.NewRequest(http.MethodPost, "/slips/find-by-commits",
+		strings.NewReader(`{"repository":"org/repo","commits":["c1"]}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	// Still a 404 — the status is unchanged, so no consumer breaks.
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.Equal(t, "true", w.Header().Get("X-Slippy-Results-Truncated"),
+		"a partial search must not present as an authoritative negative")
+	assert.Contains(t, w.Body.String(), "first 256 of 300 commits",
+		"the detail must say how much of the list was actually examined")
+}
+
+// A genuine exhaustive miss must stay a plain 404 and must NOT claim truncation.
+func TestFindByCommits_CompleteSearchReports404WithoutTruncation(t *testing.T) {
+	mock := &mockReader{
+		findByCommitsFn: func(_ context.Context, _ string, _ []string) (*domain.Slip, string, error) {
+			return nil, "", slippy.ErrSlipNotFound
+		},
+	}
+
+	handler := setupTestAPI(mock)
+	req := httptest.NewRequest(http.MethodPost, "/slips/find-by-commits",
+		strings.NewReader(`{"repository":"org/repo","commits":["c1"]}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.Empty(t, w.Header().Get("X-Slippy-Results-Truncated"))
 }
 
 func TestFindAllByCommits_Success(t *testing.T) {

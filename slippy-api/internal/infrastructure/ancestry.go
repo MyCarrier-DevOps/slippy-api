@@ -34,6 +34,13 @@ const ancestryTracerName = "slippy-api/ancestry"
 //
 // This bounds the blast radius; it is not a rate limit. A caller can still issue many
 // requests. Per-key rate limiting is tracked separately.
+//
+// COUPLING: both truncation disclosures — the X-Slippy-Results-Truncated header on
+// find-all-by-commits and the qualified 404 on find-by-commits — are safe to expose only
+// while this is a compile-time constant, because the flag is then a pure function of
+// len(commits) and a literal the caller can already read here. If this ever becomes
+// config-driven, per-key, or derived from a rate-limit budget, those headers begin
+// disclosing server-side state and need re-review.
 const maxAncestryResolutions = 256
 
 // boundedCommits returns the prefix of commits the ancestry fallback may resolve, and
@@ -268,7 +275,8 @@ func (a *SlipResolverAdapter) FindByCommits(
 	slog.InfoContext(ctx, "ancestry: resolving slip for commits via library",
 		"requested_repository", repository, "commits_count", len(commits))
 
-	for _, commit := range boundedCommits(ctx, repository, commits) {
+	resolving := boundedCommits(ctx, repository, commits)
+	for _, commit := range resolving {
 		// Stop as soon as the caller is gone. Without this the fan-out runs to completion
 		// after a client disconnect, making the work fire-and-forget for an attacker.
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -308,8 +316,15 @@ func (a *SlipResolverAdapter) FindByCommits(
 	}
 
 	slog.InfoContext(ctx, "ancestry: no slip found for any commit",
-		"requested_repository", repository, "commits_count", len(commits))
+		"requested_repository", repository, "commits_count", len(commits),
+		"commits_resolved", len(resolving))
 	span.SetStatus(codes.Unset, "not found")
+	if len(resolving) < len(commits) {
+		// Qualify the negative rather than asserting one we did not establish. Unwraps to
+		// ErrSlipNotFound, so the 404 mapping and every errors.Is check are unaffected.
+		span.SetAttributes(attribute.Bool("slip.results_truncated", true))
+		return nil, "", &domain.TruncatedSearchError{Resolved: len(resolving), Requested: len(commits)}
+	}
 	return nil, "", slippy.ErrSlipNotFound
 }
 

@@ -578,6 +578,60 @@ func TestAdapter_FindAllByCommits_DirectHit(t *testing.T) {
 	assert.Equal(t, "a", results.Slips[0].Slip.CorrelationID)
 }
 
+// FindByCommits shares the cap but returns (slip, commit, error) with no room for a flag,
+// so an exhausted-but-truncated search must qualify its not-found. It still unwraps to
+// ErrSlipNotFound, so every existing errors.Is check and the 404 mapping are unaffected.
+func TestAdapter_FindByCommits_TruncatedMissIsQualified(t *testing.T) {
+	reader := &mockReader{
+		findByCommitsFn: func(_ context.Context, _ string, _ []string) (*domain.Slip, string, error) {
+			return nil, "", slippy.ErrSlipNotFound // force the ancestry fallback
+		},
+	}
+	resolver := &mockSlipResolver{
+		resolveSlipFn: func(_ context.Context, opts slippy.ResolveOptions) (*slippy.ResolveResult, error) {
+			return nil, slippy.NewResolveError("org/repo", opts.Ref, slippy.ErrSlipNotFound)
+		},
+	}
+	commits := make([]string, maxAncestryResolutions+44)
+	for i := range commits {
+		commits[i] = fmt.Sprintf("sha%d", i)
+	}
+
+	adapter := NewSlipResolverAdapter(resolver, reader)
+	_, _, err := adapter.FindByCommits(context.Background(), "org/repo", commits)
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, slippy.ErrSlipNotFound,
+		"must still unwrap to not-found so the 404 mapping and errors.Is checks hold")
+	var truncated *domain.TruncatedSearchError
+	require.ErrorAs(t, err, &truncated, "a capped search must not present as an exhaustive miss")
+	assert.Equal(t, maxAncestryResolutions, truncated.Resolved)
+	assert.Equal(t, len(commits), truncated.Requested)
+}
+
+// A miss that DID examine every commit is authoritative and must stay a bare not-found.
+func TestAdapter_FindByCommits_CompleteMissIsNotQualified(t *testing.T) {
+	reader := &mockReader{
+		findByCommitsFn: func(_ context.Context, _ string, _ []string) (*domain.Slip, string, error) {
+			return nil, "", slippy.ErrSlipNotFound
+		},
+	}
+	resolver := &mockSlipResolver{
+		resolveSlipFn: func(_ context.Context, opts slippy.ResolveOptions) (*slippy.ResolveResult, error) {
+			return nil, slippy.NewResolveError("org/repo", opts.Ref, slippy.ErrSlipNotFound)
+		},
+	}
+
+	adapter := NewSlipResolverAdapter(resolver, reader)
+	_, _, err := adapter.FindByCommits(context.Background(), "org/repo", []string{"sha1", "sha2"})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, slippy.ErrSlipNotFound)
+	var truncated *domain.TruncatedSearchError
+	assert.NotErrorIs(t, err, error(truncated), "an exhaustive miss must not claim truncation")
+	assert.False(t, errors.As(err, &truncated))
+}
+
 // The fallback resolves at most maxAncestryResolutions commits, so a longer list comes back
 // short. find-all-by-commits promises to find *all* matches, and for commits drawn from
 // disjoint lineages the dropped tail is distinct slips rather than the redundant duplicates

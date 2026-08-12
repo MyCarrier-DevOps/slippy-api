@@ -313,6 +313,7 @@ All configuration is via environment variables. No config files, no Vault.
 | Variable | Description | Example |
 |---|---|---|
 | `SLIPPY_API_KEY` | Bearer token for read endpoints; min 60 chars, must differ from the write key | generate with `openssl rand -hex 32` |
+| `SLIPPY_WRITE_API_KEY` | Bearer token for write endpoints; min 60 chars, must differ from the read key | generate with `openssl rand -hex 32` |
 | `SLIPPY_PIPELINE_CONFIG` | Pipeline configuration (file path or inline JSON) | `/config/pipeline.json` |
 | `SLIPPY_GITHUB_APP_ID` | GitHub App ID for ancestry resolution | `2645252` |
 | `SLIPPY_GITHUB_APP_PRIVATE_KEY` | PEM-encoded private key or file path | `/config/github.pem` |
@@ -331,7 +332,6 @@ All configuration is via environment variables. No config files, no Vault.
 | `CLICKHOUSE_PORT` | ClickHouse port | `9440` |
 | `CLICKHOUSE_SKIP_VERIFY` | Skip TLS verification | `false` |
 | `K8S_NAMESPACE` | Kubernetes namespace; `-test` or `-dev` suffix selects `ci_test` database | _(ci)_ |
-| `SLIPPY_WRITE_API_KEY` | Bearer token for write endpoints; **required**, min 60 chars, must differ from the read key | generate with `openssl rand -hex 32` |
 | `SLIPPY_SKIP_MIGRATIONS` | Skip ClickHouse schema migrations at startup | `true` |
 | `DRAGONFLY_HOST` | Dragonfly/Redis host (enables caching when set) | _(disabled)_ |
 | `DRAGONFLY_PORT` | Dragonfly/Redis port | `6379` |

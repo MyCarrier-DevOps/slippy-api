@@ -228,7 +228,7 @@ func (h *SlipHandler) findByCommits(ctx context.Context, input *FindByCommitsInp
 		slog.ErrorContext(ctx, "slip: find by commits failed",
 			"requested_repository", input.Body.Repository,
 			"commits_count", len(input.Body.Commits), "error", err)
-		return nil, mapError(err)
+		return nil, mapFindByCommitsError(err)
 	}
 	span.SetAttributes(
 		attribute.String("slip.matched_commit", commit),
@@ -301,6 +301,29 @@ func recordHandlerError(span trace.Span, err error) {
 }
 
 // mapError converts domain/store errors to huma status errors.
+// mapFindByCommitsError is mapError plus one qualification: a not-found produced without
+// examining every requested commit is still a 404, but says so.
+//
+// The header goes on via huma.ErrorWithHeaders rather than an output-struct field, because
+// an output field would be dead code here — huma returns at the error branch before it ever
+// reaches header serialisation, but it does apply HeadersError headers on the error path.
+// Same header name as find-all-by-commits, so a caller has one flag to check across both.
+//
+// The disclosure is safe only while maxAncestryResolutions is a compile-time constant: the
+// flag is a pure function of len(commits) and a literal the caller can read in this
+// repository. If that cap ever becomes config-driven, per-key, or derived from a rate-limit
+// budget, this begins leaking server-side state and needs re-review.
+func mapFindByCommitsError(err error) error {
+	var truncated *domain.TruncatedSearchError
+	if errors.As(err, &truncated) {
+		return huma.ErrorWithHeaders(
+			huma.NewError(http.StatusNotFound, truncated.Error()),
+			http.Header{"X-Slippy-Results-Truncated": []string{"true"}},
+		)
+	}
+	return mapError(err)
+}
+
 func mapError(err error) error {
 	switch {
 	case errors.Is(err, slippy.ErrSlipNotFound):
