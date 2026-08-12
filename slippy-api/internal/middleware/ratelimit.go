@@ -57,11 +57,11 @@ const (
 	defaultXFFDepth = 2
 )
 
-// lockoutFor returns how long an identity is refused after n consecutive failures.
+// LockoutFor returns how long an identity is refused after n consecutive failures.
 //
 // The sequence is generated iteratively and abandoned as soon as it passes the cap, so no
 // term large enough to overflow is ever computed. n itself may grow without limit.
-func lockoutFor(failures int) time.Duration {
+func LockoutFor(failures int) time.Duration {
 	k := failures - rateLimitFreeFailures
 	if k <= 0 {
 		return 0
@@ -78,29 +78,9 @@ func lockoutFor(failures int) time.Duration {
 	return min(d, rateLimitMaxLockout)
 }
 
-// recordTTL returns how long a failure record survives, given the lockout it produced.
-func recordTTL(lockout time.Duration) time.Duration {
+// RecordTTL returns how long a failure record survives, given the lockout it produced.
+func RecordTTL(lockout time.Duration) time.Duration {
 	return max(lockout*rateLimitTTLMultiple, rateLimitMinTTL)
-}
-
-// LadderArgs renders the whole policy as script arguments: the free allowance, then one
-// (lockout, ttl) pair per rung, both in seconds, starting at rung zero.
-//
-// Exported because the store lives in another package, and shaped this way so the store has
-// no policy in it at all — it indexes a table rather than recomputing Fibonacci and the TTL
-// rule in a second language, where the copy would be free to drift from the one under test.
-//
-// The table runs from rung zero to the first that reaches the cap; anything beyond indexes
-// to the last pair, which is the cap and its TTL.
-func LadderArgs() []any {
-	args := []any{rateLimitFreeFailures}
-	for k := 0; ; k++ {
-		d := lockoutFor(k + rateLimitFreeFailures)
-		args = append(args, int(d.Seconds()), int(recordTTL(d).Seconds()))
-		if d >= rateLimitMaxLockout {
-			return args
-		}
-	}
 }
 
 // clientIdentity resolves the caller this request should be attributed to.

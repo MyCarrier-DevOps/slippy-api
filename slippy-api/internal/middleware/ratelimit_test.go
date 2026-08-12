@@ -40,7 +40,7 @@ func TestLockoutFor(t *testing.T) {
 		{500, rateLimitMaxLockout}, // n keeps climbing; the duration does not
 	} {
 		t.Run(time.Duration(tc.failures).String(), func(t *testing.T) {
-			assert.Equal(t, tc.want, lockoutFor(tc.failures))
+			assert.Equal(t, tc.want, LockoutFor(tc.failures))
 		})
 	}
 }
@@ -50,7 +50,7 @@ func TestLockoutFor(t *testing.T) {
 // passes the cap rather than being clamped after the fact.
 func TestLockoutFor_NeverExceedsTheCapOrGoesNegative(t *testing.T) {
 	for n := range 2000 {
-		d := lockoutFor(n)
+		d := LockoutFor(n)
 		require.GreaterOrEqual(t, d, time.Duration(0), "failure %d produced a negative lockout", n)
 		require.LessOrEqual(t, d, rateLimitMaxLockout, "failure %d exceeded the cap", n)
 	}
@@ -59,7 +59,7 @@ func TestLockoutFor_NeverExceedsTheCapOrGoesNegative(t *testing.T) {
 func TestLockoutFor_IsMonotonic(t *testing.T) {
 	prev := time.Duration(0)
 	for n := range 40 {
-		d := lockoutFor(n)
+		d := LockoutFor(n)
 		require.GreaterOrEqual(t, d, prev, "the ladder went backwards at failure %d", n)
 		prev = d
 	}
@@ -81,15 +81,15 @@ func TestRecordTTL(t *testing.T) {
 		{"at the cap", rateLimitMaxLockout, 10 * rateLimitMaxLockout},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, recordTTL(tc.lockout))
+			assert.Equal(t, tc.want, RecordTTL(tc.lockout))
 		})
 	}
 }
 
 func TestRecordTTL_AlwaysOutlivesItsLockout(t *testing.T) {
 	for n := range 60 {
-		lockout := lockoutFor(n)
-		require.Greater(t, recordTTL(lockout), lockout,
+		lockout := LockoutFor(n)
+		require.Greater(t, RecordTTL(lockout), lockout,
 			"failure %d: a record that expires with its lockout resets the ladder", n)
 	}
 }
@@ -201,12 +201,12 @@ func (f *fakeRateLimitStore) Fail(_ context.Context, key string) (RateLimitState
 		return RateLimitState{}, f.failErr
 	}
 	f.failures[key]++
-	lockout := lockoutFor(f.failures[key])
+	lockout := LockoutFor(f.failures[key])
 	f.until[key] = time.Now().Add(lockout)
 	return RateLimitState{
 		Failures:   f.failures[key],
 		RetryAfter: lockout,
-		ResetAt:    time.Now().Add(recordTTL(lockout)),
+		ResetAt:    time.Now().Add(RecordTTL(lockout)),
 		Exists:     true,
 	}, nil
 }
@@ -222,7 +222,7 @@ func (f *fakeRateLimitStore) Peek(_ context.Context, key string) (RateLimitState
 	return RateLimitState{
 		Failures:   n,
 		RetryAfter: max(time.Until(f.until[key]), 0),
-		ResetAt:    time.Now().Add(recordTTL(lockoutFor(n))),
+		ResetAt:    time.Now().Add(RecordTTL(LockoutFor(n))),
 		Exists:     true,
 	}, nil
 }
@@ -414,33 +414,6 @@ func TestRateLimit_ForgedXFFCannotEscapeTheLadder(t *testing.T) {
 		}
 	}
 	assert.Len(t, store.failures, 1, "all attempts must land on one identity")
-}
-
-// LadderArgs is the contract between the ladder and any store that applies it, so its shape
-// is pinned: a store indexing pairs must find pairs, and the last one must be the cap.
-func TestLadderArgs(t *testing.T) {
-	args := LadderArgs()
-
-	require.Equal(t, rateLimitFreeFailures, args[0], "the free allowance leads")
-	pairs := args[1:]
-	require.Zero(t, len(pairs)%2, "the table must be whole (lockout, ttl) pairs")
-
-	// Rung zero is the free-allowance phase: no lockout, but still remembered for the floor,
-	// or the first two failures would be forgotten instantly and the ladder never start.
-	assert.Equal(t, 0, pairs[0], "rung zero has no lockout")
-	assert.Equal(t, int(rateLimitMinTTL.Seconds()), pairs[1], "rung zero still floors its TTL")
-
-	assert.Equal(t, 10, pairs[2], "the first real rung is the 10s base")
-	assert.Equal(t, int(rateLimitMaxLockout.Seconds()), pairs[len(pairs)-2], "the table ends at the cap")
-	assert.Equal(t, int(recordTTL(rateLimitMaxLockout).Seconds()), pairs[len(pairs)-1])
-
-	// Every pair must agree with the functions under test, so a store applying the table
-	// applies exactly the policy the ladder tests pin.
-	for k := 0; k < len(pairs)/2; k++ {
-		lockout := lockoutFor(k + rateLimitFreeFailures)
-		assert.Equal(t, int(lockout.Seconds()), pairs[2*k], "rung %d lockout", k)
-		assert.Equal(t, int(recordTTL(lockout).Seconds()), pairs[2*k+1], "rung %d ttl", k)
-	}
 }
 
 // A nil limiter is the disabled configuration, and every entry point must tolerate it —
