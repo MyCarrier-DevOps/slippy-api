@@ -178,7 +178,8 @@ To run locally:
 
 ```bash
 docker run -p 8080:8080 \
-  -e SLIPPY_API_KEY=my-key \
+  -e SLIPPY_API_KEY="$(openssl rand -hex 32)" \
+  -e SLIPPY_WRITE_API_KEY="$(openssl rand -hex 32)" \
   -e SLIPPY_PIPELINE_CONFIG='{"version":"1.0","name":"test","steps":[{"name":"build","description":"build"}]}' \
   -e SLIPPY_GITHUB_APP_ID=12345 \
   -e SLIPPY_GITHUB_APP_PRIVATE_KEY=/path/to/key.pem \

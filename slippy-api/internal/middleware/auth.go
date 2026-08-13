@@ -199,11 +199,22 @@ func authorize(
 		return false
 	}
 
-	// recordFailure charges one rung and publishes the caller's standing. Every credential
-	// rejection below goes through it, so no failure path can forget to count.
+	// recordFailure charges one rung. Every credential rejection below goes through it, so no
+	// failure path can forget to count.
+	//
+	// It deliberately publishes NO rate-limit headers. Those would be an enforcement-state
+	// oracle: a 401/403 that carried X-RateLimit-* when the limiter was enabled and nothing
+	// when it was disabled or erroring would tell an unauthenticated caller precisely when the
+	// control was off — i.e. when it was safe to flood. The headers belong only on the 429
+	// above, where enforcement is self-evident and reveals nothing new; a 401/403 is
+	// byte-identical whether the limiter is enforcing, disabled, or degraded.
 	recordFailure := func() {
-		if st, err := limiter.Fail(spanCtx, ctx); err == nil {
-			setRateLimitHeaders(ctx, st)
+		if _, err := limiter.Fail(spanCtx, ctx); err != nil {
+			// Fail-open, but not silent: a store error here means the ladder is not being
+			// charged, so an operator gets a per-request signal that the brake is degraded
+			// rather than only a single line at boot.
+			slog.WarnContext(spanCtx, "auth: rate limiter store error, failure not recorded",
+				"operation", opID, "error", err)
 		}
 	}
 

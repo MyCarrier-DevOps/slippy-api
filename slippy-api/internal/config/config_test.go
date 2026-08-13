@@ -20,7 +20,7 @@ func clearEnv(t *testing.T) {
 		"CACHE_TTL",
 		"SLIPPY_GITHUB_APP_ID", "SLIPPY_GITHUB_APP_PRIVATE_KEY",
 		"SLIPPY_GITHUB_ENTERPRISE_URL", "SLIPPY_ANCESTRY_DEPTH",
-		"SLIPPY_RATE_LIMIT_ENABLED", "SLIPPY_XFF_DEPTH",
+		"SLIPPY_RATE_LIMIT_ENABLED", "SLIPPY_XFF_DEPTH", "SLIPPY_TRUSTED_PROXY_CIDRS",
 		"K8S_NAMESPACE",
 	} {
 		t.Setenv(key, "")
@@ -596,6 +596,39 @@ func TestLoad_XFFDepth(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, cfg.XFFDepth)
+		})
+	}
+}
+
+func TestLoad_TrustedProxies(t *testing.T) {
+	for _, tc := range []struct {
+		name, value string
+		wantLen     int
+		wantErr     string
+	}{
+		{name: "unset is empty", value: "", wantLen: 0},
+		{name: "single cidr", value: "198.51.100.0/24", wantLen: 1},
+		{name: "multiple with spaces", value: "198.51.100.0/24, 203.0.113.0/24 , 2001:db8::/32", wantLen: 3},
+		{name: "trailing comma tolerated", value: "198.51.100.0/24,", wantLen: 1},
+		{name: "bare IP rejected", value: "198.51.100.9", wantErr: "not a valid CIDR"},
+		{name: "garbage rejected", value: "not-a-cidr", wantErr: "not a valid CIDR"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv("SLIPPY_API_KEY", testReadKey)
+			t.Setenv("SLIPPY_WRITE_API_KEY", testWriteKey)
+			t.Setenv("SLIPPY_GITHUB_APP_ID", "99")
+			t.Setenv("SLIPPY_GITHUB_APP_PRIVATE_KEY", "pem")
+			t.Setenv("SLIPPY_TRUSTED_PROXY_CIDRS", tc.value)
+
+			cfg, err := Load()
+			if tc.wantErr != "" {
+				assert.Nil(t, cfg)
+				assert.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Len(t, cfg.TrustedProxies, tc.wantLen)
 		})
 	}
 }

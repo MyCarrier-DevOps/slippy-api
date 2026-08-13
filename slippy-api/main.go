@@ -892,10 +892,26 @@ func run() error {
 	case !cfg.RateLimitEnabled:
 		log.Printf("auth rate limiting disabled (SLIPPY_RATE_LIMIT_ENABLED not set)")
 	case rdb == nil:
-		log.Printf("warning: auth rate limiting requested but no cache is available — running without it")
+		// WARN, not a passing mention: this is the degradation the design fails open to,
+		// and with no cache there is no per-request signal that it happened — so the boot
+		// log is the only place an operator can learn the credential-guessing brake is off.
+		log.Printf("WARNING: SLIPPY_RATE_LIMIT_ENABLED=true but no cache is available — " +
+			"auth rate limiting is OFF for the life of this process; a cache outage at boot " +
+			"disables the only credential-guessing control until the next deploy")
 	default:
-		rateLimiter = middleware.NewRateLimiter(infrastructure.NewRedisRateLimitStore(rdb), cfg.XFFDepth)
-		log.Printf("auth rate limiting enabled (xff_depth=%d)", cfg.XFFDepth)
+		rateLimiter = middleware.NewRateLimiter(
+			infrastructure.NewRedisRateLimitStore(rdb), cfg.XFFDepth, cfg.TrustedProxies)
+		if len(cfg.TrustedProxies) == 0 {
+			// Not fatal — the limiter is safe without it (it attributes by the unforgeable
+			// rightmost hop) — but it collapses all edge traffic onto a handful of edge
+			// addresses, so one attacker can lock the fleet. Loud so it is caught in the
+			// rollout's "confirm the resolved address" step rather than in production.
+			log.Printf("WARNING: auth rate limiting enabled with no SLIPPY_TRUSTED_PROXY_CIDRS — " +
+				"edge callers collapse onto the edge address; set it to your edge ranges " +
+				"before trusting per-client attribution")
+		}
+		log.Printf("auth rate limiting enabled (xff_depth=%d, trusted_proxy_cidrs=%d)",
+			cfg.XFFDepth, len(cfg.TrustedProxies))
 	}
 
 	// --- HTTP Server ---

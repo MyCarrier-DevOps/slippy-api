@@ -352,8 +352,8 @@ OTel spans distinguish client errors (not-found, invalid input → `Unset` statu
 
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
-| `SLIPPY_API_KEY` | Yes | — | Bearer token for read endpoint authentication |
-| `SLIPPY_WRITE_API_KEY` | No | — | Bearer token for write endpoints (enables write routes when set) |
+| `SLIPPY_API_KEY` | Yes | — | Bearer token for read endpoints; min 60 chars, must differ from the write key |
+| `SLIPPY_WRITE_API_KEY` | Yes | — | Bearer token for write endpoints; min 60 chars, must differ from the read key (`config.Load` refuses to start without it) |
 | `PORT` | No | 8080 | HTTP server port |
 | `SLIPPY_GITHUB_APP_ID` | Yes | — | GitHub App ID |
 | `SLIPPY_GITHUB_APP_PRIVATE_KEY` | Yes | — | GitHub App private key (PEM or file path) |

@@ -40,15 +40,15 @@ configuration. The distinction matters: the Istio mesh config declares
 design.
 
 Probes sent to the unauthenticated `/health` endpoint from a host with known public IP
-`184.97.153.128`, correlated by unique `User-Agent` in the `istio-ingressgateway` access log.
+`203.0.113.10`, correlated by unique `User-Agent` in the `istio-ingressgateway` access log.
 
 | Probe | `x_forwarded_for` seen at gateway | Outcome |
 |---|---|---|
-| baseline | `184.97.153.128,172.68.3.180` | real client, then Cloudflare edge |
-| `X-Forwarded-For: 1.2.3.4` | `1.2.3.4,184.97.153.128,172.68.35.81` | forged entry survives, prepended |
-| `X-Forwarded-For: 1.2.3.4, 5.6.7.8` | `1.2.3.4, 5.6.7.8,184.97.153.128,172.68.35.81` | both forged entries survive |
-| `CF-Connecting-IP: 9.9.9.9` | *never reached the cluster* | Cloudflare rejected with 403 at the edge |
-| `X-Envoy-External-Address: 8.8.8.8` | `184.97.153.128,172.68.35.81` | passes through, header ignored by gateway |
+| baseline | `203.0.113.10,198.51.100.80` | real client, then Cloudflare edge |
+| `X-Forwarded-For: 192.0.2.1` | `192.0.2.1,203.0.113.10,198.51.100.81` | forged entry survives, prepended |
+| `X-Forwarded-For: 192.0.2.1, 192.0.2.2` | `192.0.2.1, 192.0.2.2,203.0.113.10,198.51.100.81` | both forged entries survive |
+| `CF-Connecting-IP: 192.0.2.9` | *never reached the cluster* | Cloudflare rejected with 403 at the edge |
+| `X-Envoy-External-Address: 192.0.2.8` | `203.0.113.10,198.51.100.81` | passes through, header ignored by gateway |
 
 Conclusions:
 
@@ -75,12 +75,12 @@ directly, with a filtered packet capture in an ephemeral debug container on
 `slippy-api-test` (allowlisting only forwarding headers, so no `Authorization` value was
 ever captured).
 
-Forged request — `X-Forwarded-For: 1.2.3.4, 5.6.7.8` — as received by the application:
+Forged request — `X-Forwarded-For: 192.0.2.1, 192.0.2.2` — as received by the application:
 
 ```
-x-forwarded-for:          1.2.3.4, 5.6.7.8,184.97.153.128,172.68.35.82
-cf-connecting-ip:         184.97.153.128
-x-envoy-external-address: 172.68.35.82
+x-forwarded-for:          192.0.2.1, 192.0.2.2,203.0.113.10,198.51.100.82
+cf-connecting-ip:         203.0.113.10
+x-envoy-external-address: 198.51.100.82
 ```
 
 | Header | Value | Usable as identity? |
@@ -97,8 +97,8 @@ which confirms `gatewayTopology.numTrustedProxies: 2` over-skips: there is one p
 
 Anything relying on Envoy's computed client address today — Istio-level rate limiting, IP
 allowlists, `AuthorizationPolicy` source ranges — is keying on the Cloudflare edge rather
-than the caller. The edge address is also not stable per client (`172.68.35.82` and
-`172.68.3.179` were both observed for the same source within a minute), so it is not usable
+than the caller. The edge address is also not stable per client (`198.51.100.82` and
+`198.51.100.79` were both observed for the same source within a minute), so it is not usable
 as an identity even incidentally.
 
 This is out of scope for this change and should be raised separately. It is also the reason
@@ -330,3 +330,28 @@ redis-cli DEL rl:auth:<hash>                 # clear
 
 The identity hash is on every rate-limit log line, so the record can be found from the logs
 without reversing anything.
+
+
+## Post-review hardening (round 4)
+
+Two changes from the security review that tighten the design above:
+
+**Identity is resolved through a trusted-edge gate, not by trusting `CF-Connecting-IP`
+outright.** The original "CF-Connecting-IP first" ordering was forgeable on the direct-to-
+gateway path (the residual gap the doc itself noted): every input is attacker-supplied there,
+so a rotated `CF-Connecting-IP` bypassed the ladder and a pinned one could lock out a victim,
+including the CI fleet. The resolver now believes a forwarded header only when the RIGHTMOST
+`X-Forwarded-For` entry — the address the gateway appends from its own TCP peer, which a caller
+cannot move — falls inside a configured trusted-proxy range (`SLIPPY_TRUSTED_PROXY_CIDRS`).
+Off that path only the rightmost entry is used. Every candidate is validated with
+`net.ParseIP`, and an unattributable request is skipped rather than hashed to a single shared
+`identityKey("")` bucket. This narrows but does not eliminate the "restrict the gateway LB to
+the edge" recommendation: with no trusted CIDRs configured the limiter is safe but coarse,
+attributing edge traffic by the edge address.
+
+**`X-RateLimit-*` headers are emitted only on the `429`, never on `401`/`403`.** Emitting them
+on a credential rejection was an enforcement-state oracle: the header signature differed by
+whether the limiter was enabled, disabled, or erroring, telling an unauthenticated caller when
+it was safe to flood. On a `429` enforcement is self-evident, so the full family plus
+`Retry-After` there discloses nothing new; a `401`/`403` is now byte-identical in every limiter
+state.

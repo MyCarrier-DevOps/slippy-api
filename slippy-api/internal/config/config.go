@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -80,6 +81,39 @@ type Config struct {
 	// is a property of the deployment topology and the value most likely to need changing
 	// if a proxy is added or removed in front.
 	XFFDepth int
+
+	// TrustedProxies are the edge ranges whose forwarded headers the rate limiter may
+	// believe. Only when a request's gateway-appended (rightmost) hop falls inside one of
+	// these is CF-Connecting-IP / a depth-indexed XFF entry trusted as the client; off that
+	// path only the unforgeable rightmost hop is used. Empty is safe but coarse — see the
+	// middleware. Parsed from SLIPPY_TRUSTED_PROXY_CIDRS (comma-separated CIDRs).
+	TrustedProxies []*net.IPNet
+}
+
+// parseTrustedProxies parses a comma-separated CIDR list into networks.
+//
+// These are the edge ranges whose forwarded headers the rate limiter may believe. Parsed at
+// boot so a malformed entry fails loudly here rather than silently disabling per-client
+// attribution at request time.
+func parseTrustedProxies(raw string) ([]*net.IPNet, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	var out []*net.IPNet
+	for part := range strings.SplitSeq(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		_, cidr, err := net.ParseCIDR(part)
+		if err != nil {
+			// The offending token is operator-supplied network config, not a credential, so
+			// naming it is safe and saves a round of guessing which entry was wrong.
+			return nil, fmt.Errorf("SLIPPY_TRUSTED_PROXY_CIDRS entry %q is not a valid CIDR", part)
+		}
+		out = append(out, cidr)
+	}
+	return out, nil
 }
 
 // Load reads configuration from environment variables.
@@ -207,6 +241,13 @@ func Load() (*Config, error) {
 		}
 		cfg.XFFDepth = depth
 	}
+
+	// Optional: SLIPPY_TRUSTED_PROXY_CIDRS
+	proxies, err := parseTrustedProxies(os.Getenv("SLIPPY_TRUSTED_PROXY_CIDRS"))
+	if err != nil {
+		return nil, err
+	}
+	cfg.TrustedProxies = proxies
 
 	// Required: SLIPPY_WRITE_API_KEY
 	cfg.WriteAPIKey = os.Getenv("SLIPPY_WRITE_API_KEY")
