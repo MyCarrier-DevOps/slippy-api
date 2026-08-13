@@ -83,6 +83,13 @@ func Init(ctx context.Context) (Shutdown, error) {
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithBatcher(traceExp),
 		sdktrace.WithResource(res),
+		// Sample locally rather than inheriting the caller's decision. The default is
+		// ParentBased(AlwaysSample), whose remote-parent-not-sampled branch is NeverSample —
+		// so any caller can send `traceparent: ...-00` and erase every span for that request,
+		// including the otelhttp server span that carries client address and user agent. For
+		// an auth-bearing control-plane API the audit trail must not be caller-controlled,
+		// and the request volume here is low enough that head sampling costs nothing.
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
 	)
 
 	// --- Metric provider ---

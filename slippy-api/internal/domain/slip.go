@@ -3,6 +3,7 @@ package domain
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
 )
@@ -64,8 +65,60 @@ type SlipReader interface {
 	FindByCommits(ctx context.Context, repository string, commits []string) (*Slip, string, error)
 
 	// FindAllByCommits finds all slips matching any commit in the ordered list.
-	FindAllByCommits(ctx context.Context, repository string, commits []string) ([]SlipWithCommit, error)
+	FindAllByCommits(ctx context.Context, repository string, commits []string) (FindAllResult, error)
 }
+
+// FindAllResult is the outcome of a FindAllByCommits lookup.
+//
+// Truncated reports one specific shortfall: the ancestry fallback hit its resolution cap
+// before covering every requested commit, so Slips may omit slips the caller asked about. It
+// is a field rather than an error because the partial answer is still worth returning — for
+// the single-lineage caller the dropped tail is entirely redundant, since resolution walks
+// backwards from each ref — but an operation that promises to find *all* matches must not
+// return a short answer that reads as a complete one.
+//
+// What Truncated does NOT cover, and what `false` therefore does NOT guarantee: the direct
+// store lookup matches commits by exact SHA and FindAllByCommits short-circuits the moment it
+// returns any row, skipping ancestry for the rest of the batch. So a mixed-lineage batch —
+// commit A with a direct slip, commit B reachable only through ancestry — returns just A's
+// slip with Truncated=false. `false` means "the ancestry cap did not bite", not "every
+// requested commit was exhaustively resolved". Callers must not read it as the latter: a
+// consumer treating a missing commit as "no slip yet" could create a second slip for one that
+// already has an ancestry-reachable one, the phantom-slip condition the dedup lock exists to
+// prevent, by a path the lock cannot observe.
+//
+// Making `false` a true completeness guarantee would mean resolving ancestry for the commits
+// the direct lookup did not match, rather than short-circuiting on the first hit — a
+// behavioural change with fan-out implications, tracked as a follow-up.
+type FindAllResult struct {
+	Slips     []SlipWithCommit
+	Truncated bool
+}
+
+// TruncatedSearchError qualifies a not-found produced without examining every commit the
+// caller supplied.
+//
+// FindByCommits shares FindAllByCommits' 256-resolution cap, but has no result struct to
+// carry a flag — it returns (slip, matchedCommit, error). A bare ErrSlipNotFound there
+// renders as a plain 404, which reads as "no slip exists for any of these commits" when the
+// truth is "none of the first N; the rest were never looked at". The distinction matters
+// beyond tidiness: a consumer treating 404 as "no slip yet" may create a second slip for a
+// commit that already has one — the phantom-slip condition the Redis dedup lock exists to
+// prevent, reached by a path the lock cannot see, because the lock keys on repo:sha for the
+// creating request and cannot know a lookup was silently shortened.
+//
+// It unwraps to slippy.ErrSlipNotFound, so every existing errors.Is check and the 404
+// mapping keep working unchanged; only callers that ask for the detail see it.
+type TruncatedSearchError struct {
+	Resolved  int // commits actually examined
+	Requested int // commits the caller supplied
+}
+
+func (e *TruncatedSearchError) Error() string {
+	return fmt.Sprintf("no slip found in the first %d of %d commits", e.Resolved, e.Requested)
+}
+
+func (e *TruncatedSearchError) Unwrap() error { return slippy.ErrSlipNotFound }
 
 // Invalidator is a post-write hook that removes cached entries for a slip.
 // Implementations must treat failures as non-fatal and log rather than propagate.

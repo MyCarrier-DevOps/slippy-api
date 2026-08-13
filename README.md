@@ -45,7 +45,21 @@ Every endpoint requires a `Bearer` token in the `Authorization` header except th
 
 Authentication is **fail-closed**: the middleware rejects any operation that requires no credential unless its route appears in the `publicRoutes` allowlist in [`internal/middleware/auth.go`](slippy-api/internal/middleware/auth.go). A route that forgets its `Security` declaration returns `401` rather than shipping world-readable, and the route audit in `main_test.go` fails the build for it.
 
-The same "secured or allowlisted" check runs again inside `buildHandler` at startup, which returns an error rather than a handler. A test can be bypassed — the branch ruleset requires the unit-test check but carries bypass actors with `bypass_mode: always` — and the failure it guards against is severe and simultaneous: an in-place path rename that leaves `publicRoutes` pointing at the old path returns `401` to liveness *and* readiness probes on every replica at once. Refusing to boot turns that into a rollout that never completes, leaving the previous ReplicaSet serving.
+`buildHandler` re-checks the policy at startup and returns an error rather than a handler, so the process refuses to boot. A test can be bypassed — the branch ruleset requires the unit-test check but carries bypass actors with `bypass_mode: always` — so anything whose failure the middleware cannot mitigate at request time is asserted here too:
+
+| Condition | Consequence if it shipped |
+|---|---|
+| Requires no credential and not allowlisted | `401` for every caller — an in-place path rename that left `publicRoutes` on the old path |
+| Allowlisted **but** requires a credential | Also `401` for every caller — the allowlist entry goes dead, because the middleware consults it only for operations that require no credential |
+| Registered but absent from `operationTiers` | Never tier-checked at all — one author, one lapse, and a mutation declaring `apiKey` is served to the read key |
+| Public-tier in `operationTiers` but demands a credential | The probe outage above with the path renamed *and* the declaration added; each half alone is caught, the combination is not |
+| Not public-tier in `operationTiers` but requires no credential | An **open route** — allowlisted, so it serves to anyone while the inventory says a key is required. The mirror of the row above, and the only one of the pair that opens rather than closes |
+| Write-tier in `operationTiers` but served at the read tier | Silent privilege escalation — the route keeps working while `SLIPPY_API_KEY` gains a mutation |
+| `operationTiers` row with a live gate naming no registered operation | A stale row, which silently narrows every check read against the table |
+
+Rows 1, 2 and 4 are the same total, simultaneous probe outage (kubelet liveness *and* readiness, every replica) arriving by different routes; refusing to boot turns any of them into a rollout that never completes. Rows 3 and 5 are the opposite shape — the route keeps working and nothing surfaces at all while the read key gains a mutation — which is why they cannot be left to runtime. All classes are reported together rather than one per boot.
+
+Each `operationTiers` row carries a **gate** naming the optional collaborator whose presence registers it, and the stale-row check runs only for rows whose gate is up. That is what lets the reverse direction be enforced at startup without breaking the supported degraded-ClickHouse boot, where five collaborators are nil and their routes are intentionally absent. Read-tier declarations stay CI-only: a mistake there costs one route a `403` rather than the fleet.
 
 Two limits on the audit are worth knowing, and they differ in kind. It walks the OpenAPI document built by a fully-wired test fixture, so it does not **build-check** operations marked `Hidden` (huma omits those from the document) or routes behind a config branch the fixture does not enable — but those are still subject to the middleware at runtime, so an omission there fails closed with a `401`, not open. Only the six adapter routes above genuinely **bypass** auth. `TestBuildHandler_CredentialFreeAdapterRoutes` proves those six are served; `TestBuildHandler_CredentialFreeSurfaceIsClosed` proves there are only six, by set-differencing the routes actually registered on the mux against the documented operations — so a huma upgrade adding a seventh, or a `Hidden` route, fails the build rather than widening the surface silently.
 
@@ -69,7 +83,7 @@ Two limits on the audit are worth knowing, and they differ in kind. It walks the
 
 ### Write Endpoints
 
-Write endpoints are available on the `/v1` prefix only and require `SLIPPY_WRITE_API_KEY` to be configured. When that variable is absent the server starts in read-only mode and these routes are not registered.
+Write endpoints are available on the `/v1` prefix only and require `SLIPPY_WRITE_API_KEY`. That variable is **required** — `config.Load` refuses to start without it, so unsetting it takes the whole service down, read endpoints included. To contain a leaked write key without an outage, set it to a fresh random value nobody holds: the service boots, reads keep serving, and the leaked key gets `403` on every mutation.
 
 | Method | Path | Description |
 |---|---|---|
@@ -298,7 +312,8 @@ All configuration is via environment variables. No config files, no Vault.
 
 | Variable | Description | Example |
 |---|---|---|
-| `SLIPPY_API_KEY` | Bearer token for API authentication | `my-secret-key` |
+| `SLIPPY_API_KEY` | Bearer token for read endpoints; min 60 chars, must differ from the write key | generate with `openssl rand -hex 32` |
+| `SLIPPY_WRITE_API_KEY` | Bearer token for write endpoints; min 60 chars, must differ from the read key | generate with `openssl rand -hex 32` |
 | `SLIPPY_PIPELINE_CONFIG` | Pipeline configuration (file path or inline JSON) | `/config/pipeline.json` |
 | `SLIPPY_GITHUB_APP_ID` | GitHub App ID for ancestry resolution | `2645252` |
 | `SLIPPY_GITHUB_APP_PRIVATE_KEY` | PEM-encoded private key or file path | `/config/github.pem` |
@@ -317,14 +332,16 @@ All configuration is via environment variables. No config files, no Vault.
 | `CLICKHOUSE_PORT` | ClickHouse port | `9440` |
 | `CLICKHOUSE_SKIP_VERIFY` | Skip TLS verification | `false` |
 | `K8S_NAMESPACE` | Kubernetes namespace; `-test` or `-dev` suffix selects `ci_test` database | _(ci)_ |
-| `SLIPPY_WRITE_API_KEY` | Bearer token for write endpoints; enables write mode when set | _(disabled, read-only)_ |
 | `SLIPPY_SKIP_MIGRATIONS` | Skip ClickHouse schema migrations at startup | `true` |
 | `DRAGONFLY_HOST` | Dragonfly/Redis host (enables caching when set) | _(disabled)_ |
 | `DRAGONFLY_PORT` | Dragonfly/Redis port | `6379` |
 | `DRAGONFLY_PASSWORD` | Dragonfly/Redis password | _(empty)_ |
 | `CACHE_TTL` | Cache entry time-to-live (Go duration) | `10m` |
+| `SLIPPY_RATE_LIMIT_ENABLED` | Per-identity Fibonacci backoff on failed authentication | `false` |
+| `SLIPPY_XFF_DEPTH` | How far from the **right** of `X-Forwarded-For` the client sits | `2` |
+| `SLIPPY_TRUSTED_PROXY_CIDRS` | Edge ranges (comma-separated CIDRs) whose forwarded headers the limiter may trust | _(none)_ |
 
-> Write endpoints are conditionally registered — when `SLIPPY_WRITE_API_KEY` is absent the server starts in read-only mode and no write routes are exposed.
+> `SLIPPY_WRITE_API_KEY` is required at startup. `buildHandler` does support a writer-less handler (write routes are simply not registered), but `run()` always constructs the writer — so read-only operation is a code path that exists and is tested, not a supported deployment mode today.
 
 > Caching is automatically enabled when `DRAGONFLY_HOST` is set. If the Dragonfly ping fails at startup, caching is disabled gracefully and the API falls through to ClickHouse directly.
 
@@ -458,24 +475,42 @@ make fmt
 ```bash
 cd slippy-api
 docker build -t slippy-api .
+
+# Both keys are required, must be at least 60 characters, and must differ from each
+# other — config.Load refuses to start otherwise. `openssl rand -hex 32` gives 64.
+export SLIPPY_API_KEY="$(openssl rand -hex 32)"
+export SLIPPY_WRITE_API_KEY="$(openssl rand -hex 32)"
+
+# -e NAME with no value passes the variable through from the environment, so the
+# credentials stay out of the command line, the shell history and the process list.
 docker run -p 8080:8080 \
-  -e SLIPPY_API_KEY=my-key \
+  -e SLIPPY_API_KEY \
+  -e SLIPPY_WRITE_API_KEY \
   -e CLICKHOUSE_HOSTNAME=clickhouse.example.com \
   -e CLICKHOUSE_USERNAME=slippy \
-  -e CLICKHOUSE_PASSWORD=secret \
+  -e CLICKHOUSE_PASSWORD \
   -e CLICKHOUSE_DATABASE=ci \
   slippy-api
 ```
 
 ## Key Design Decisions
 
-- **Conditional write mode**: Write endpoints are opt-in via `SLIPPY_WRITE_API_KEY`. When that variable is set, `SlipWriterAdapter` (wrapping `*slippy.Client`, not the raw `SlipStore`) is wired up and the 5 write routes are registered on `/v1` only. When absent, the server runs purely read-only and write routes are never mounted. Using `*slippy.Client` rather than `SlipStore` directly means ancestry resolution, atomic step+history writes, and pipeline config lookups are handled by the library — not reimplemented here.
+- **Conditional write mode (partial)**: `buildHandler` registers the 8 write routes only when a `SlipWriterAdapter` is supplied, and the `gateWrites` machinery already tolerates their absence — so a read-only deployment is one env switch away. `run()` does not expose that switch today, and `config.Load` requires `SLIPPY_WRITE_API_KEY`, so every running instance currently serves writes. Splitting the public read replica from an internal write replica is tracked as a follow-up. Using `*slippy.Client` rather than `SlipStore` directly means ancestry resolution, atomic step+history writes, and pipeline config lookups are handled by the library — not reimplemented here.
 - **Ancestry resolution**: `SlipResolverAdapter` delegates all commit-based lookups to `slippy.Client.ResolveSlip()`. When a direct ClickHouse lookup returns `ErrSlipNotFound`, the adapter walks backwards through commit history via the GitHub GraphQL API to find an ancestor with a routing slip.
 - **Cursor pagination with composite cursor**: The `/logs` endpoint uses a `timestamp|cityHash64` composite cursor to guarantee no data loss when multiple rows share the same nanosecond timestamp. Uses `LIMIT n+1` peek to determine next-page existence without a separate COUNT query.
 - **huma v2 + humago**: Code-first API framework with auto-generated OpenAPI 3.1 spec. Uses Go's standard library `net/http.ServeMux` via the humago adapter — no Gin, no Echo.
+- **Both API keys must be at least 60 characters**, enforced at startup. They are compared against a caller-supplied bearer token and nothing in the service rate-limits, so a short key is brute-forceable online — `SLIPPY_API_KEY=x` previously booted. The floor is set against the deployed values (read 62, write 64) so it clears production with margin.
+- **Failed authentication backs off per client, with a Fibonacci ladder.** Two failures are free; after that a caller is refused for `10s x fib(n-2)`, capped at a 7-day lockout — roughly 25 guesses over two weeks before an address is spent. Only *failures* accrue, so legitimate CI traffic never enters the ladder however much of it there is; a per-key quota would have throttled the whole fleet, since the read key is shared by every onboarded repo. Attempts made while already locked out **count and extend**, so hammering a lockout makes it worse rather than passing the time, and a correct key clears the record immediately. Counters live in Dragonfly because the service runs more than one replica, and the limiter fails **open**: a cache outage disables backoff rather than the API, while auth itself still fails closed. Disabled by default — set `SLIPPY_RATE_LIMIT_ENABLED=true` after confirming the resolved client address. Recovery for a legitimately throttled caller is operational, not temporal: delete the record (`redis-cli DEL rl:auth:<hash>`; the hash is on every rate-limit log line).
+
+- **The client address is resolved from a forgeable header only when the request provably transited a trusted edge.** The one unforgeable anchor is the RIGHTMOST `X-Forwarded-For` entry — the gateway appends its own TCP peer there, so a caller can never move it. When that anchor falls inside `SLIPPY_TRUSTED_PROXY_CIDRS` (the Cloudflare edge), the request came through Cloudflare, which sets `CF-Connecting-IP` to the real client and `403`s any attempt to forge it — so that header (or a right-indexed `X-Forwarded-For` entry) is the client. Off that path — an attacker reaching the gateway directly — only the rightmost entry is believed, so a forged `CF-Connecting-IP` cannot bypass the ladder or pin a victim. Every candidate is validated with `net.ParseIP`; an unattributable request is skipped, never collapsed onto a single shared bucket. With no trusted CIDRs configured the limiter still works but attributes edge traffic coarsely by the edge address — set `SLIPPY_TRUSTED_PROXY_CIDRS` to your edge ranges for per-client attribution. `X-Envoy-External-Address` is never used: it carries the edge address, not the client.
+
+- **The two API keys must differ, enforced at startup**: `config.Load` refuses to return a config where `SLIPPY_API_KEY` equals `SLIPPY_WRITE_API_KEY`. Identical values make the tier split inert and the collapse is invisible at runtime — the middleware's tiering evaluates correctly and simply returns the same answer for both keys, so no request is rejected and nothing is logged. The two populations are meant to be disjoint (the read key is fanned out to service repos via the GitHub Actions templates in `admin/`; the write key belongs to in-cluster pipeline components), so collapsing them hands the Actions-runner population write access to the slip state machine. A pod that refuses to start is recoverable; a silently collapsed authorization boundary is not.
+- **Write inputs are bounded in the contract**: every write DTO field carries a `maxLength` (and `components` a `maxItems`), published in the OpenAPI document so callers and the generated client learn the limits from the contract. This is not only hygiene — `reason` and `component_name` are appended to the slip's `state_history` jsonb, which is rewritten whole on each append, so an unbounded field is unbounded quadratic growth in the document the platform treats as the authority on step completion. `promoted_to` and `superseded_by` additionally carry the `correlation_id` character set, which they previously lacked despite *being* correlation IDs.
+- **Auth decisions are attributable**: every accept and reject records a `key_fingerprint` — a truncated SHA-256 of the presented token — on both the log line and the auth span. With one shared bearer per tier there is otherwise nothing distinguishing a leaked key from the pipeline's own traffic, and a rotation is invisible. The fingerprint separates key populations without ever recording the credential.
+- **Security headers on every response**: a `securityHeaders` wrapper sits *outside* the mux, so it also covers the six adapter-registered spec and docs routes that never enter huma's middleware chain — precisely the routes served without a credential. Sets `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`, `Referrer-Policy: no-referrer`, and a `default-src 'none'; frame-ancestors 'none'` CSP. `/docs` overrides the CSP with huma's own, which pins `script-src`/`style-src` to the Stoplight bundle it loads.
 - **Fail-closed bearer auth with constant-time comparison**: Constant-time token comparison prevents timing attacks. An operation that requires no credential is **rejected with 401** unless its route is on the compile-time `publicRoutes` allowlist — currently `GET /health` and `GET /v1/health`, two entries for one handler because the `("", "/v1")` fan-out group registers the probe on both prefixes, so adding a group prefix means adding an entry. The allowlist is keyed on `"METHOD /path"`, the same route identity `net/http.ServeMux` registers, rather than on operation ID: an ID is a nickname that can outlive its route (a rename strands it), and a stranded entry would make any later operation adopting that ID public. It is deliberately not configurable at runtime, so the public surface cannot be widened by an environment variable. `TestBuildHandler_EveryOperationIsSecuredOrAllowlisted` walks the generated OpenAPI document in both directions — no route may be unsecured-and-unallowlisted, and no allowlist entry may be stale.
 - **Security declarations must be enforceable, not merely present**: OpenAPI treats an empty security requirement (`{}`) as *optional* auth, so the middleware rejects `Security: [{}]` exactly as it rejects `Security: []` — otherwise "security optional" would route around the fail-closed default into the read tier. Tiering also fails closed: an operation is served at the read tier only when every requirement names exactly `apiKey`, so an unrecognised scheme name (`writeAPIKey`, say) escalates to the write key instead of silently accepting a read key on a mutation. The route audit pins the document's scheme set against `middleware.KnownSecuritySchemes()` so adding a third scheme forces a look at the middleware.
-- **Every operation declares its access tier in one table**: `operationTiers` in `main_test.go` names the tier for all 28 audited operations and is checked in both directions. The inverted tiering above only fails closed for *unrecognised* schemes — `apiKey` is recognised, so a mutating route that declares `apiKeySecurity` is served at the read tier by design, and every other audit assertion passes. That is the likelier mistake, since the eight write registrations are hand-written and `apiKeySecurity` is exported from a sibling file in the same package. The table makes the read tier explicit too, which keeps it self-maintaining and catches the opposite error — an extra requirement added to a working read route turns it `403`. Tiers are never inferred from the HTTP method: `find-by-commits` and `find-all-by-commits` are read-tier `POST`s.
+- **Every operation declares its access tier in one table**: `operationTiers` in `main.go` names the tier for all 28 operations and is checked in both directions. It lives in production code rather than the test file because `verifyRouteSecurity` consults it at startup, not only the audit. The inverted tiering above only fails closed for *unrecognised* schemes — `apiKey` is recognised, so a mutating route that declares `apiKeySecurity` is served at the read tier by design, and every other audit assertion passes. That is the likelier mistake, since the eight write registrations are hand-written and `apiKeySecurity` is exported from a sibling file in the same package. The table makes the read tier explicit too, which keeps it self-maintaining and catches the opposite error — an extra requirement added to a working read route turns it `403`. Tiers are never inferred from the HTTP method: `find-by-commits` and `find-all-by-commits` are read-tier `POST`s.
 - **Cache decorator pattern**: `CachedSlipReader` wraps any `SlipReader` transparently. Caching is opt-in via environment variables and degrades gracefully if Dragonfly is unavailable.
 - **OpenTelemetry**: Full SDK initialisation with traces and metrics via OTLP (gRPC or HTTP). Every layer creates properly-parented spans that waterfall correctly in a trace viewer:
   - **HTTP** — `otelhttp.NewHandler` creates the root request span

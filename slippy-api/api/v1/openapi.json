@@ -15,6 +15,8 @@
           },
           "superseded_by": {
             "description": "Correlation ID of the newer slip that supersedes this one",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]+$",
             "type": "string"
           }
         },
@@ -308,10 +310,12 @@
         "properties": {
           "dockerfile_path": {
             "description": "Path to Dockerfile",
+            "maxLength": 1024,
             "type": "string"
           },
           "name": {
             "description": "Component identifier",
+            "maxLength": 256,
             "type": "string"
           }
         },
@@ -370,14 +374,17 @@
           },
           "branch": {
             "description": "Git branch name",
+            "maxLength": 512,
             "type": "string"
           },
           "commit_message": {
             "description": "Commit message (enables squash merge PR-based ancestry)",
+            "maxLength": 16384,
             "type": "string"
           },
           "commit_sha": {
-            "description": "Full git commit SHA",
+            "description": "Git commit SHA",
+            "maxLength": 64,
             "type": "string"
           },
           "components": {
@@ -385,6 +392,7 @@
             "items": {
               "$ref": "#/components/schemas/ComponentDefinitionInput"
             },
+            "maxItems": 100,
             "type": [
               "array",
               "null"
@@ -396,6 +404,7 @@
           },
           "repository": {
             "description": "Full repository name (owner/repo)",
+            "maxLength": 256,
             "type": "string"
           }
         },
@@ -536,10 +545,12 @@
           },
           "component_name": {
             "description": "Component name (required for aggregate steps, empty for pipeline steps)",
+            "maxLength": 256,
             "type": "string"
           },
           "reason": {
             "description": "Failure reason",
+            "maxLength": 4096,
             "type": "string"
           }
         },
@@ -598,6 +609,7 @@
             "items": {
               "type": "string"
             },
+            "maxItems": 10000,
             "type": [
               "array",
               "null"
@@ -605,6 +617,7 @@
           },
           "repository": {
             "description": "Full repository name (owner/repo)",
+            "maxLength": 256,
             "type": "string"
           }
         },
@@ -890,6 +903,8 @@
           },
           "promoted_to": {
             "description": "Correlation ID of the new slip on the target branch",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]+$",
             "type": "string"
           }
         },
@@ -912,6 +927,7 @@
           },
           "image_tag": {
             "description": "Container image tag (e.g. 26.09.aef1234)",
+            "maxLength": 256,
             "type": "string"
           }
         },
@@ -934,10 +950,12 @@
           },
           "component_name": {
             "description": "Component name (required for aggregate steps, empty for pipeline steps)",
+            "maxLength": 256,
             "type": "string"
           },
           "reason": {
             "description": "Skip reason",
+            "maxLength": 4096,
             "type": "string"
           }
         },
@@ -1107,6 +1125,7 @@
           },
           "component_name": {
             "description": "Component name (required for aggregate steps, empty for pipeline steps)",
+            "maxLength": 256,
             "type": "string"
           }
         },
@@ -1516,7 +1535,15 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-Slippy-Results-Truncated": {
+                "schema": {
+                  "description": "true when the commit list exceeded the ancestry resolution cap, so the result may omit matching slips",
+                  "type": "boolean"
+                }
+              }
+            }
           },
           "default": {
             "content": {
@@ -2364,7 +2391,15 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-Slippy-Results-Truncated": {
+                "schema": {
+                  "description": "true when the commit list exceeded the ancestry resolution cap, so the result may omit matching slips",
+                  "type": "boolean"
+                }
+              }
+            }
           },
           "default": {
             "content": {

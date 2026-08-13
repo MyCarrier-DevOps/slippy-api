@@ -42,8 +42,8 @@ func (m *buildInfoMockReader) FindAllByCommits(
 	_ context.Context,
 	_ string,
 	_ []string,
-) ([]domain.SlipWithCommit, error) {
-	return nil, errors.New("not implemented")
+) (domain.FindAllResult, error) {
+	return domain.FindAllResult{}, errors.New("not implemented")
 }
 
 // --- Helper to build a test slip ---

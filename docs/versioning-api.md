@@ -42,7 +42,18 @@ Both sets of routes use the same handlers. The legacy routes exist solely for ba
 - Adding a new endpoint
 - Adding a new optional query parameter
 - Adding a new optional request body field
+- Adding a response header
 - Returning additional enum values (if consumers are tolerant)
+
+Recorded instance:
+
+- **DEVOPS-217 review follow-up** — `POST /v1/slips/find-all-by-commits` now carries `X-Slippy-Results-Truncated` on every `200`, valued `true` when the ancestry fallback hit its 256-resolution cap before covering every requested commit and `false` otherwise. huma emits boolean headers unconditionally, and that is the better contract: a caller can distinguish "the ancestry cap was hit" (`true`) from "a build too old to report it" (header absent). The response body is byte-identical either way, so no consumer needs to change. Previously the shortfall went only to the service's own log, so a capped answer and an uncapped one were indistinguishable behind a `200` and a nil error.
+
+  `false` narrowly means "the ancestry cap did not bite" — **not** "every requested commit was exhaustively resolved". The direct Postgres lookup matches commits by exact SHA and the handler short-circuits on the first hit, skipping ancestry for the rest of a batch, so a mixed-lineage batch can return `false` while omitting a commit whose slip is reachable only through ancestry. Callers must not read `false` as a completeness guarantee. Making it one is a behavioural change (resolve ancestry for the unmatched commits rather than short-circuit) tracked as a follow-up.
+
+- **DEVOPS-217 review follow-up** — `POST /v1/slips/find-by-commits` carries the same `X-Slippy-Results-Truncated: true` header on its `404` when the search was capped before every commit was examined, and its `detail` names the counts (`no slip found in the first 256 of 300 commits`). The status is unchanged and the header is absent on an exhaustive miss, so nothing breaks; what changes is that a partial search no longer presents as an authoritative "no slip exists for any of these commits". That distinction is load-bearing rather than cosmetic — a consumer reading `404` as "no slip yet" can create a second slip for a commit that already has one, which is the phantom-slip condition the Redis dedup lock exists to prevent, arriving by a path the lock cannot observe.
+
+  Both flags are safe to expose **only while `maxAncestryResolutions` stays a compile-time constant**: the value is a pure function of `len(commits)` and a literal the caller can read in this repository. If that cap ever becomes config-driven, per-key, or derived from a rate-limit budget, the header starts disclosing server-side state and needs re-review.
 
 ### Security-Corrective Changes (stay in current version)
 
@@ -60,6 +71,23 @@ What a security-corrective change requires instead:
 Recorded instances:
 
 - **DEVOPS-217** — API-key auth changed from opt-in per operation to fail-closed, and `GET /v1/admin/schema-version` (unauthenticated) was removed in favour of `GET /v1/diagnostics/clickhouse-schema-version` (read key required). Both the retirement and the added authentication land in `/v1` under this carve-out.
+- **DEVOPS-217 follow-up** — `maxItems: 10000` added to `commits` on `POST /v1/slips/find-by-commits` and `/find-all-by-commits`, so a request above that now returns `422` where it previously returned `200`. That matches "Changing error response codes for existing conditions" in the breaking list, and lands in `/v1` under this carve-out: the field was the input to an unbounded per-commit GitHub ancestry walk, and one 1 MiB request measured 262,133 outbound calls — more than the App's hourly budget, which fails ancestry resolution platform-wide.
+
+  Caller-visible effect: a request carrying more than 10,000 commits is rejected with `422`; at or below that nothing changes. The only production consumer is `slippy-find`, which sends `1 + (parents x depth)` — 51 at its default depth of 25, 101 at the `--depth 50` in its own help text — so the limit is ~100x the documented worst case and the `422` is unreachable in practice — it is a resource bound on the `unnest` array, not a behavioural limit. The generated `slippy-client` is unaffected, because oapi-codegen emits no validation for `maxItems`; only the published spec gains the constraint.
+
+- **DEVOPS-217 hardening** — `maxLength` added across the write DTOs (`repository` 256, `branch` 512, `commit_sha` 64, `commit_message` 16384, `component_name` 256, `reason` 4096, `image_tag` 256, component `name` 256 / `dockerfile_path` 1024, `components` `maxItems` 100), and `maxLength`/`pattern` added to `promoted_to` and `superseded_by`. Requests exceeding a limit now return `422`.
+
+  Every bound is far above real traffic; the point is that these fields previously had none, and `reason` and `component_name` are appended to the `state_history` jsonb that the platform treats as the authority on step completion — a document rewritten whole on every append, so an unbounded field is unbounded quadratic growth.
+
+- **DEVOPS-217 review follow-up** — `maxLength: 256` added to `repository` on `POST /v1/slips/find-by-commits` and `/find-all-by-commits`. The same logical field already carried that bound on `CreateSlipInput`; the read DTO had none, so the two contracts disagreed about a value that reaches both Postgres and the GitHub GraphQL client.
+
+  Caller-visible effect: a `repository` longer than 256 characters now returns `422` where it previously returned `200`. GitHub itself caps owner at 39 characters and repo at 100, so no GitHub-backed caller can reach the limit — this is a floor for non-GitHub callers and an agreement between the two DTOs, not a behavioural change. The generated `slippy-client` is unchanged; only the published spec gains the constraint.
+
+  The `commits` *elements* were deliberately left unbounded. Each is an arbitrary git ref rather than a SHA — `goLibMyCarrier/slippy`'s `resolve.go` documents `HEAD`, `main` and branch names — and real branch names run past 64 characters, so transferring the write path's SHA-shaped bound would reject legitimate input.
+
+  `promoted_to` and `superseded_by` are the sharper fix: they *are* correlation IDs, naming the slip that supersedes this one, and received none of the validation applied to `correlation_id` itself. They now carry the same character set.
+
+  `correlation_id` was deliberately **left untagged** — `validateCorrelationIDFormat` already owns emptiness, length and character set for it and returns `400` with a precise message. Tagging it would have duplicated the rule and moved an existing `400` to a `422` for no gain.
 
 ## How to Add a New Major Version
 

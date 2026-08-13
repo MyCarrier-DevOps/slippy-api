@@ -217,8 +217,9 @@ func (r storeReaderAdapter) FindByCommits(
 }
 func (r storeReaderAdapter) FindAllByCommits(
 	ctx context.Context, repo string, commits []string,
-) ([]domain.SlipWithCommit, error) {
-	return r.store.FindAllByCommits(ctx, repo, commits)
+) (domain.FindAllResult, error) {
+	slips, err := r.store.FindAllByCommits(ctx, repo, commits)
+	return domain.FindAllResult{Slips: slips}, err
 }
 
 // buildDedupWriteServer wires the real write stack: SlipWriteHandler →

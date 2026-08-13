@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
@@ -13,8 +14,10 @@ import (
 
 	"github.com/MyCarrier-DevOps/slippy-api/internal/telemetry"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 // --- Auth Middleware Tracing Tests ---
@@ -38,6 +41,65 @@ func setupTracingTestAPI(apiKey string) http.Handler {
 	})
 
 	return mux
+}
+
+// setupWriteTierTestAPI registers a write-tier operation so the write arm's refusals can
+// be told apart.
+func setupWriteTierTestAPI(readKey, writeKey string) http.Handler {
+	mux := http.NewServeMux()
+	api := humago.New(mux, huma.DefaultConfig("Test", "1.0.0"))
+	api.UseMiddleware(NewAPIKeyAuth(readKey, writeKey))
+
+	huma.Register(api, huma.Operation{
+		OperationID: "write-op",
+		Method:      http.MethodPost,
+		Path:        "/mutate",
+		Security:    []map[string][]string{{"writeApiKey": {}}},
+	}, func(_ context.Context, _ *struct{}) (*struct{ Body string }, error) {
+		return &struct{ Body string }{Body: "ok"}, nil
+	})
+
+	return mux
+}
+
+// A valid read key presented at the write tier and an unrecognised string are refused
+// identically on the wire — same 403, same body, no challenge — so the only place the two
+// can be told apart is the audit trail. Without the distinction a leaked read key probing
+// mutations is indistinguishable from ordinary garbage, which is the attribution the tier
+// split exists to provide.
+func TestAuth_ReadKeyAtWriteTier_IsAttributedAsWrongTier(t *testing.T) {
+	recorder, cleanup := telemetry.SetupTestTracing()
+	defer cleanup()
+
+	handler := setupWriteTierTestAPI("read-key", "write-key")
+
+	for _, tc := range []struct {
+		name, token, wantResult string
+	}{
+		{"valid read key at write tier", "read-key", "wrong_tier"},
+		{"unrecognised token", "total-garbage", "invalid_token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/mutate", nil)
+			req.Header.Set("Authorization", "Bearer "+tc.token)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			// The caller learns nothing either way — that part is deliberate.
+			assert.Equal(t, http.StatusForbidden, rec.Code)
+			assert.Empty(t, rec.Header().Get("WWW-Authenticate"))
+
+			var found bool
+			for _, span := range recorder.Ended() {
+				if span.Name() == "auth.validateAPIKey" {
+					found = true
+					assertAuthAttr(t, span.Attributes(), "auth.result", tc.wantResult)
+				}
+			}
+			require.True(t, found, "expected an auth.validateAPIKey span")
+			recorder.Reset()
+		})
+	}
 }
 
 func TestAuth_Success_CreatesSpan(t *testing.T) {
@@ -186,6 +248,68 @@ func TestAuth_NoSecurity_Allowlisted_NoSpan(t *testing.T) {
 		assert.NotContains(t, span.Name(), "auth.",
 			"no auth span should be created for an allowlisted public operation")
 	}
+}
+
+// TestAuth_Span_EndsBeforeHandlerRuns pins the auth span's lifetime to the credential
+// check.
+//
+// The middleware calls next(ctx) to run the rest of the chain, so a `defer span.End()`
+// in the closure body would keep the span open across the handler, the cache and the
+// database — making auth.validateAPIKey's duration the whole request. It is not a parent
+// of that work either (next receives the unmodified huma.Context), so a trace viewer
+// shows a full-width auth bar beside the handler bar, which reads as "auth took 200ms".
+//
+// Two assertions, covering different things. The ordering assertion (auth ends before the
+// handler starts) pins the span lifetime deterministically. The duration bound is not
+// redundant with it: if a remote key lookup were ever added inside authorize(), the auth
+// span could take 500ms and still close before the handler starts — ordering would pass,
+// the bound would catch it. Measured over 500 runs including a saturated-core pass with
+// no failures, and neither `make test` nor CI runs -race, so the bound is not marginal.
+func TestAuth_Span_EndsBeforeHandlerRuns(t *testing.T) {
+	recorder, cleanup := telemetry.SetupTestTracing()
+	defer cleanup()
+
+	mux := http.NewServeMux()
+	cfg := huma.DefaultConfig("Test", "1.0.0")
+	api := humago.New(mux, cfg)
+	api.UseMiddleware(NewAPIKeyAuth("test-key", ""))
+
+	huma.Register(api, huma.Operation{
+		OperationID: "slow-op",
+		Method:      http.MethodGet,
+		Path:        "/slow",
+		Security:    []map[string][]string{{"apiKey": {}}},
+	}, func(ctx context.Context, _ *struct{}) (*struct{ Body string }, error) {
+		_, span := otel.Tracer("test").Start(ctx, "handler.slow")
+		time.Sleep(20 * time.Millisecond)
+		span.End()
+		return &struct{ Body string }{Body: "ok"}, nil
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/slow", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var authSpan, handlerSpan sdktrace.ReadOnlySpan
+	for _, span := range recorder.Ended() {
+		switch span.Name() {
+		case "auth.validateAPIKey":
+			authSpan = span
+		case "handler.slow":
+			handlerSpan = span
+		}
+	}
+	require.NotNil(t, authSpan, "expected an auth.validateAPIKey span")
+	require.NotNil(t, handlerSpan, "expected a handler.slow span")
+
+	assert.False(t, authSpan.EndTime().After(handlerSpan.StartTime()),
+		"auth.validateAPIKey must close before the handler runs; it ended at %s but the handler "+
+			"started at %s, so its duration covers downstream work",
+		authSpan.EndTime(), handlerSpan.StartTime())
+	assert.Less(t, authSpan.EndTime().Sub(authSpan.StartTime()), 10*time.Millisecond,
+		"auth span duration should be the credential check, not the 20ms handler")
 }
 
 // --- Assertion helper ---

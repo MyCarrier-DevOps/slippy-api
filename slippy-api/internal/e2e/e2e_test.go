@@ -84,7 +84,7 @@ func (r *inMemorySlipReader) FindAllByCommits(
 	_ context.Context,
 	repository string,
 	commits []string,
-) ([]domain.SlipWithCommit, error) {
+) (domain.FindAllResult, error) {
 	var results []domain.SlipWithCommit
 	for _, c := range commits {
 		for _, s := range r.slips {
@@ -93,7 +93,7 @@ func (r *inMemorySlipReader) FindAllByCommits(
 			}
 		}
 	}
-	return results, nil
+	return domain.FindAllResult{Slips: results}, nil
 }
 
 // buildTestServer creates a fully-wired HTTP handler with auth, cache, and routes.

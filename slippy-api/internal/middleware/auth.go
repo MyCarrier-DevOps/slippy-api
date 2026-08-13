@@ -1,7 +1,9 @@
 package middleware
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"log/slog"
@@ -19,9 +21,30 @@ import (
 // authTracerName is the instrumentation scope for authentication operations.
 const authTracerName = "slippy-api/auth"
 
+// bearerChallenge is the WWW-Authenticate value on a 401. RFC 9110 §11.6.1 requires the
+// header on every 401 so a client is told which scheme to use rather than guessing.
+const bearerChallenge = `Bearer realm="slippy-api"`
+
+// keyFingerprint returns a short, non-reversible handle for a presented credential.
+//
+// There is one shared bearer per tier, so without this the logs cannot distinguish a
+// leaked key from the pipeline's own traffic, and a rotation is invisible. A truncated
+// SHA-256 gives a stable identifier that separates key populations and makes "which
+// credential was this" answerable — while never recording the credential. Truncation is
+// deliberate: 48 bits is ample to tell a handful of keys apart and useless for recovering
+// one, and recovering a key from the full digest would be no easier than brute-forcing
+// the API directly.
+func keyFingerprint(token string) string {
+	if token == "" {
+		return "-"
+	}
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])[:12]
+}
+
 const (
 	// readAPIKeyScheme names the security scheme served at the read tier. It is the
-	// only scheme name that does not escalate to the write key — see requiresWriteKey.
+	// only scheme name that does not escalate to the write key — see RequiresWriteKey.
 	readAPIKeyScheme = "apiKey"
 	// writeAPIKeyScheme names the security scheme served at the write tier.
 	writeAPIKeyScheme = "writeApiKey"
@@ -59,6 +82,23 @@ var publicRoutes = map[string]struct{}{
 	"GET /v1/health": {},
 }
 
+// AuthOption configures the middleware. Variadic rather than a wider signature so the
+// existing call sites and every test fixture keep working unchanged.
+type AuthOption func(*authConfig)
+
+type authConfig struct {
+	limiter *RateLimiter
+}
+
+// WithRateLimit applies per-identity Fibonacci backoff to failed authentication.
+//
+// Only failures accrue, so legitimate traffic never enters the ladder however much of it
+// there is — which is the property that lets a limiter sit in front of a credential shared
+// by the entire CI fleet without throttling it.
+func WithRateLimit(limiter *RateLimiter) AuthOption {
+	return func(c *authConfig) { c.limiter = limiter }
+}
+
 // NewAPIKeyAuth returns a huma middleware that validates Bearer tokens using a
 // two-key scheme. Operations declaring "apiKey" security accept either the read
 // key or the write key. Operations declaring "writeApiKey" security accept only
@@ -66,12 +106,20 @@ var publicRoutes = map[string]struct{}{
 //
 // Auth is fail-closed: an operation that does not require a credential is rejected
 // with 401 unless its route is allowlisted in publicRoutes.
-func NewAPIKeyAuth(readKey, writeKey string) func(ctx huma.Context, next func(huma.Context)) {
+func NewAPIKeyAuth(readKey, writeKey string, opts ...AuthOption) func(ctx huma.Context, next func(huma.Context)) {
+	cfg := &authConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
 	return func(ctx huma.Context, next func(huma.Context)) {
 		op := ctx.Operation()
-		opID := op.OperationID
 
 		// Requires no credential: serve it only if the route is explicitly public.
+		//
+		// Public routes never reach the limiter, and cannot: they have no credential to get
+		// wrong, so they can never fail authentication. Kubelet probes are unaffected at
+		// any ladder depth.
 		if !RequiresCredential(op) {
 			if IsPublicRoute(op.Method, op.Path) {
 				next(ctx)
@@ -81,73 +129,176 @@ func NewAPIKeyAuth(readKey, writeKey string) func(ctx huma.Context, next func(hu
 			return
 		}
 
-		// Start a span for the authentication check.
-		reqCtx := ctx.Context()
-		spanCtx, span := otel.Tracer(authTracerName).Start(reqCtx, "auth.validateAPIKey",
-			trace.WithAttributes(
-				attribute.String("auth.scheme", "bearer"),
-				attribute.String("auth.operation", opID),
-			),
-		)
-		defer span.End()
-
-		token := extractBearerToken(ctx.Header("Authorization"))
-		if token == "" {
-			span.SetAttributes(attribute.String("auth.result", "missing_token"))
-			span.SetStatus(codes.Error, "missing or malformed Authorization header")
-			slog.WarnContext(spanCtx, "auth: missing bearer token",
-				"operation", opID, "result", "missing_token")
-			writeError(ctx, http.StatusUnauthorized, "missing or malformed Authorization header")
+		if !authorize(ctx, op, readKey, writeKey, cfg.limiter) {
 			return
 		}
-
-		if requiresWriteKey(op) {
-			// Write operations: only the write key is accepted.
-			if writeKey == "" || subtle.ConstantTimeCompare([]byte(token), []byte(writeKey)) != 1 {
-				span.SetAttributes(attribute.String("auth.result", "invalid_token"))
-				span.SetStatus(codes.Error, "invalid API key")
-				slog.WarnContext(spanCtx, "auth: invalid token for write operation",
-					"operation", opID, "result", "invalid_token", "required_level", "write")
-				writeError(ctx, http.StatusForbidden, "invalid API key")
-				return
-			}
-			span.SetAttributes(
-				attribute.String("auth.result", "success"),
-				attribute.String("auth.access_level", "write"),
-			)
-			slog.InfoContext(spanCtx, "auth: token accepted",
-				"operation", opID, "access_level", "write")
-		} else {
-			// Read operations: accept either the read key or the write key.
-			readMatch := subtle.ConstantTimeCompare([]byte(token), []byte(readKey))
-			writeMatch := 0
-			if writeKey != "" {
-				writeMatch = subtle.ConstantTimeCompare([]byte(token), []byte(writeKey))
-			}
-			if readMatch|writeMatch != 1 {
-				span.SetAttributes(attribute.String("auth.result", "invalid_token"))
-				span.SetStatus(codes.Error, "invalid API key")
-				slog.WarnContext(spanCtx, "auth: invalid token for read operation",
-					"operation", opID, "result", "invalid_token", "required_level", "read")
-				writeError(ctx, http.StatusForbidden, "invalid API key")
-				return
-			}
-
-			level := "read"
-			if writeMatch == 1 {
-				level = "write"
-			}
-			span.SetAttributes(
-				attribute.String("auth.result", "success"),
-				attribute.String("auth.access_level", level),
-			)
-			slog.InfoContext(spanCtx, "auth: token accepted",
-				"operation", opID, "access_level", level)
-		}
-
-		span.SetStatus(codes.Ok, "")
 		next(ctx)
 	}
+}
+
+// authorize validates the bearer credential against the tier the operation declares,
+// and reports whether the request may proceed. It writes the error response itself on
+// failure, so a false return means the response is already complete.
+//
+// next is deliberately NOT called from here. The span this opens closes when the
+// function returns, so its recorded duration is the credential check alone. Calling
+// next inside the span — the shape this replaced — kept it open across the handler, the
+// cache and the database, so auth.validateAPIKey reported total request latency while
+// sitting as a fully-overlapping sibling of the handler span rather than its parent.
+func authorize(
+	ctx huma.Context,
+	op *huma.Operation,
+	readKey, writeKey string,
+	limiter *RateLimiter,
+) bool {
+	opID := op.OperationID
+	spanCtx, span := otel.Tracer(authTracerName).Start(ctx.Context(), "auth.validateAPIKey",
+		trace.WithAttributes(
+			attribute.String("auth.scheme", "bearer"),
+			attribute.String("auth.operation", opID),
+		),
+	)
+	defer span.End()
+
+	token := extractBearerToken(ctx.Header("Authorization"))
+	fingerprint := keyFingerprint(token)
+	span.SetAttributes(attribute.String("auth.key_fingerprint", fingerprint))
+
+	// The lockout is consulted BEFORE the credential comparison. Checking the credential
+	// first would hand an attacker unlimited guesses, because the comparison is the very
+	// thing being rate limited.
+	limitState, limitErr := limiter.Peek(spanCtx, ctx)
+	switch {
+	case limitErr != nil:
+		// Fail open. A cache outage must not become an API outage, and authentication
+		// itself still fails closed below — an unrecognised credential is rejected whether
+		// or not the limiter is working.
+		slog.WarnContext(spanCtx, "auth: rate limiter unavailable, serving without it",
+			"operation", opID, "error", limitErr)
+	case limitState.Locked():
+		// Attempts made while ALREADY locked count and extend the lockout, so persistence
+		// is self-defeating rather than merely futile: a caller hammering through a
+		// penalty drives its own ladder up instead of waiting for it to drain.
+		if extended, err := limiter.Fail(spanCtx, ctx); err == nil {
+			limitState = extended
+		}
+		span.SetAttributes(
+			attribute.String("auth.result", "rate_limited"),
+			attribute.Int("auth.failure_count", limitState.Failures),
+		)
+		span.SetStatus(codes.Error, "rate limited")
+		slog.WarnContext(spanCtx, "auth: rate limited",
+			"operation", opID, "result", "rate_limited", "key_fingerprint", fingerprint,
+			"failures", limitState.Failures,
+			"retry_after_seconds", int(limitState.RetryAfter.Seconds()))
+		setRateLimitHeaders(ctx, limitState)
+		// 429 immediately, never a server-side sleep: holding the connection open to
+		// enforce the delay would hand the attacker a resource-exhaustion primitive
+		// against the control meant to protect the service.
+		writeError(ctx, http.StatusTooManyRequests, "too many failed authentication attempts")
+		return false
+	}
+
+	// recordFailure charges one rung. Every credential rejection below goes through it, so no
+	// failure path can forget to count.
+	//
+	// It deliberately publishes NO rate-limit headers. Those would be an enforcement-state
+	// oracle: a 401/403 that carried X-RateLimit-* when the limiter was enabled and nothing
+	// when it was disabled or erroring would tell an unauthenticated caller precisely when the
+	// control was off — i.e. when it was safe to flood. The headers belong only on the 429
+	// above, where enforcement is self-evident and reveals nothing new; a 401/403 is
+	// byte-identical whether the limiter is enforcing, disabled, or degraded.
+	recordFailure := func() {
+		if _, err := limiter.Fail(spanCtx, ctx); err != nil {
+			// Fail-open, but not silent: a store error here means the ladder is not being
+			// charged, so an operator gets a per-request signal that the brake is degraded
+			// rather than only a single line at boot.
+			slog.WarnContext(spanCtx, "auth: rate limiter store error, failure not recorded",
+				"operation", opID, "error", err)
+		}
+	}
+
+	if token == "" {
+		span.SetAttributes(attribute.String("auth.result", "missing_token"))
+		span.SetStatus(codes.Error, "missing or malformed Authorization header")
+		slog.WarnContext(spanCtx, "auth: missing bearer token",
+			"operation", opID, "result", "missing_token", "key_fingerprint", fingerprint)
+		recordFailure()
+		writeError(ctx, http.StatusUnauthorized, "missing or malformed Authorization header")
+		return false
+	}
+
+	if RequiresWriteKey(op) {
+		// Write operations: only the write key is accepted.
+		if writeKey == "" || subtle.ConstantTimeCompare([]byte(token), []byte(writeKey)) != 1 {
+			// Separate a valid read key presented at the write tier from a token this
+			// service does not recognise at all. The caller cannot tell the difference —
+			// status, body and the absent challenge are identical, deliberately — but the
+			// audit trail can, and without it a leaked read key probing mutations looks
+			// exactly like ordinary garbage. That attribution is the reason the tier split
+			// exists, so the refusal should record which of the two it was.
+			result := "invalid_token"
+			if readKey != "" && subtle.ConstantTimeCompare([]byte(token), []byte(readKey)) == 1 {
+				result = "wrong_tier"
+			}
+			span.SetAttributes(attribute.String("auth.result", result))
+			span.SetStatus(codes.Error, "invalid API key")
+			slog.WarnContext(spanCtx, "auth: token refused for write operation",
+				"operation", opID, "result", result, "required_level", "write",
+				"key_fingerprint", fingerprint)
+			recordFailure()
+			writeError(ctx, http.StatusForbidden, "invalid API key")
+			return false
+		}
+		span.SetAttributes(
+			attribute.String("auth.result", "success"),
+			attribute.String("auth.access_level", "write"),
+		)
+		slog.InfoContext(spanCtx, "auth: token accepted",
+			"operation", opID, "access_level", "write", "key_fingerprint", fingerprint)
+	} else {
+		// Read operations: accept either the read key or the write key.
+		readMatch := subtle.ConstantTimeCompare([]byte(token), []byte(readKey))
+		writeMatch := 0
+		if writeKey != "" {
+			writeMatch = subtle.ConstantTimeCompare([]byte(token), []byte(writeKey))
+		}
+		if readMatch|writeMatch != 1 {
+			span.SetAttributes(attribute.String("auth.result", "invalid_token"))
+			span.SetStatus(codes.Error, "invalid API key")
+			slog.WarnContext(spanCtx, "auth: invalid token for read operation",
+				"operation", opID, "result", "invalid_token", "required_level", "read",
+				"key_fingerprint", fingerprint)
+			recordFailure()
+			writeError(ctx, http.StatusForbidden, "invalid API key")
+			return false
+		}
+
+		level := "read"
+		if writeMatch == 1 {
+			level = "write"
+		}
+		span.SetAttributes(
+			attribute.String("auth.result", "success"),
+			attribute.String("auth.access_level", level),
+		)
+		slog.InfoContext(spanCtx, "auth: token accepted",
+			"operation", opID, "access_level", level, "key_fingerprint", fingerprint)
+	}
+
+	// A correct key restores service immediately: the record is dropped rather than left to
+	// expire, so an identity that was climbing the ladder is clean the moment it presents a
+	// valid credential. Skipped when no record existed, which is the overwhelmingly common
+	// case, so normal traffic costs one read and no write.
+	if limitState.Exists {
+		if err := limiter.Clear(spanCtx, ctx); err != nil {
+			slog.WarnContext(spanCtx, "auth: could not clear rate-limit record",
+				"operation", opID, "error", err)
+		}
+	}
+
+	span.SetStatus(codes.Ok, "")
+	return true
 }
 
 // IsPublicRoute reports whether the given method and post-prefix path name a route
@@ -177,7 +328,7 @@ func PublicRoutes() []string {
 // KnownSecuritySchemes returns the security scheme names this middleware tiers
 // explicitly, sorted.
 //
-// Any name outside this set is enforced at the write tier by requiresWriteKey, so a
+// Any name outside this set is enforced at the write tier by RequiresWriteKey, so a
 // scheme added to the OpenAPI document without being added here silently becomes
 // write-only. Exported so the route audit can pin the document's scheme set against
 // what the middleware actually understands.
@@ -235,7 +386,13 @@ func RequiresCredential(op *huma.Operation) bool {
 	return true
 }
 
-// requiresWriteKey reports whether the operation must be served the write key.
+// RequiresWriteKey reports whether the operation must be served the write key.
+//
+// Exported so the startup route check can ask the middleware for its actual tiering
+// decision rather than re-deriving it from scheme names. Re-deriving is the whole failure
+// mode it guards against: an operation that should be write-tier but declares only
+// "apiKey" is served at the read tier by design, and a caller inspecting the declaration
+// itself would duplicate — and could drift from — the rule below.
 //
 // The default is inverted deliberately: an operation is served at the read tier only
 // when every requirement names exactly readAPIKeyScheme and nothing else. Any other
@@ -252,7 +409,7 @@ func RequiresCredential(op *huma.Operation) bool {
 // from read-key-accepted to 403), so a future read-tier scheme must be added to the
 // condition below in the same change that adds it to the document. Scopes are
 // ignored, so `{apiKey: ["read"]}` is unaffected.
-func requiresWriteKey(op *huma.Operation) bool {
+func RequiresWriteKey(op *huma.Operation) bool {
 	for _, req := range op.Security {
 		for scheme := range req {
 			if scheme != readAPIKeyScheme {
@@ -291,6 +448,18 @@ const errorContentType = "application/problem+json"
 func writeError(ctx huma.Context, status int, msg string) {
 	ctx.SetHeader("Content-Type", errorContentType)
 	ctx.SetHeader("X-Content-Type-Options", "nosniff")
+	// Only on 401, which is the sole status RFC 9110 §11.6.1 attaches the challenge to.
+	//
+	// A 403 is left unchallenged because the caller has already presented a credential and
+	// a challenge would only prompt re-presenting it. Note what this does NOT assert: the
+	// middleware never determines whether the credential was *understood*. The write arm
+	// refuses a valid read key and an unrecognised string with the same status, the same
+	// body and the same silence — only the auth.result attribute (wrong_tier vs
+	// invalid_token) and the key fingerprint separate them, and both go to the audit trail
+	// rather than the wire.
+	if status == http.StatusUnauthorized {
+		ctx.SetHeader("WWW-Authenticate", bearerChallenge)
+	}
 	ctx.SetStatus(status)
 	body := fmt.Sprintf(`{"status":%d,"title":%q}`, status, msg)
 	if _, writeErr := ctx.BodyWriter().Write([]byte(body)); writeErr != nil {

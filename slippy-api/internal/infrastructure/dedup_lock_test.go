@@ -173,8 +173,8 @@ func (r *stubReader) LoadByCommitExact(ctx context.Context, repo, sha string) (*
 func (r *stubReader) FindByCommits(_ context.Context, _ string, _ []string) (*slippy.Slip, string, error) {
 	return nil, "", slippy.ErrSlipNotFound
 }
-func (r *stubReader) FindAllByCommits(_ context.Context, _ string, _ []string) ([]slippy.SlipWithCommit, error) {
-	return nil, nil
+func (r *stubReader) FindAllByCommits(_ context.Context, _ string, _ []string) (domain.FindAllResult, error) {
+	return domain.FindAllResult{}, nil
 }
 
 // newWriterAdapterWithDeps builds an adapter wired with the given locker + reader.
