@@ -172,6 +172,7 @@ When bumping `goLibMyCarrier/slippy` to a new version:
 - Type aliases in `domain/slip.go` keep handlers decoupled from direct `goLibMyCarrier/slippy` imports.
 - Step writes are atomic under Postgres — the library persists the status column, component state, and history in one transaction — so slippy-api performs no post-write hydration/overlay (removed with the ClickHouse backend).
 - Mock implementations of `slippy.SlipStore` live in `internal/infrastructure/store_test.go`. The compile-time check `var _ slippy.SlipStore = (*mockSlipStore)(nil)` in `z_slipstore_interface_test.go` will catch interface drift on every build.
+- ClickHouse test mocks are **vendored** in `slippy-api/internal/testsupport/clickhousetest` — upstream goLibMyCarrier's `clickhousetest` does not compile against clickhouse-go/v2 v2.48.0+ (its `MockConn` lacks `InsertFormat`/`QueryFormat`). Switch back to the upstream import and delete the vendored package once goLibMyCarrier ships a compatible `clickhousetest` (see the package comment).
 
 ### Removed: Read-Your-Own-Writes Overlay (ClickHouse-era)
 
