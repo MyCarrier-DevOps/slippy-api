@@ -1,5 +1,6 @@
 ---
-description: Security preflight before implementing — run govulncheck and gate on Go-toolchain / dependency CVEs
+name: go-preflight
+description: Use when about to start implementing a feature or bugfix in a Go service repo (after planning, before writing code), or when dependencies or the Go toolchain changed and the vulnerability scan needs re-running. Trigger on "preflight", "security scan", "govulncheck", "CVE", "vulnerable dependency", or a go.mod / toolchain bump.
 ---
 
 # /go-preflight

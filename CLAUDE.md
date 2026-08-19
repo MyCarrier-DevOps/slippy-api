@@ -25,7 +25,15 @@ For features and bugfixes, use the **`go-tdd`** skill — it drives the full loo
    before continuing; if it flags a dependency, `make bump`.
 3. **Verify after.** Run `/go-verify` when the task is done — it runs `make fmt`,
    `make lint`, `make test`, and the plugin's coverage gate (which reads the CI
-   `threshold-total` live so local and CI never drift).
+   `threshold-total` live so local and CI never drift). On non-main branches it
+   finishes with mutation testing (`make mutation`, `mutest -diff origin/main`) —
+   surviving mutants mean missing assertions; add tests rather than skip.
+4. **The commit is gated.** In checkouts armed by `/go-repo-init`, a pre-commit
+   hook re-runs fmt, lint, test, and (on non-main branches, when the run would
+   judge exactly what the commit stages) mutation before any `git commit`, and
+   blocks the commit until they pass. If the hook reports it skipped mutation,
+   that is not a pass — deal with the reason it names. Do not try to bypass
+   the gate — fix the failure it reports.
 
 **Pin the Go version to a full patch release, and keep it in sync.** The `go`
 directive in the module's `go.mod` (e.g. `go 1.26.5`, not `go 1.26`) and the
@@ -164,6 +172,7 @@ When bumping `goLibMyCarrier/slippy` to a new version:
 - Type aliases in `domain/slip.go` keep handlers decoupled from direct `goLibMyCarrier/slippy` imports.
 - Step writes are atomic under Postgres — the library persists the status column, component state, and history in one transaction — so slippy-api performs no post-write hydration/overlay (removed with the ClickHouse backend).
 - Mock implementations of `slippy.SlipStore` live in `internal/infrastructure/store_test.go`. The compile-time check `var _ slippy.SlipStore = (*mockSlipStore)(nil)` in `z_slipstore_interface_test.go` will catch interface drift on every build.
+- ClickHouse test mocks are **vendored** in `slippy-api/internal/testsupport/clickhousetest` — upstream goLibMyCarrier's `clickhousetest` does not compile against clickhouse-go/v2 v2.48.0+ (its `MockConn` lacks `InsertFormat`/`QueryFormat`). Switch back to the upstream import and delete the vendored package once goLibMyCarrier ships a compatible `clickhousetest` (see the package comment).
 
 ### Removed: Read-Your-Own-Writes Overlay (ClickHouse-era)
 

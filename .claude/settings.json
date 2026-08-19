@@ -11,6 +11,19 @@
         ],
         "_apm_source": "go-devkit"
       }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/hooks/pre-commit-gate.sh",
+            "timeout": 1200
+          }
+        ],
+        "_apm_source": "go-devkit"
+      }
     ]
   },
   "permissions": {
@@ -22,7 +35,8 @@
       "Bash(golines:*)",
       "Bash(golangci-lint:*)",
       "Bash(govulncheck:*)",
-      "Bash(pre-commit run:*)"
+      "Bash(pre-commit run:*)",
+      "Bash(mutest -diff:*)"
     ],
     "deny": [
       "Read(.env)",
