@@ -33,6 +33,9 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: stable
+          # Same rationale as ci.yml: don't let a stale runner cache lose to
+          # the go.mod patch pin under setup-go's GOTOOLCHAIN=local.
+          check-latest: true
       - name: Mutation tests (full sweep across all modules)
         id: sweep
         continue-on-error: true

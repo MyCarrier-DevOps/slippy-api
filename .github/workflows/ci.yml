@@ -43,6 +43,11 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
+          # Resolve the newest published patch of the minor instead of the
+          # runner's cached one: go.mod pins the latest patch, and setup-go
+          # exports GOTOOLCHAIN=local, so a stale runner cache (e.g. 1.26.5
+          # when go.mod requires 1.26.6) hard-fails every go command.
+          check-latest: true
       - name: Test ${{ matrix.module }} module
         working-directory: ${{ matrix.module }}
         run: |
@@ -67,6 +72,11 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
+          # Resolve the newest published patch of the minor instead of the
+          # runner's cached one: go.mod pins the latest patch, and setup-go
+          # exports GOTOOLCHAIN=local, so a stale runner cache (e.g. 1.26.5
+          # when go.mod requires 1.26.6) hard-fails every go command.
+          check-latest: true
       - name: Install tools
         run: make install-tools
       - name: Lint ${{ matrix.module }} module
@@ -86,6 +96,11 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
+          # Resolve the newest published patch of the minor instead of the
+          # runner's cached one: go.mod pins the latest patch, and setup-go
+          # exports GOTOOLCHAIN=local, so a stale runner cache (e.g. 1.26.5
+          # when go.mod requires 1.26.6) hard-fails every go command.
+          check-latest: true
       - name: Run vulnerability scan on ${{ matrix.module }} module
         run: make check-sec PKG=${{ matrix.module }}
 
@@ -187,6 +202,11 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
+          # Resolve the newest published patch of the minor instead of the
+          # runner's cached one: go.mod pins the latest patch, and setup-go
+          # exports GOTOOLCHAIN=local, so a stale runner cache (e.g. 1.26.5
+          # when go.mod requires 1.26.6) hard-fails every go command.
+          check-latest: true
 
       - name: Regenerate spec and client
         run: make generate-client
