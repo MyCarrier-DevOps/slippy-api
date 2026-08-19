@@ -25,7 +25,15 @@ For features and bugfixes, use the **`go-tdd`** skill — it drives the full loo
    before continuing; if it flags a dependency, `make bump`.
 3. **Verify after.** Run `/go-verify` when the task is done — it runs `make fmt`,
    `make lint`, `make test`, and the plugin's coverage gate (which reads the CI
-   `threshold-total` live so local and CI never drift).
+   `threshold-total` live so local and CI never drift). On non-main branches it
+   finishes with mutation testing (`make mutation`, `mutest -diff origin/main`) —
+   surviving mutants mean missing assertions; add tests rather than skip.
+4. **The commit is gated.** In checkouts armed by `/go-repo-init`, a pre-commit
+   hook re-runs fmt, lint, test, and (on non-main branches, when the run would
+   judge exactly what the commit stages) mutation before any `git commit`, and
+   blocks the commit until they pass. If the hook reports it skipped mutation,
+   that is not a pass — deal with the reason it names. Do not try to bypass
+   the gate — fix the failure it reports.
 
 **Pin the Go version to a full patch release, and keep it in sync.** The `go`
 directive in the module's `go.mod` (e.g. `go 1.26.5`, not `go 1.26`) and the

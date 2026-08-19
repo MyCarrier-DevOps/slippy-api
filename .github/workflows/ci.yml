@@ -20,8 +20,10 @@ on:
     branches:
       - main
 
+# CI intentionally floats on the patch level; go.mod and the Dockerfile pin the
+# full patch. Bump this by hand for a new minor or major.
 env:
-  GO_VERSION: '1.26.5'
+  GO_VERSION: '1.26'
 
 permissions:
   contents: read

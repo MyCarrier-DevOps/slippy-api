@@ -35,7 +35,8 @@
       "Bash(golines:*)",
       "Bash(golangci-lint:*)",
       "Bash(govulncheck:*)",
-      "Bash(pre-commit run:*)"
+      "Bash(pre-commit run:*)",
+      "Bash(mutest -diff:*)"
     ],
     "deny": [
       "Read(.env)",

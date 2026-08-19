@@ -5,6 +5,22 @@ GOARCH ?= $(shell go env GOARCH)
 MODULES  := slippy-api slippy-client slippy-migrator
 BINARIES := slippy-api slippy-migrator
 
+# Coverage-gated modules (coverage gate, mutation targets, and CI key off this).
+# slippy-client is generated (oapi-codegen) — lint-only, excluded like in `make test`.
+APPLICATION := slippy-api slippy-migrator
+
+GOLANGCI_VERSION := v2.11.3
+GOLANGCI_INSTALLER_SHA := 6008b81b81c690c046ffc3fd5bce896da715d5fd
+
+# go-devkit template pins. install-tools and check-sec deliberately pin their own
+# versions (see their comments); the mutation targets install mutest at MUTEST_VERSION.
+GOLANGCI_LINT_VERSION := v2.12.2
+GOVULNCHECK_VERSION   := v1.1.4
+MUTEST_VERSION        := v0.6.0
+
+MUTATION_BASE      ?= origin/main
+MUTATION_THRESHOLD ?= 100
+
 # NOTE: the `|| exit 1` on every per-module loop below is load-bearing. Without it a
 # loop's exit status is whatever the LAST module returned, so a slippy-api failure was
 # masked by a passing slippy-migrator and the recipe exited 0. CLAUDE.md names
@@ -130,9 +146,6 @@ generate-client: generate-spec install-oapi-codegen
 install-oapi-codegen:
 	go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.6.0
 
-GOLANGCI_VERSION := v2.11.3
-GOLANGCI_INSTALLER_SHA := 6008b81b81c690c046ffc3fd5bce896da715d5fd
-
 # The installer is fetched by IMMUTABLE COMMIT SHA, and the pipeline may not mask a fetch
 # failure.
 #
@@ -163,3 +176,49 @@ GOLANGCI_INSTALLER_SHA := 6008b81b81c690c046ffc3fd5bce896da715d5fd
 .PHONY: install-tools
 install-tools:
 	set -o pipefail; curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/$(GOLANGCI_INSTALLER_SHA)/install.sh | sh -s -- -b `go env GOPATH`/bin $(GOLANGCI_VERSION)
+
+.PHONY: mutation
+mutation:
+	@echo "Mutation testing code changed vs $(MUTATION_BASE)..."
+	@for dir in $(APPLICATION); do \
+		if [ -d "$$dir" ]; then \
+			echo "Mutation testing $$dir module..."; \
+			(cd $$dir && { command -v mutest >/dev/null 2>&1 || go install github.com/fchimpan/mutest@$(MUTEST_VERSION); } && mutest -diff $(MUTATION_BASE) -threshold $(MUTATION_THRESHOLD) ./...) || exit 1; \
+		fi; \
+	done
+
+.PHONY: mutation-all
+mutation-all:
+	@echo "Mutation testing all modules (threshold $(MUTATION_THRESHOLD)%)..."
+	@for dir in $(APPLICATION); do \
+		if [ -d "$$dir" ]; then \
+			echo "Mutation testing $$dir module..."; \
+			(cd $$dir && go mod download && { command -v mutest >/dev/null 2>&1 || go install github.com/fchimpan/mutest@$(MUTEST_VERSION); } && mutest -threshold $(MUTATION_THRESHOLD) ./...) || exit 1; \
+		fi; \
+	done
+
+.PHONY: run
+run:
+	@for dir in $(APPLICATION); do \
+		if [ -d "$$dir/cmd/app" ]; then \
+			(cd $$dir && go run ./cmd/app $(ARGS)); \
+		fi; \
+	done
+
+.PHONY: help
+help:
+	@echo "Available targets:"
+	@echo "  make lint         - run golangci-lint across modules"
+	@echo "  make fmt          - format code via golangci-lint"
+	@echo "  make test         - run tests with coverage"
+	@echo "  make tidy         - go mod tidy"
+	@echo "  make bump         - upgrade dependencies"
+	@echo "  make clean        - clean build & test caches"
+	@echo "  make check-sec    - run govulncheck"
+	@echo "  make mutation     - mutation-test code changed vs origin/main (mutest, 100% kill)"
+	@echo "  make mutation-all - mutation-test every module in full (weekly CI audit)"
+	@echo "  make build        - build binaries into ./bin"
+	@echo "  make run ARGS=... - run the app (modules with cmd/app)"
+	@echo "  make generate-spec   - regenerate the OpenAPI spec"
+	@echo "  make generate-client - regenerate slippy-client from the spec"
+	@echo "  make install-tools- install golangci-lint locally"
