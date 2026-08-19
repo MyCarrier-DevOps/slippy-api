@@ -14,6 +14,10 @@ import (
 
 var errBoom = errors.New("boom")
 
+// stubBatchColumn is a non-nil driver.BatchColumn for asserting that
+// MockBatch.Column returns the stored value (never called, only compared).
+type stubBatchColumn struct{ driver.BatchColumn }
+
 func TestMockSession_DefaultsAndRecording(t *testing.T) {
 	ctx := context.Background()
 	rows := &MockRows{}
@@ -156,6 +160,19 @@ func TestMockRows(t *testing.T) {
 		assert.False(t, empty.HasData())
 	})
 
+	t.Run("scan copies min(dest, data) with mismatched lengths", func(t *testing.T) {
+		var only string
+		wide := &MockRows{ScanData: [][]any{{"a", "b"}}}
+		require.NoError(t, wide.Scan(&only)) // more data than dest: no overrun
+		assert.Equal(t, "a", only)
+
+		var first, second string
+		narrow := &MockRows{ScanData: [][]any{{"a"}}}
+		require.NoError(t, narrow.Scan(&first, &second)) // more dest than data
+		assert.Equal(t, "a", first)
+		assert.Empty(t, second) // untouched
+	})
+
 	t.Run("func overrides win", func(t *testing.T) {
 		m := &MockRows{
 			NextFunc:   func() bool { return true },
@@ -179,6 +196,19 @@ func TestMockRow(t *testing.T) {
 		assert.Equal(t, int64(7), n)
 		assert.NoError(t, m.Err())
 		assert.NoError(t, m.ScanStruct(nil))
+	})
+
+	t.Run("scan copies min(dest, data) with mismatched lengths", func(t *testing.T) {
+		var only string
+		wide := &MockRow{ScanData: []any{"a", "b"}}
+		require.NoError(t, wide.Scan(&only)) // more data than dest: no overrun
+		assert.Equal(t, "a", only)
+
+		var first, second string
+		narrow := &MockRow{ScanData: []any{"a"}}
+		require.NoError(t, narrow.Scan(&first, &second)) // more dest than data
+		assert.Equal(t, "a", first)
+		assert.Empty(t, second) // untouched
 	})
 
 	t.Run("errors and overrides", func(t *testing.T) {
@@ -338,8 +368,10 @@ func TestMockBatch(t *testing.T) {
 		assert.ErrorIs(t, m.Send(), errBoom)
 		assert.ErrorIs(t, m.Abort(), errBoom)
 
-		withData := &MockBatch{ColumnData: map[int]driver.BatchColumn{}}
-		assert.Nil(t, withData.Column(1))
+		col := stubBatchColumn{}
+		withData := &MockBatch{ColumnData: map[int]driver.BatchColumn{1: col}}
+		assert.Equal(t, col, withData.Column(1))
+		assert.Nil(t, withData.Column(0))
 	})
 }
 
