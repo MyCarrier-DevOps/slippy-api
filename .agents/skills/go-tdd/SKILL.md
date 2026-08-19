@@ -49,8 +49,10 @@ Create a todo per step and work them in order.
    duplication — with the tests staying green.
 
 5. **VERIFY.** Run `/go-verify` (`make fmt` → `make lint` → `make test` →
-   the coverage gate). If coverage dropped below the CI threshold, add more
-   table-driven tests — never lower the threshold.
+   the coverage gate → on non-main branches, mutation testing via
+   `make mutation`). If coverage dropped below the CI threshold, add more
+   table-driven tests — never lower the threshold. Kill surviving mutants with
+   stronger assertions, not by skipping the step.
 
 ## Guardrails
 

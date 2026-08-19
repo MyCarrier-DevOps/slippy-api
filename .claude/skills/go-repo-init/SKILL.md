@@ -1,6 +1,6 @@
 ---
-description: Bootstrap a Go repo for the go-devkit workflow — permissions, CLAUDE.md,
-  generated Makefile/lint/CI, CI hardening, and Go version pinning (idempotent, auto-fix)
+name: go-repo-init
+description: Use when bootstrapping a Go service repository into the go-devkit workflow, or re-syncing one after a plugin update — a repo missing its .claude/settings.json permissions, the go-devkit CLAUDE.md block, template-synced Makefile targets (e.g. mutation), generated .golangci.yml/ci.yml, CI hardening, or Go version pinning. Idempotent — safe to re-run. Trigger on "set up this repo", "bootstrap", "repo init", "onboard this service".
 ---
 
 # /go-repo-init
@@ -10,7 +10,7 @@ cannot deliver a project's `.claude/settings.json` permissions). Run this once
 inside a Go service repository. Every step is **verify-then-act and idempotent**
 — re-running never duplicates entries or clobbers customizations. The
 deterministic file transforms live in `${CLAUDE_PLUGIN_ROOT}/scripts/repo-init.sh`;
-this command supplies the live inputs and handles the prose-level merges.
+this skill supplies the live inputs and handles the prose-level merges.
 
 Work from the repository root. Use `${CLAUDE_PROJECT_DIR:-.}` as the project dir
 and `${CLAUDE_PLUGIN_ROOT}` for bundled scripts/templates. Announce each change;
@@ -38,23 +38,48 @@ ls Makefile go.mod app/go.mod .github/workflows/ci.yml .github/.golangci.yml 2>/
 
 Call the resolved module directory `MOD` below (e.g. `app`).
 
-### 2. Generate missing build tooling (generate-if-absent)
+### 2. Generate or sync build tooling
 
-Use the bundled templates for any file that does not already exist. `ensure-file`
-never overwrites an existing file, so this is safe to run every time:
+The Makefile is **synced with the bundled template**: created from it when
+absent; when it exists, any template variables or `.PHONY` targets missing from
+it are appended (e.g. `mutation` for repos initialized before mutation testing
+existed). Existing variables, recipes, and extra targets are never modified —
+the sync is strictly additive. The lint config and CI workflow remain
+generate-if-absent (`ensure-file` never overwrites):
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}"/scripts/repo-init.sh ensure-file \
-  --src "${CLAUDE_PLUGIN_ROOT}/templates/Makefile"   --dest Makefile
+"${CLAUDE_PLUGIN_ROOT}"/scripts/repo-init.sh sync-makefile \
+  --template "${CLAUDE_PLUGIN_ROOT}/templates/Makefile"    --dest Makefile
 "${CLAUDE_PLUGIN_ROOT}"/scripts/repo-init.sh ensure-file \
   --src "${CLAUDE_PLUGIN_ROOT}/templates/golangci.yml" --dest .github/.golangci.yml
 "${CLAUDE_PLUGIN_ROOT}"/scripts/repo-init.sh ensure-file \
   --src "${CLAUDE_PLUGIN_ROOT}/templates/ci.yml"       --dest .github/workflows/ci.yml
+"${CLAUDE_PLUGIN_ROOT}"/scripts/repo-init.sh ensure-file \
+  --src "${CLAUDE_PLUGIN_ROOT}/templates/mutation.yml" --dest .github/workflows/mutation.yml
 ```
 
-If you just generated the `Makefile` and the module dir is **not** `app`, update
-its `APPLICATION := app` line to name the real module dir(s) — the Makefile,
-coverage gate, and CI all key off it. Report that you did so.
+`mutation.yml` is the weekly full-codebase mutation audit on main (plus manual
+dispatch) — the complement of the branch-scoped `make mutation` that
+`/go-verify` and the pre-commit gate run locally.
+
+If `sync-makefile` **created** the `Makefile`, or its output reports
+`APPLICATION` among the appended variables, and the module dir is **not**
+`app`, update the `APPLICATION := app` line to name the real module dir(s) —
+the Makefile, coverage gate, and CI all key off it, and a nonexistent dir is
+silently skipped rather than failing. Report that you did so.
+
+Same check for `MUTATION_BASE`: if it was created or appended and the
+repository's default branch is not `main`
+(`git symbolic-ref --short refs/remotes/origin/HEAD`), rewrite the assignment
+to the real default (e.g. `MUTATION_BASE ?= origin/master`). Keep the value a
+**literal ref** — the pre-commit hook text-scrapes this assignment, so a
+`$(shell …)` expression would silently disable its mutation gate forever. This
+is a one-time reconciliation of the template default at init time, not the
+per-run base override that `/go-verify` forbids. Report it if you changed it.
+
+If `sync-makefile` reports appended targets and the Makefile has its own `help`
+target, add matching `@echo` lines for the new targets — the script never edits
+existing recipes, so that reconciliation is a prose-level edit for you to make.
 
 ### 3. Permissions
 
@@ -103,8 +128,8 @@ idempotent — re-running must not duplicate or fight prior runs.
        the go-devkit plugin".
      - `.claude/hooks/session-start.sh` and other bundled machinery → note it
        ships inside the plugin under `apm_modules/`, not in the repo tree; the
-       repo keeps only the per-repo bits `/go-repo-init` deploys (`settings.json`
-       and the committed slash commands).
+       repo keeps only the per-repo bits `/go-repo-init` deploys
+       (`settings.json`).
      - "this template ships / already ships …" framing → "the go-devkit plugin
        ships …".
      - Where `/go-preflight`, `/go-verify`, or `/go-repo-init` are mentioned,
@@ -133,7 +158,14 @@ GO_MINOR="$(go version | sed -E 's/.*go([0-9]+\.[0-9]+).*/\1/')"
 "${CLAUDE_PLUGIN_ROOT}"/scripts/repo-init.sh harden-ci \
   --ci .github/workflows/ci.yml \
   --checkout "$CHECKOUT_MAJOR" --setup-go "$SETUPGO_MAJOR" --go-version "$GO_MINOR"
+"${CLAUDE_PLUGIN_ROOT}"/scripts/repo-init.sh harden-ci \
+  --ci .github/workflows/mutation.yml \
+  --checkout "$CHECKOUT_MAJOR" --setup-go "$SETUPGO_MAJOR" --go-version "$GO_MINOR"
 ```
+
+Hardening `mutation.yml` only bumps its action majors — it deliberately floats
+on `go-version: stable` (the numeric pin does not apply), and its `schedule`
+trigger has no `paths:` filters to touch.
 
 If `gh` is unavailable or unauthenticated, fall back to the majors already in the
 workflow (leave them as-is) and say so; never guess a major that doesn't exist.
@@ -154,14 +186,29 @@ GO_PATCH="$(go version | sed -E 's/.*go([0-9]+\.[0-9]+\.[0-9]+).*/\1/')"
 This sets the `go` directive in `MOD/go.mod` to the full patch and the `golang:`
 builder tag in `MOD/Dockerfile` (if present) to match. Report both diffs.
 
-### 7. .gitignore
+### 7. Arm the commit gate
+
+The plugin's pre-commit hook only acts in checkouts that explicitly opted in.
+Arming touches `<git-dir>/info/go-devkit-gate` — content under the git dir is
+never transferred by clone, so a hostile repository cannot ship the marker;
+each checkout is armed only by deliberately running this step on that machine:
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}"/scripts/repo-init.sh arm-gate \
+  --project-dir "${CLAUDE_PROJECT_DIR:-.}"
+```
+
+Tell the user the gate is armed for this checkout and that fresh clones re-arm
+by re-running `/go-repo-init`.
+
+### 8. .gitignore
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}"/scripts/repo-init.sh ensure-gitignore \
   --project-dir "${CLAUDE_PROJECT_DIR:-.}"
 ```
 
-### 8. Summary
+### 9. Summary
 
 Print exactly what changed (files created, files hardened, versions pinned,
 permissions added). Remind the user to review the diffs, run
@@ -169,7 +216,7 @@ permissions added). Remind the user to review the diffs, run
 
 ## Assumptions
 
-- A Go module exists (a `go.mod` under the module dir). This command configures
+- A Go module exists (a `go.mod` under the module dir). This skill configures
   an existing service; it does not scaffold application source.
 - The consumer environment has `go` (for version detection) and, for step 5,
   `gh` authenticated against GitHub. Missing `gh` degrades gracefully (step 5 is
