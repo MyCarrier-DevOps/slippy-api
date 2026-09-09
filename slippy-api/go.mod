@@ -4,10 +4,10 @@ go 1.26.6
 
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.48.0
-	github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse v1.3.99
-	github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.99
-	github.com/MyCarrier-DevOps/goLibMyCarrier/postgres v1.3.99
-	github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.99
+	github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse v1.3.100
+	github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.100
+	github.com/MyCarrier-DevOps/goLibMyCarrier/postgres v1.3.100
+	github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.100
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/danielgtaylor/huma/v2 v2.39.1
 	github.com/google/uuid v1.6.0
@@ -36,9 +36,9 @@ require (
 	dario.cat/mergo v1.0.2 // indirect
 	github.com/ClickHouse/ch-go v0.74.0 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
-	github.com/MyCarrier-DevOps/goLibMyCarrier/clickhousemigrator v1.3.99 // indirect
-	github.com/MyCarrier-DevOps/goLibMyCarrier/github v1.3.99 // indirect
-	github.com/MyCarrier-DevOps/goLibMyCarrier/postgresmigrator v1.3.99 // indirect
+	github.com/MyCarrier-DevOps/goLibMyCarrier/clickhousemigrator v1.3.100 // indirect
+	github.com/MyCarrier-DevOps/goLibMyCarrier/github v1.3.100 // indirect
+	github.com/MyCarrier-DevOps/goLibMyCarrier/postgresmigrator v1.3.100 // indirect
 	github.com/ProtonMail/go-crypto v1.4.1 // indirect
 	github.com/andybalholm/brotli v1.2.2 // indirect
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0 // indirect
@@ -98,7 +98,7 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.28.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
-	golang.org/x/crypto v0.55.0 // indirect
+	golang.org/x/crypto v0.56.0 // indirect
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
