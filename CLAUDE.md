@@ -153,7 +153,7 @@ When bumping `goLibMyCarrier/slippy` to a new version:
 
 1. `cd slippy-api && go get github.com/MyCarrier-DevOps/goLibMyCarrier/slippy@vX.Y.Z`
 2. `go mod tidy`
-3. Check if `slippy.SlipStore` interface gained new methods — update `mockSlipStore` in `internal/infrastructure/store_test.go` to implement them.
+3. Check if `slippy.SlipStore` interface gained new methods — update `mockSlipStore` in `internal/infrastructure/store_test.go` to implement them. Also `asyncInsertSlipStore` in `internal/e2e/dedup_lock_e2e_test.go`; `z_slipstore_interface_test.go` asserts the interface at compile time so `go vet` names every gap. **v1.3.100 added `Repave`** (DEVOPS-231) and changed `CreateSlipForPush`'s same-commit lookup from `LoadLiveByCommit` to `LoadByCommit` so ended rows are visible for repave — a double whose `LoadByCommit` has no nil-safe default panics.
 4. Check `go build ./...` — fix any signature mismatches.
 5. Run `go test ./... -short` — fix any test assumptions broken by behavioral changes.
 6. Run `make lint` — 0 issues expected.
@@ -172,7 +172,7 @@ When bumping `goLibMyCarrier/slippy` to a new version:
 - Type aliases in `domain/slip.go` keep handlers decoupled from direct `goLibMyCarrier/slippy` imports.
 - Step writes are atomic under Postgres — the library persists the status column, component state, and history in one transaction — so slippy-api performs no post-write hydration/overlay (removed with the ClickHouse backend).
 - Mock implementations of `slippy.SlipStore` live in `internal/infrastructure/store_test.go`. The compile-time check `var _ slippy.SlipStore = (*mockSlipStore)(nil)` in `z_slipstore_interface_test.go` will catch interface drift on every build.
-- ClickHouse test mocks are **vendored** in `slippy-api/internal/testsupport/clickhousetest` — upstream goLibMyCarrier's `clickhousetest` does not compile against clickhouse-go/v2 v2.48.0+ (its `MockConn` lacks `InsertFormat`/`QueryFormat`). Switch back to the upstream import and delete the vendored package once goLibMyCarrier ships a compatible `clickhousetest` (see the package comment).
+- ClickHouse test mocks come from upstream `goLibMyCarrier/clickhouse/clickhousetest` (since the v1.3.100 bump, DEVOPS-343). They were vendored in `internal/testsupport/clickhousetest` while upstream's `MockConn` lacked `InsertFormat`/`QueryFormat` against clickhouse-go/v2 v2.48.0+; goLibMyCarrier#82 fixed that upstream and the vendored copy was deleted.
 
 ### Removed: Read-Your-Own-Writes Overlay (ClickHouse-era)
 

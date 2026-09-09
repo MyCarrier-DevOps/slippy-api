@@ -32,6 +32,7 @@ type mockSlipStore struct {
 	updateSlipStatusFn      func(ctx context.Context, id string, status slippy.SlipStatus) error
 	appendHistoryFn         func(ctx context.Context, id string, entry slippy.StateHistoryEntry) error
 	setComponentImageTagFn  func(ctx context.Context, id, step, comp, tag string) error
+	repaveFn                func(ctx context.Context, oldID string, newSlip *slippy.Slip, parent *slippy.AncestryEntry) error
 	pingFn                  func(ctx context.Context) error
 }
 
@@ -43,7 +44,14 @@ func (m *mockSlipStore) Load(ctx context.Context, id string) (*slippy.Slip, erro
 }
 
 func (m *mockSlipStore) LoadByCommit(ctx context.Context, repo, sha string) (*slippy.Slip, error) {
-	return m.loadByCommitFn(ctx, repo, sha)
+	if m.loadByCommitFn != nil {
+		return m.loadByCommitFn(ctx, repo, sha)
+	}
+	// Default to a clean miss, like LoadLiveByCommit below. As of goLibMyCarrier v1.3.100
+	// (DEVOPS-231 repave) CreateSlipForPush reads LoadByCommit — not LoadLiveByCommit — so
+	// that an ENDED same-commit row is visible and can be repaved. A nil-hook panic here is
+	// never the intended contract for a test double.
+	return nil, slippy.ErrSlipNotFound
 }
 
 func (m *mockSlipStore) LoadLiveByCommit(ctx context.Context, repo, sha string) (*slippy.Slip, error) {
@@ -72,6 +80,22 @@ func (m *mockSlipStore) FindAllByCommits(
 func (m *mockSlipStore) Close() error {
 	if m.closeFn != nil {
 		return m.closeFn()
+	}
+	return nil
+}
+
+// Repave is required by slippy.SlipStore as of goLibMyCarrier v1.3.100 (DEVOPS-231: transactional
+// delete + recreate of an ended same-commit slip). The adapter under test never calls it — slippy-api
+// reaches Repave only through slippy.Client.CreateSlipForPush — so, like the other write hooks, it is
+// here to satisfy the interface and is a no-op unless a test installs repaveFn.
+func (m *mockSlipStore) Repave(
+	ctx context.Context,
+	oldID string,
+	newSlip *slippy.Slip,
+	parent *slippy.AncestryEntry,
+) error {
+	if m.repaveFn != nil {
+		return m.repaveFn(ctx, oldID, newSlip, parent)
 	}
 	return nil
 }

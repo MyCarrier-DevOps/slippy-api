@@ -77,10 +77,11 @@ func TestSlipWriterAdapter_ImplementsInterface(t *testing.T) {
 
 func TestSlipWriterAdapter_CreateSlipForPush_Success(t *testing.T) {
 	store := &mockSlipStore{
-		// CreateSlipForPush retry detection in goLibMyCarrier slippy v1.4.0+ uses
-		// LoadLiveByCommit (exact-SHA, terminal-status-filtered). The mock's
-		// default LoadLiveByCommit returns ErrSlipNotFound, which triggers the
-		// fresh-create path below. No explicit loadLiveByCommitFn needed.
+		// CreateSlipForPush's same-commit lookup is LoadByCommit as of goLibMyCarrier
+		// v1.3.100 (DEVOPS-231 repave): it must see ENDED rows too, so it can repave
+		// them rather than ignore them. Earlier versions used the terminal-filtered
+		// LoadLiveByCommit. The mock defaults both to ErrSlipNotFound, which takes the
+		// fresh-create path below. No explicit load hook needed.
 		createFn: func(_ context.Context, _ *slippy.Slip) error {
 			return nil
 		},
@@ -140,13 +141,22 @@ func TestSlipWriterAdapter_CreateSlipForPush_RetryDetection(t *testing.T) {
 		CorrelationID: "existing-123",
 		Repository:    "org/repo",
 		CommitSHA:     "deadbeef1234567890",
+		// Explicitly LIVE. Before v1.3.100 this field was left zero and the test still
+		// passed, because an unknown status falls through IsTerminal's default and reads
+		// as live — the same mixed-version hazard DEVOPS-282 documents. The dedup this
+		// test asserts is a property of a live row, so say so rather than lean on that.
+		Status: slippy.SlipStatusInProgress,
 	}
 	store := &mockSlipStore{
-		// goLibMyCarrier slippy.CreateSlipForPush retry-detection migrated to
-		// LoadLiveByCommit in v1.4.0-feature-82464-add-loadlivebycommit.2 — the
-		// retry-detection path is exact-SHA-by-intent and excludes superseded
-		// terminal statuses at the DB layer. This mock returns the existing slip
-		// from the live-by-commit lookup.
+		// CreateSlipForPush's same-commit lookup is LoadByCommit as of goLibMyCarrier
+		// v1.3.100 (DEVOPS-231 repave): it has to see ENDED rows too, so it can repave
+		// them instead of ignoring them, and it then branches on the row's status — a
+		// live row is reused (this test), an ended one is repaved. Earlier versions used
+		// the terminal-filtered LoadLiveByCommit, which is why this hook was the only one
+		// set here; both are set now so the seed is found whichever lookup a path uses.
+		loadByCommitFn: func(_ context.Context, _, _ string) (*slippy.Slip, error) {
+			return existingSlip, nil
+		},
 		loadLiveByCommitFn: func(_ context.Context, _, _ string) (*slippy.Slip, error) {
 			return existingSlip, nil
 		},

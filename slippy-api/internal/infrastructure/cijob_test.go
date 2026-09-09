@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/MyCarrier-DevOps/slippy-api/internal/testsupport/clickhousetest"
+	"github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse/clickhousetest"
 
 	ch "github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse"
 

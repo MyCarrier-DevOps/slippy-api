@@ -72,6 +72,41 @@ func (s *asyncInsertSlipStore) Create(_ context.Context, slip *slippy.Slip) erro
 	return nil
 }
 
+// Repave mirrors PostgresStore.Repave's contract closely enough for this test's purpose: the
+// superseded row is removed and the successor recorded in one critical section, a live superseded
+// row is refused with slippy.ErrSlipWentLive and nothing changes, and a missing superseded row is
+// not an error (a redelivery must converge). The successor goes through the same visibility-lag
+// path as Create, since that lag is the whole point of this store.
+//
+// Required by slippy.SlipStore as of goLibMyCarrier v1.3.100 (DEVOPS-231). The dedup-lock race this
+// file exercises never reaches Repave (it creates fresh slips), so the implementation is deliberately
+// simple; if a test starts depending on repave semantics, prefer slippytest.MockStore, which models
+// them fully.
+func (s *asyncInsertSlipStore) Repave(
+	_ context.Context,
+	oldCorrelationID string,
+	newSlip *slippy.Slip,
+	_ *slippy.AncestryEntry,
+) error {
+	if newSlip == nil || newSlip.CorrelationID == oldCorrelationID {
+		return slippy.ErrInvalidConfiguration
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if old, ok := s.byCorr[oldCorrelationID]; ok {
+		if old.Status.IsLive() {
+			return slippy.ErrSlipWentLive
+		}
+		delete(s.byCorr, oldCorrelationID)
+	}
+	s.creates++
+	cp := *newSlip
+	s.byCorr[newSlip.CorrelationID] = &cp
+	s.byCommit = append(s.byCommit, &cp)
+	s.visibleAt[commitKey(newSlip.Repository, newSlip.CommitSHA)] = time.Now().Add(s.insertLag)
+	return nil
+}
+
 func (s *asyncInsertSlipStore) Load(_ context.Context, correlationID string) (*slippy.Slip, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
