@@ -5,3 +5,10 @@ generate:
   models: true
 output-options:
   client-type-name: Client
+# Always prefix enum constants with their type name. Without this, oapi-codegen emits bare
+# identifiers (Asc, Desc, Nothing, Something) and silently renames ALL of them the moment two
+# enums anywhere in the spec share a value — a source-breaking change in a released module that
+# would land in an unreviewed bot commit. Prefixing up front makes future enum additions
+# non-breaking.
+compatibility:
+  always-prefix-enum-values: true
