@@ -167,7 +167,31 @@ type SlipWriter interface {
 	// closes that window: in_progress is not repaveable, so the push dedups onto
 	// the adopter's slip instead (DEVOPS-285).
 	//
-	// An error means the caller does NOT own the slip and must dispatch nothing.
+	// A nil result means the claim is committed. An error means the claim is NOT
+	// CONFIRMED — it does NOT mean the slip is unclaimed: each of the two writes runs
+	// on a cancellation-detached context (instrumentedWrite/writeContext), so a caller
+	// that times out can see an error against a slip already set in_progress. A caller
+	// that gets an error must still dispatch nothing; the recovery is to claim again.
+	//
+	// A repeat claim on an already-in_progress slip is therefore deliberately a NO-OP,
+	// never a 409: re-claiming is the recovery, and a deterministic rejection would
+	// burn a consumer's whole retry budget and DLQ the message. Do not add an
+	// already-claimed rejection. The no-op de-duplicates SEQUENTIAL retries only — the
+	// Load holds no lock across the writes — so this grants no exclusivity, and this
+	// interface deliberately does not promise any.
+	//
+	// If an adopter cannot dispatch after a committed claim, the slip joins the accepted
+	// zombie class documented at PostgresStore.LoadByCommit ("no timeout or escape
+	// hatch ... operator-recoverable"); it is NOT self-healing for a same-commit push.
+	// Do NOT "release" it with AbandonSlip: abandoned loses the `failed`
+	// empty-run-guard carve-out (see emptyRunGuardApplies) and suppresses the next
+	// push's unit tests. Escalate to an operator instead.
+	//
+	// Claiming also moves a `failed` slip out of consumer-side stranded-slip protection
+	// that keys on `failed` (pushhookparser's AbandonStrandedSlip carve-out), so an
+	// adopter is exposed to a concurrent force-push or branch delete for the life of
+	// its run. Adopters' cleanup paths must learn to recognise a claimed slip.
+	//
 	// claimedBy names the adopter (it becomes the history entry's actor); reason
 	// is optional free text describing the scope of the adopted work.
 	ClaimSlip(ctx context.Context, correlationID, claimedBy, reason string) error

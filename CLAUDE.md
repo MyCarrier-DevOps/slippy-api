@@ -211,10 +211,34 @@ claiming closes the window: the push dedups onto the adopter's slip instead.
   status with the attempt recorded — nothing dispatched, next push recovers the commit.
   Status first would leave a slip `in_progress` with nothing running and no record of why,
   and because `in_progress` is not repaveable, every later same-commit push would dedup onto
-  a slip that never reports again. Two adapter tests assert the order.
-- **`claimMarkerStep` must stay off the configured pipeline steps.** It is `slip_claimed`
-  precisely so no aggregate or phase-duration reader mistakes the marker for a step event.
-  `push_parsed` belongs to the library's own in-place reset marker; an adoption is not a push.
+  a slip that never reports again. Three adapter tests assert the order. One caveat to "with
+  the attempt recorded": a repave that lands *between* the two writes deletes the row and the
+  just-written marker with it, and the status write then 404s — on that path the surviving
+  guarantee is the 404, not the audit trail. (A repave *before* the claim fails the `Load` and
+  writes nothing.)
+- **A repeat claim on an `in_progress` slip is a deliberate no-op, never a 409.** The writes
+  run on a cancellation-detached context, so a caller that times out can see an error against
+  a slip that is already claimed; pushhookparser recovers by retrying the whole message and
+  claiming again. Any deterministic rejection (409 on already-claimed, or a refusal keyed on
+  the prior status) would burn that retry budget and DLQ the rerun. The no-op de-duplicates
+  sequential retries only — it grants no exclusivity, and the contract does not promise any.
+  `TestSlipWriterAdapter_ClaimSlip_RepeatClaimIsANoOp` pins it.
+- **Claiming a `promoted` slip overwrites the primary promotion record with no restoration
+  path.** `UpdateSlipStatus` has no transition guard. `completed` self-heals (step columns are
+  untouched, so the completion check writes `completed` back); `promoted` cannot, because a
+  feature-branch slip never has `prod_steady_state` completed. The residual record is the
+  lagging, descendant-keyed `slip_ancestry.parent_status`. This is not refused — the rerunner
+  adopts whatever the commit lookup returns and a refusal would DLQ it — so the prior status
+  in the marker message is the only in-slip trace: do not reword `claimMarker`'s format
+  casually. DEVOPS-202 (persist `promoted_to`) is the prerequisite for a non-destructive claim.
+- **`claimMarkerStep` should stay off the configured pipeline steps — and only the running
+  service can check that.** It is `slip_claimed` so no phase-duration reader backfills a real
+  step's `StartedAt` from the marker. The live pipeline config is a Vault document loaded at
+  runtime (`SLIPPY_PIPELINE_CONFIG`); the JSON configs shipped with the library are examples, so
+  no unit test here can prove the invariant. `main.go` warns at boot via
+  `infrastructure.ClaimMarkerStepCollision`; the unit test only proves absence from the synthetic
+  test config. `push_parsed` belongs to the library's own in-place reset marker; an adoption is
+  not a push.
 - **No new `SlipStatus` value, ever, for this.** DEVOPS-282 records why: an older reader
   hitting an unknown value falls through `IsTerminal`'s `default: return false`, so
   `IsLive()` reads it as live.

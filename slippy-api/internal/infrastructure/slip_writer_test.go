@@ -812,6 +812,24 @@ func TestSlipWriterAdapter_ClaimSlip_StatusFailureKeepsSlipRecoverable(t *testin
 
 // A claim against a correlation ID whose row was repaved away must fail on the
 // load, before anything is written.
+// A repeat claim must not stack markers or re-write the status: the consumer's
+// message-level retry re-claims after a lost response (the writes are
+// cancellation-detached), so this path IS the recovery, and it must never become
+// a 409 — a deterministic rejection would burn the retry budget and DLQ the rerun.
+func TestSlipWriterAdapter_ClaimSlip_RepeatClaimIsANoOp(t *testing.T) {
+	rec := &claimRecorder{}
+	adapter := newTestWriterAdapter(
+		newClaimStore(rec, slippy.SlipStatusInProgress, nil, nil))
+
+	require.NoError(t, adapter.ClaimSlip(
+		context.Background(), "corr-1", "rerunner", "retrigger builds"))
+
+	assert.Equal(t, []string{"load"}, rec.calls,
+		"a slip already in_progress must be neither marked nor re-set")
+	assert.Empty(t, rec.entries)
+	assert.Empty(t, rec.statuses)
+}
+
 func TestSlipWriterAdapter_ClaimSlip_RepavedSlipWritesNothing(t *testing.T) {
 	var wrote bool
 	store := &mockSlipStore{
@@ -881,9 +899,30 @@ func TestClaimMarker_RecordsPriorStatusAndReason(t *testing.T) {
 func TestClaimMarkerStep_IsNotAPipelineStep(t *testing.T) {
 	cfg, err := slippy.ParsePipelineConfig([]byte(testPipelineConfigJSON))
 	require.NoError(t, err)
-	assert.False(t, cfg.IsAggregateStep(claimMarkerStep))
+	// GetStep, not IsAggregateStep: IsAggregateStep is false for every NON-aggregate
+	// step too, so it cannot detect a collision with one. This only proves the marker
+	// is absent from the SYNTHETIC config above — the live config is a Vault document,
+	// so the real detector is ClaimMarkerStepCollision at boot (see main.go).
+	assert.Nil(t, cfg.GetStep(claimMarkerStep),
+		"claimMarkerStep %q must not name a configured pipeline step", claimMarkerStep)
+	assert.Empty(t, ClaimMarkerStepCollision(cfg))
 	assert.NotEqual(t, "push_parsed", claimMarkerStep,
 		"the library's own reset marker owns push_parsed; an adoption is not a push")
+}
+
+// The boot-time detector must fire when the loaded config really does define a step
+// with the marker's name — that is the one place the invariant can be checked.
+func TestClaimMarkerStepCollision_DetectsCollidingConfig(t *testing.T) {
+	cfg, err := slippy.ParsePipelineConfig([]byte(`{
+	"name": "colliding",
+	"steps": [
+		{"name": "push_parsed"},
+		{"name": "` + claimMarkerStep + `"}
+	]
+}`))
+	require.NoError(t, err)
+	assert.Equal(t, claimMarkerStep, ClaimMarkerStepCollision(cfg))
+	assert.Empty(t, ClaimMarkerStepCollision(nil), "a nil config cannot collide")
 }
 
 func TestIsLockTimeout(t *testing.T) {

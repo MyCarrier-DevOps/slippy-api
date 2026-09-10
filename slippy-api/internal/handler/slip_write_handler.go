@@ -274,8 +274,12 @@ func RegisterWriteRoutes(api huma.API, h *SlipWriteHandler) {
 			"appends an adoption marker to the slip's state history and sets its status to in_progress. " +
 			"Adopters MUST call this before dispatching any workflow. An ended slip stays eligible to be " +
 			"replaced by a same-commit push, which deletes the row out from under in-flight work; a claimed " +
-			"slip is live, so such a push deduplicates onto it instead. A non-2xx response means the caller " +
-			"does not own the slip and must dispatch nothing.",
+			"slip is live, so such a push deduplicates onto it instead. A non-2xx response means the claim " +
+			"is not confirmed and the caller must dispatch nothing; it does not mean the slip is unclaimed, " +
+			"because the writes are not cancelled by a client timeout. Claiming again is the recovery: a " +
+			"repeat claim on a slip that is already in_progress is a no-op, never a conflict. Claiming a " +
+			"failed slip also removes it from consumer-side stranded-slip protection that keys on failed, so " +
+			"the adopter is exposed to a concurrent force-push or branch delete for the life of its run.",
 		Security:      writeApiKeySecurity,
 		DefaultStatus: http.StatusNoContent,
 		Tags:          []string{"v1"},

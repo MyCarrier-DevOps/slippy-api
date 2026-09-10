@@ -728,6 +728,15 @@ func run() error {
 		return fmt.Errorf("pipeline config: %w", err)
 	}
 	log.Printf("pipeline config loaded (%s, %d steps)", pipelineCfg.Name, len(pipelineCfg.Steps))
+	// The slip-claim history marker must not share a name with a configured step, or
+	// the library's step-timing reconstruction would backfill that step's StartedAt
+	// from the marker. The live config is only known here, so this is the one place
+	// the invariant can be checked. A warning, not a boot failure: the consequence is
+	// a wrong derived timestamp on one step, which does not justify refusing to serve.
+	if step := infrastructure.ClaimMarkerStepCollision(pipelineCfg); step != "" {
+		log.Printf("WARNING: pipeline config defines a step named %q, which collides with the "+
+			"slip-claim history marker; derived step timing for it will be wrong", step)
+	}
 
 	// --- Postgres slip store (command + query path) ---
 	// Slips live in Postgres: writes and read-modify-write reads go directly to PG
