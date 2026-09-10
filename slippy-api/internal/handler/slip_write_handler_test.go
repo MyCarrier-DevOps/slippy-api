@@ -137,6 +137,82 @@ func TestCreateSlip_WithComponents(t *testing.T) {
 	assert.Equal(t, "src/Api/Dockerfile", gotOpts.Components[0].DockerfilePath)
 }
 
+// TestCreateSlip_DispatchIntent covers the DEVOPS-341 boundary: a recognized value is
+// forwarded verbatim, omission means unspecified, and anything else is refused with a 422
+// BEFORE the writer runs.
+//
+// The rejection half is the point of validating here at all. The library degrades an
+// unrecognized DispatchIntent to its legacy component-count inference, and that degradation is
+// not safe — a mis-cased "Nothing" arriving with components present repaves and destroys the
+// prior run's history. So the assertion that matters is not just the status code: it is that
+// the writer was never called.
+func TestCreateSlip_DispatchIntent(t *testing.T) {
+	t.Run("forwarded and refused", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			field    string
+			wantCode int
+			want     domain.DispatchIntent
+		}{
+			{"something is forwarded", `,"dispatch":"something"`, http.StatusCreated, slippy.DispatchIntentSomething},
+			{"nothing is forwarded", `,"dispatch":"nothing"`, http.StatusCreated, slippy.DispatchIntentNothing},
+			{"omitted means unspecified", ``, http.StatusCreated, slippy.DispatchIntentUnspecified},
+			// Case variants and typos are reachable inputs, not hypotheticals: the value
+			// crosses two repo boundaries as a bare string.
+			{"mis-cased is refused", `,"dispatch":"Nothing"`, http.StatusUnprocessableEntity, ""},
+			{"unknown is refused", `,"dispatch":"maybe"`, http.StatusUnprocessableEntity, ""},
+			{"padded is refused", `,"dispatch":"nothing "`, http.StatusUnprocessableEntity, ""},
+			// Explicit empty is refused too: omit the field to mean unspecified.
+			{"explicit empty is refused", `,"dispatch":""`, http.StatusUnprocessableEntity, ""},
+			// ...but an explicit null is NOT refused: huma skips validating a null on a
+			// non-required property, so null is a second spelling of "unspecified".
+			{"explicit null means unspecified", `,"dispatch":null`, http.StatusCreated, slippy.DispatchIntentUnspecified},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				called := false
+				var gotOpts domain.PushOptions
+				w := &mockWriter{
+					createSlipForPushFn: func(_ context.Context, opts domain.PushOptions) (*domain.CreateSlipResult, error) {
+						called = true
+						gotOpts = opts
+						return &domain.CreateSlipResult{Slip: &domain.Slip{CorrelationID: opts.CorrelationID}}, nil
+					},
+				}
+				handler := setupWriteTestAPI(w)
+
+				body := `{"correlation_id":"abc-123","repository":"org/repo","branch":"main","commit_sha":"dead"` +
+					tc.field + `}`
+				req := httptest.NewRequest(http.MethodPost, "/slips", strings.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, req)
+
+				require.Equal(t, tc.wantCode, rec.Code, "body: %s", rec.Body.String())
+				if tc.wantCode != http.StatusCreated {
+					assert.False(t, called,
+						"an out-of-range dispatch must be refused before the writer runs — the "+
+							"library's fallback for it is not safe")
+					return
+				}
+				require.True(t, called)
+				assert.Equal(t, tc.want, gotOpts.Dispatch)
+			})
+		}
+	})
+
+	// The huma enum literal is a hand copy of the library's constant VALUES, so pin those. This
+	// does not (and cannot) pin the SET: if the library ever adds a value, the enum above must
+	// be widened by hand — the slippy bump checklist in CLAUDE.md carries that step, because a
+	// missed widening fails closed one repo away (422 -> DLQ) while this suite stays green.
+	t.Run("the enum's values are the library's two explicit constants", func(t *testing.T) {
+		assert.Equal(t, domain.DispatchIntent("something"), slippy.DispatchIntentSomething)
+		assert.Equal(t, domain.DispatchIntent("nothing"), slippy.DispatchIntentNothing)
+		// "" is recognized by the library but deliberately NOT in the huma enum: omission,
+		// not an explicit empty string, is how a caller says "unspecified".
+		assert.Equal(t, domain.DispatchIntent(""), slippy.DispatchIntentUnspecified)
+	})
+}
+
 func TestCreateSlip_WithWarnings(t *testing.T) {
 	w := &mockWriter{
 		createSlipForPushFn: func(_ context.Context, opts domain.PushOptions) (*domain.CreateSlipResult, error) {

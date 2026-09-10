@@ -140,6 +140,26 @@ When a PR merges to `main`, the **`regenerate-client`** CI job:
 - CI won't need to auto-commit after merge
 - You catch issues before merging, not after
 
+### Release gate caveat: commit the spec, think twice about the client
+
+`release-client` runs only when `regenerate-client` reports `changed == 'true'`, and that flag is
+computed by `git diff --quiet slippy-api/api/ slippy-client/` **after** the bot re-runs
+`make generate-client` on `main`. Two consequences:
+
+- If your PR commits both the spec **and** `slippy-client/client.gen.go`, the bot's regeneration
+  may produce no diff, `changed` stays false, and **no client release is cut** — even though the
+  contract changed. Any downstream repo waiting on a released client carrying your field will not
+  get one.
+- The gate is not deterministic either way: the diff also covers `slippy-client/go.mod`/`go.sum`,
+  and `generate-client` runs `go mod tidy` in that module, so unrelated dependency drift can flip
+  `changed` back to true.
+
+When a downstream consumer needs a client release for your change, commit the **spec only**
+(`openapi.json` and `openapi-v1.json`) so reviewers see the contract diff, and let the bot
+regenerate and release the client on merge. Commit `client.gen.go` together with the spec only when
+you have confirmed no release is needed, or when the client change itself is the point of the PR
+(for example a codegen configuration change whose rename you want reviewed as a diff).
+
 ## Troubleshooting
 
 ### oapi-codegen fails with "unsupported OpenAPI version"

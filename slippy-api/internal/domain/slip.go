@@ -40,6 +40,7 @@ type (
 	StateHistoryEntry   = slippy.StateHistoryEntry
 	AncestryEntry       = slippy.AncestryEntry
 	PushOptions         = slippy.PushOptions
+	DispatchIntent      = slippy.DispatchIntent
 	CreateSlipResult    = slippy.CreateSlipResult
 	ComponentDefinition = slippy.ComponentDefinition
 )
