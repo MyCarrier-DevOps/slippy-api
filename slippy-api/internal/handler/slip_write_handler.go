@@ -72,11 +72,24 @@ type CreateSlipInput struct {
 		CommitMessage string                     `json:"commit_message,omitempty" maxLength:"16384" doc:"Commit message (enables squash merge PR-based ancestry)"`
 		Components    []ComponentDefinitionInput `json:"components,omitempty" maxItems:"100" doc:"Components to track in aggregate steps"`
 		// Dispatch states whether this push will dispatch any CI work, so the library does
-		// not have to infer it from the component count (DEVOPS-341). Say "something" if the
-		// push dispatches ANY of builds, unit tests or secret scan — the scan fires for every
-		// human commit independently of builds, so a push that builds nothing and tests
-		// nothing usually still dispatches work. "nothing" is for bot image-tag commits and
-		// genuinely zero-work pushes, NOT for "this repo has no build components".
+		// not have to infer it from the component count (DEVOPS-341).
+		//
+		// HOW TO DERIVE THE VALUE is stated once, in slippy.DispatchIntent's godoc: it turns
+		// on pushhookparser's dispatch behaviour and the pipeline config in Vault, neither of
+		// which anything in this repository can read or notice going stale. This hop forwards
+		// the caller's statement and must never re-derive it.
+		//
+		// WHAT A STATED VALUE DOES, per branch of the pinned library's CreateSlipForPush.
+		// Kept here rather than in the doc: string because no test in this module exercises
+		// any of it — see the slippy bump checklist in CLAUDE.md:
+		//   - ended same-commit row under a DIFFERENT correlation id: "nothing" dedups onto
+		//     it and the response carries THAT run's slip; "something" repaves it, deleting
+		//     its history, even with zero components. Both are consulted BEFORE the `failed`
+		//     carve-out, so a stated value overrides it either way.
+		//   - no existing row: "nothing" seeds no component rows even when components are
+		//     supplied, and leaves an aggregate first step pending.
+		//   - ended row carrying THIS push's correlation id: Dispatch changes nothing. The
+		//     self-correlation exclusion sits above the intent switch and is unconditional.
 		//
 		// The enum is enforced here rather than left to the library. The library degrades an
 		// unrecognized value to the legacy component-count inference, and that degradation is
@@ -86,7 +99,14 @@ type CreateSlipInput struct {
 		//
 		// OMIT the field to mean "unspecified" — the library's zero value, which keeps the
 		// pre-DEVOPS-341 inference. An explicit "" is rejected: state a value or say nothing.
-		Dispatch string `json:"dispatch,omitempty" enum:"something,nothing" doc:"Whether this push dispatches CI work: something (builds, unit tests OR secret scan) or nothing. Omit for unspecified."`
+		// An explicit JSON null is NOT rejected: huma skips validation of a null on a
+		// non-required property, so `"dispatch": null` is a second accepted spelling of
+		// unspecified.
+		//
+		// The field is typed as the library's DispatchIntent (a named string; the generated
+		// schema is identical to a plain string with the same enum) so the value that reaches
+		// the writer is never an unchecked conversion.
+		Dispatch domain.DispatchIntent `json:"dispatch,omitempty" enum:"something,nothing" doc:"Whether this push dispatches CI work: something or nothing. Omit for unspecified. A stated value is authoritative rather than a hint: it can decide whether an earlier run's history for this commit is preserved or replaced, and can leave the returned slip tracking none of the components you supplied. See slippy.DispatchIntent before choosing a value."`
 	}
 }
 
@@ -317,7 +337,7 @@ func (h *SlipWriteHandler) createSlip(ctx context.Context, input *CreateSlipInpu
 			attribute.Int("slip.components_count", len(input.Body.Components)),
 			// Recorded even when empty: "which callers have adopted dispatch yet" is the
 			// question this answers during the DEVOPS-341 rollout.
-			attribute.String("slip.dispatch", input.Body.Dispatch),
+			attribute.String("slip.dispatch", string(input.Body.Dispatch)),
 		),
 	)
 	defer span.End()
@@ -345,7 +365,7 @@ func (h *SlipWriteHandler) createSlip(ctx context.Context, input *CreateSlipInpu
 		CommitSHA:     input.Body.CommitSHA,
 		CommitMessage: input.Body.CommitMessage,
 		Components:    components,
-		Dispatch:      domain.DispatchIntent(input.Body.Dispatch),
+		Dispatch:      input.Body.Dispatch,
 	})
 	if err != nil {
 		recordHandlerError(span, err)

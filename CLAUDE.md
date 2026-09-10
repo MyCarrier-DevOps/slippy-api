@@ -158,7 +158,14 @@ When bumping `goLibMyCarrier/slippy` to a new version:
 5. Run `go test ./... -short` — fix any test assumptions broken by behavioral changes.
 6. Run `make lint` — 0 issues expected.
 7. Scan for `PromoteSlip`/`AbandonSlip` call sites followed by step mutations — since v1.3.77, slip.status is preserved after those terminal operations (no longer overwritten by late step events).
-8. No source code changes expected beyond `go.mod`, `go.sum`, and test mocks.
+8. Check whether `slippy.DispatchIntent` gained a value — if so, widen `enum:"something,nothing"`
+   on `CreateSlipInput.Body.Dispatch` in `internal/handler/slip_write_handler.go` — or whether the
+   guard/seeding mechanics documented in the comment on that field changed (`emptyRunGuardApplies`
+   ordering, the `failed` carve-out, component seeding in `initializeSlipForPush`). Nothing in
+   this module tests those mechanics and the library functions are unexported, so this step is the
+   only detector; a missed enum widening fails closed in pushhookparser (422 → DLQ) while the
+   local suite stays green.
+9. Otherwise no source code changes expected beyond `go.mod`, `go.sum`, and test mocks.
 
 **v1.3.102 adds Postgres migration v5 (`one_slip_per_commit`, DEVOPS-231 Phase B).** No
 interface change and no source change here — but deploying this bump is what APPLIES that

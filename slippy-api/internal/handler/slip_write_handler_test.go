@@ -157,6 +157,9 @@ func TestCreateSlip_DispatchIntent(t *testing.T) {
 			{"padded is refused", `,"dispatch":"nothing "`, http.StatusUnprocessableEntity, ""},
 			// Explicit empty is refused too: omit the field to mean unspecified.
 			{"explicit empty is refused", `,"dispatch":""`, http.StatusUnprocessableEntity, ""},
+			// ...but an explicit null is NOT refused: huma skips validating a null on a
+			// non-required property, so null is a second spelling of "unspecified".
+			{"explicit null means unspecified", `,"dispatch":null`, http.StatusCreated, slippy.DispatchIntentUnspecified},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				called := false
@@ -190,11 +193,15 @@ func TestCreateSlip_DispatchIntent(t *testing.T) {
 		}
 	})
 
-	// A rejected value must not be silently coerced into a recognized one: that would put the
-	// library back on the inference path while the caller believes it stated an intent.
-	t.Run("the enum is exactly the library's recognized set", func(t *testing.T) {
+	// The huma enum literal is a hand copy of the library's constant VALUES, so pin those. This
+	// does not (and cannot) pin the SET: if the library ever adds a value, the enum above must
+	// be widened by hand — the slippy bump checklist in CLAUDE.md carries that step, because a
+	// missed widening fails closed one repo away (422 -> DLQ) while this suite stays green.
+	t.Run("the enum's values are the library's two explicit constants", func(t *testing.T) {
 		assert.Equal(t, domain.DispatchIntent("something"), slippy.DispatchIntentSomething)
 		assert.Equal(t, domain.DispatchIntent("nothing"), slippy.DispatchIntentNothing)
+		// "" is recognized by the library but deliberately NOT in the huma enum: omission,
+		// not an explicit empty string, is how a caller says "unspecified".
 		assert.Equal(t, domain.DispatchIntent(""), slippy.DispatchIntentUnspecified)
 	})
 }
