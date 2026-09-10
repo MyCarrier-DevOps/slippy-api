@@ -727,6 +727,204 @@ func TestSlipWriterAdapter_CompleteStep_FromFailed_Recovery(t *testing.T) {
 	assert.Equal(t, slippy.StepStatusCompleted, writtenStatus)
 }
 
+// --- ClaimSlip (DEVOPS-285) ---
+
+// claimRecorder captures the order of store calls a claim makes, which is the
+// property under test: the marker must be durable before the status flips.
+type claimRecorder struct {
+	calls    []string
+	entries  []slippy.StateHistoryEntry
+	statuses []slippy.SlipStatus
+}
+
+func newClaimStore(rec *claimRecorder, prior slippy.SlipStatus, appendErr, statusErr error) *mockSlipStore {
+	return &mockSlipStore{
+		loadFn: func(_ context.Context, id string) (*slippy.Slip, error) {
+			rec.calls = append(rec.calls, "load")
+			return &slippy.Slip{CorrelationID: id, Status: prior}, nil
+		},
+		appendHistoryFn: func(_ context.Context, _ string, entry slippy.StateHistoryEntry) error {
+			rec.calls = append(rec.calls, "append_history")
+			rec.entries = append(rec.entries, entry)
+			return appendErr
+		},
+		updateSlipStatusFn: func(_ context.Context, _ string, status slippy.SlipStatus) error {
+			rec.calls = append(rec.calls, "update_status")
+			rec.statuses = append(rec.statuses, status)
+			return statusErr
+		},
+	}
+}
+
+func TestSlipWriterAdapter_ClaimSlip_WritesMarkerThenStatus(t *testing.T) {
+	rec := &claimRecorder{}
+	adapter := newTestWriterAdapter(newClaimStore(rec, slippy.SlipStatusFailed, nil, nil))
+
+	err := adapter.ClaimSlip(context.Background(), "corr-1", "rerunner", "retrigger builds")
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"load", "append_history", "update_status"}, rec.calls)
+	require.Len(t, rec.statuses, 1)
+	assert.Equal(t, slippy.SlipStatusInProgress, rec.statuses[0],
+		"a claim must make the slip live, so a same-commit push dedups instead of repaving")
+
+	require.Len(t, rec.entries, 1)
+	entry := rec.entries[0]
+	assert.Equal(t, claimMarkerStep, entry.Step)
+	assert.Equal(t, slippy.StepStatusRunning, entry.Status)
+	assert.Equal(t, "rerunner", entry.Actor)
+	assert.Equal(t, "adopted failed slip before dispatching: retrigger builds", entry.Message)
+	assert.False(t, entry.Timestamp.IsZero())
+}
+
+// The invariant that makes a partial claim survivable: if the marker cannot be
+// written, the status must stay where it was. A slip left in_progress with no
+// marker and nothing running is not repaveable, so every later same-commit push
+// dedups onto a slip that will never report again.
+func TestSlipWriterAdapter_ClaimSlip_MarkerFailureLeavesStatusUntouched(t *testing.T) {
+	rec := &claimRecorder{}
+	adapter := newTestWriterAdapter(
+		newClaimStore(rec, slippy.SlipStatusFailed, errors.New("history write failed"), nil))
+
+	err := adapter.ClaimSlip(context.Background(), "corr-1", "rerunner", "")
+	require.Error(t, err)
+
+	assert.NotContains(t, rec.calls, "update_status",
+		"the status must not flip when the marker write failed")
+	assert.Empty(t, rec.statuses)
+}
+
+// The other half-applied state, which IS survivable: the marker landed and the
+// status write failed. The caller gets an error and dispatches nothing; the slip
+// keeps its prior (repave-eligible) status, so the next push recovers the commit.
+func TestSlipWriterAdapter_ClaimSlip_StatusFailureKeepsSlipRecoverable(t *testing.T) {
+	rec := &claimRecorder{}
+	adapter := newTestWriterAdapter(
+		newClaimStore(rec, slippy.SlipStatusFailed, nil, errors.New("status write failed")))
+
+	err := adapter.ClaimSlip(context.Background(), "corr-1", "rerunner", "")
+	require.Error(t, err, "a caller that cannot claim its slip must not dispatch")
+
+	assert.Equal(t, []string{"load", "append_history", "update_status"}, rec.calls)
+	require.Len(t, rec.entries, 1,
+		"the attempt is recorded in the history even though the claim did not complete")
+}
+
+// A claim against a correlation ID whose row was repaved away must fail on the
+// load, before anything is written.
+// A repeat claim must not stack markers or re-write the status: the consumer's
+// message-level retry re-claims after a lost response (the writes are
+// cancellation-detached), so this path IS the recovery, and it must never become
+// a 409 — a deterministic rejection would burn the retry budget and DLQ the rerun.
+func TestSlipWriterAdapter_ClaimSlip_RepeatClaimIsANoOp(t *testing.T) {
+	rec := &claimRecorder{}
+	adapter := newTestWriterAdapter(
+		newClaimStore(rec, slippy.SlipStatusInProgress, nil, nil))
+
+	require.NoError(t, adapter.ClaimSlip(
+		context.Background(), "corr-1", "rerunner", "retrigger builds"))
+
+	assert.Equal(t, []string{"load"}, rec.calls,
+		"a slip already in_progress must be neither marked nor re-set")
+	assert.Empty(t, rec.entries)
+	assert.Empty(t, rec.statuses)
+}
+
+func TestSlipWriterAdapter_ClaimSlip_RepavedSlipWritesNothing(t *testing.T) {
+	var wrote bool
+	store := &mockSlipStore{
+		loadFn: func(_ context.Context, _ string) (*slippy.Slip, error) {
+			return nil, slippy.ErrSlipNotFound
+		},
+		appendHistoryFn: func(_ context.Context, _ string, _ slippy.StateHistoryEntry) error {
+			wrote = true
+			return nil
+		},
+		updateSlipStatusFn: func(_ context.Context, _ string, _ slippy.SlipStatus) error {
+			wrote = true
+			return nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	err := adapter.ClaimSlip(context.Background(), "corr-gone", "rerunner", "")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, slippy.ErrSlipNotFound,
+		"the caller needs the not-found sentinel to surface as an actionable 404")
+	assert.False(t, wrote, "nothing may be written for a slip that no longer exists")
+}
+
+// The prior status in the marker is what separates a routine rerun of a failed
+// slip from the resurrection of an ended one. The rerunner adopts whatever the
+// commit lookup returns without filtering on status, so both reach here.
+func TestClaimMarker_RecordsPriorStatusAndReason(t *testing.T) {
+	tests := []struct {
+		name    string
+		prior   slippy.SlipStatus
+		reason  string
+		wantMsg string
+	}{
+		{
+			"failed slip with scope",
+			slippy.SlipStatusFailed,
+			"retrigger builds and unit tests",
+			"adopted failed slip before dispatching: retrigger builds and unit tests",
+		},
+		{
+			"reason omitted",
+			slippy.SlipStatusFailed,
+			"",
+			"adopted failed slip before dispatching",
+		},
+		{
+			"completed slip is legible as unusual",
+			slippy.SlipStatusCompleted,
+			"",
+			"adopted completed slip before dispatching",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			entry := claimMarker(tc.prior, "rerunner", tc.reason)
+			assert.Equal(t, tc.wantMsg, entry.Message)
+			assert.Equal(t, "rerunner", entry.Actor)
+			assert.Equal(t, claimMarkerStep, entry.Step)
+		})
+	}
+}
+
+// claimMarkerStep must never collide with a configured pipeline step: an
+// aggregate or phase-duration reader would otherwise pick the marker up as a
+// real step event.
+func TestClaimMarkerStep_IsNotAPipelineStep(t *testing.T) {
+	cfg, err := slippy.ParsePipelineConfig([]byte(testPipelineConfigJSON))
+	require.NoError(t, err)
+	// GetStep, not IsAggregateStep: IsAggregateStep is false for every NON-aggregate
+	// step too, so it cannot detect a collision with one. This only proves the marker
+	// is absent from the SYNTHETIC config above — the live config is a Vault document,
+	// so the real detector is ClaimMarkerStepCollision at boot (see main.go).
+	assert.Nil(t, cfg.GetStep(claimMarkerStep),
+		"claimMarkerStep %q must not name a configured pipeline step", claimMarkerStep)
+	assert.Empty(t, ClaimMarkerStepCollision(cfg))
+	assert.NotEqual(t, "push_parsed", claimMarkerStep,
+		"the library's own reset marker owns push_parsed; an adoption is not a push")
+}
+
+// The boot-time detector must fire when the loaded config really does define a step
+// with the marker's name — that is the one place the invariant can be checked.
+func TestClaimMarkerStepCollision_DetectsCollidingConfig(t *testing.T) {
+	cfg, err := slippy.ParsePipelineConfig([]byte(`{
+	"name": "colliding",
+	"steps": [
+		{"name": "push_parsed"},
+		{"name": "` + claimMarkerStep + `"}
+	]
+}`))
+	require.NoError(t, err)
+	assert.Equal(t, claimMarkerStep, ClaimMarkerStepCollision(cfg))
+	assert.Empty(t, ClaimMarkerStepCollision(nil), "a nil config cannot collide")
+}
+
 func TestIsLockTimeout(t *testing.T) {
 	assert.True(t, isLockTimeout(&pgconn.PgError{Code: "55P03"}))
 	assert.True(t, isLockTimeout(fmt.Errorf("failed to lock slip: %w", &pgconn.PgError{Code: "55P03"})))

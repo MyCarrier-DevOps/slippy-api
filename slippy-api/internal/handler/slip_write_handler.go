@@ -197,6 +197,17 @@ type AbandonSlipInput struct {
 	}
 }
 
+// ClaimSlipInput captures path params and body for claiming an adopted slip.
+type ClaimSlipInput struct {
+	CorrelationID string `path:"correlationID" doc:"Routing slip correlation ID"`
+	Body          struct {
+		// Required: an unattributed claim is not much use to the operator reading
+		// the history later, which is the whole point of the marker.
+		ClaimedBy string `json:"claimed_by" minLength:"1" maxLength:"128" pattern:"^[A-Za-z0-9._:/-]+$" doc:"Adopter that is taking over this slip (e.g. \"rerunner\"); recorded as the history entry's actor"`
+		Reason    string `json:"reason,omitempty" maxLength:"512" doc:"Optional scope of the adopted work (e.g. \"retrigger builds and unit tests\")"`
+	}
+}
+
 // SetImageTagInput captures path params and body for setting an image tag.
 type SetImageTagInput struct {
 	CorrelationID string `path:"correlationID" doc:"Routing slip correlation ID"`
@@ -289,6 +300,26 @@ func RegisterWriteRoutes(api huma.API, h *SlipWriteHandler) {
 		DefaultStatus: http.StatusNoContent,
 		Tags:          []string{"v1"},
 	}, h.abandonSlip)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "claim-slip",
+		Method:      http.MethodPost,
+		Path:        "/slips/{correlationID}/claim",
+		Summary:     "Claim an adopted routing slip before dispatching work against it",
+		Description: "Records that the caller has work in flight against a slip it did not create: " +
+			"appends an adoption marker to the slip's state history and sets its status to in_progress. " +
+			"Adopters MUST call this before dispatching any workflow. An ended slip stays eligible to be " +
+			"replaced by a same-commit push, which deletes the row out from under in-flight work; a claimed " +
+			"slip is live, so such a push deduplicates onto it instead. A non-2xx response means the claim " +
+			"is not confirmed and the caller must dispatch nothing; it does not mean the slip is unclaimed, " +
+			"because the writes are not cancelled by a client timeout. Claiming again is the recovery: a " +
+			"repeat claim on a slip that is already in_progress is a no-op, never a conflict. Claiming a " +
+			"failed slip also removes it from consumer-side stranded-slip protection that keys on failed, so " +
+			"the adopter is exposed to a concurrent force-push or branch delete for the life of its run.",
+		Security:      writeApiKeySecurity,
+		DefaultStatus: http.StatusNoContent,
+		Tags:          []string{"v1"},
+	}, h.claimSlip)
 }
 
 // --- Validation ----------------------------------------------------------
@@ -634,13 +665,59 @@ func (h *SlipWriteHandler) abandonSlip(ctx context.Context, input *AbandonSlipIn
 	return &struct{}{}, nil
 }
 
+func (h *SlipWriteHandler) claimSlip(ctx context.Context, input *ClaimSlipInput) (*struct{}, error) {
+	if err := validateCorrelationIDFormat(input.CorrelationID); err != nil {
+		return nil, err
+	}
+	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.claimSlip",
+		trace.WithAttributes(
+			attribute.String("slip.correlation_id", input.CorrelationID),
+			attribute.String("slip.claimed_by", input.Body.ClaimedBy),
+		),
+	)
+	defer span.End()
+
+	slog.InfoContext(ctx, "slip: claim",
+		"correlation_id", input.CorrelationID,
+		"claimed_by", input.Body.ClaimedBy, "reason", input.Body.Reason)
+
+	if err := h.writer.ClaimSlip(ctx, input.CorrelationID, input.Body.ClaimedBy, input.Body.Reason); err != nil {
+		recordHandlerError(span, err)
+		// Logged at Error, not Warn, even for the expected not-found: the caller is
+		// about to abandon a dispatch it was asked to perform, and the operator who
+		// triggered the rerun needs the correlation ID to find out why nothing ran.
+		slog.ErrorContext(ctx, "slip: claim failed",
+			"correlation_id", input.CorrelationID,
+			"claimed_by", input.Body.ClaimedBy, "error", err)
+		return nil, mapWriteError(err)
+	}
+	h.invalidate(ctx, input.CorrelationID)
+	span.SetStatus(codes.Ok, "")
+	slog.InfoContext(ctx, "slip: claimed",
+		"correlation_id", input.CorrelationID, "claimed_by", input.Body.ClaimedBy)
+	return &struct{}{}, nil
+}
+
 // --- Error Mapping -------------------------------------------------------
 
 // mapWriteError converts domain/store errors to huma status errors for write ops.
 func mapWriteError(err error) error {
 	switch {
 	case errors.Is(err, slippy.ErrSlipNotFound):
-		return huma.NewError(http.StatusNotFound, "slip not found")
+		// Deliberately more than "slip not found". On a WRITE the overwhelmingly
+		// likely cause is not a typo in the correlation ID but that the row was
+		// replaced: a same-commit push repaves an ended slip by deleting it and
+		// inserting a fresh one under a new correlation ID, so a straggling write
+		// from the superseded run arrives here with nowhere to land. Nothing
+		// distinguishes the two cases at this layer — the row is simply gone, and
+		// DEVOPS-277 declined to leave a tombstone behind — so the message names
+		// the likely cause and the recovery instead of guessing (DEVOPS-285).
+		return huma.NewError(
+			http.StatusNotFound,
+			"no routing slip with this correlation ID; it was either never created or has been "+
+				"replaced by a newer run for the same commit. Re-read the slip for this "+
+				"repository and commit to get the current correlation ID before retrying",
+		)
 	case errors.Is(err, slippy.ErrInvalidCorrelationID):
 		return huma.NewError(http.StatusBadRequest, "invalid correlation ID")
 	case errors.Is(err, slippy.ErrInvalidRepository):

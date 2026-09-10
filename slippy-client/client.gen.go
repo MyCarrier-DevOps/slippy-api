@@ -126,6 +126,18 @@ type CIJobLog struct {
 	Timestamp       time.Time `json:"timestamp"`
 }
 
+// ClaimSlipInputBody defines model for ClaimSlipInputBody.
+type ClaimSlipInputBody struct {
+	// Schema A URL to the JSON Schema for this object.
+	Schema *string `json:"$schema,omitempty"`
+
+	// ClaimedBy Adopter that is taking over this slip (e.g. "rerunner"); recorded as the history entry's actor
+	ClaimedBy string `json:"claimed_by"`
+
+	// Reason Optional scope of the adopted work (e.g. "retrigger builds and unit tests")
+	Reason *string `json:"reason,omitempty"`
+}
+
 // ComponentDefinitionInput defines model for ComponentDefinitionInput.
 type ComponentDefinitionInput struct {
 	// DockerfilePath Path to Dockerfile
@@ -550,6 +562,9 @@ type FindByCommitsJSONRequestBody = FindByCommitsInputBody
 // AbandonSlipJSONRequestBody defines body for AbandonSlip for application/json ContentType.
 type AbandonSlipJSONRequestBody = AbandonSlipInputBody
 
+// ClaimSlipJSONRequestBody defines body for ClaimSlip for application/json ContentType.
+type ClaimSlipJSONRequestBody = ClaimSlipInputBody
+
 // SetImageTagJSONRequestBody defines body for SetImageTag for application/json ContentType.
 type SetImageTagJSONRequestBody = SetImageTagInputBody
 
@@ -684,6 +699,11 @@ type ClientInterface interface {
 	AbandonSlipWithBody(ctx context.Context, correlationID string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	AbandonSlip(ctx context.Context, correlationID string, body AbandonSlipJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ClaimSlipWithBody request with any body
+	ClaimSlipWithBody(ctx context.Context, correlationID string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ClaimSlip(ctx context.Context, correlationID string, body ClaimSlipJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// SetImageTagWithBody request with any body
 	SetImageTagWithBody(ctx context.Context, correlationID string, componentName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -904,6 +924,30 @@ func (c *Client) AbandonSlipWithBody(ctx context.Context, correlationID string, 
 
 func (c *Client) AbandonSlip(ctx context.Context, correlationID string, body AbandonSlipJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewAbandonSlipRequest(c.Server, correlationID, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ClaimSlipWithBody(ctx context.Context, correlationID string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewClaimSlipRequestWithBody(c.Server, correlationID, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ClaimSlip(ctx context.Context, correlationID string, body ClaimSlipJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewClaimSlipRequest(c.Server, correlationID, body)
 	if err != nil {
 		return nil, err
 	}
@@ -1978,6 +2022,53 @@ func NewAbandonSlipRequestWithBody(server string, correlationID string, contentT
 	return req, nil
 }
 
+// NewClaimSlipRequest calls the generic ClaimSlip builder with application/json body
+func NewClaimSlipRequest(server string, correlationID string, body ClaimSlipJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewClaimSlipRequestWithBody(server, correlationID, "application/json", bodyReader)
+}
+
+// NewClaimSlipRequestWithBody generates requests for ClaimSlip with any type of body
+func NewClaimSlipRequestWithBody(server string, correlationID string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "correlationID", correlationID, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/slips/%s/claim", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewSetImageTagRequest calls the generic SetImageTag builder with application/json body
 func NewSetImageTagRequest(server string, correlationID string, componentName string, body SetImageTagJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -2457,6 +2548,11 @@ type ClientWithResponsesInterface interface {
 
 	AbandonSlipWithResponse(ctx context.Context, correlationID string, body AbandonSlipJSONRequestBody, reqEditors ...RequestEditorFn) (*AbandonSlipResponse, error)
 
+	// ClaimSlipWithBodyWithResponse request with any body
+	ClaimSlipWithBodyWithResponse(ctx context.Context, correlationID string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ClaimSlipResponse, error)
+
+	ClaimSlipWithResponse(ctx context.Context, correlationID string, body ClaimSlipJSONRequestBody, reqEditors ...RequestEditorFn) (*ClaimSlipResponse, error)
+
 	// SetImageTagWithBodyWithResponse request with any body
 	SetImageTagWithBodyWithResponse(ctx context.Context, correlationID string, componentName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetImageTagResponse, error)
 
@@ -2763,6 +2859,28 @@ func (r AbandonSlipResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r AbandonSlipResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ClaimSlipResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r ClaimSlipResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ClaimSlipResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -3085,6 +3203,23 @@ func (c *ClientWithResponses) AbandonSlipWithResponse(ctx context.Context, corre
 		return nil, err
 	}
 	return ParseAbandonSlipResponse(rsp)
+}
+
+// ClaimSlipWithBodyWithResponse request with arbitrary body returning *ClaimSlipResponse
+func (c *ClientWithResponses) ClaimSlipWithBodyWithResponse(ctx context.Context, correlationID string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ClaimSlipResponse, error) {
+	rsp, err := c.ClaimSlipWithBody(ctx, correlationID, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseClaimSlipResponse(rsp)
+}
+
+func (c *ClientWithResponses) ClaimSlipWithResponse(ctx context.Context, correlationID string, body ClaimSlipJSONRequestBody, reqEditors ...RequestEditorFn) (*ClaimSlipResponse, error) {
+	rsp, err := c.ClaimSlip(ctx, correlationID, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseClaimSlipResponse(rsp)
 }
 
 // SetImageTagWithBodyWithResponse request with arbitrary body returning *SetImageTagResponse
@@ -3579,6 +3714,32 @@ func ParseAbandonSlipResponse(rsp *http.Response) (*AbandonSlipResponse, error) 
 	}
 
 	response := &AbandonSlipResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseClaimSlipResponse parses an HTTP response from a ClaimSlipWithResponse call
+func ParseClaimSlipResponse(rsp *http.Response) (*ClaimSlipResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ClaimSlipResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

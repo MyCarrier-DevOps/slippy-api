@@ -203,6 +203,59 @@ needs no change for that: it surfaces the library's result as it already does.
 - Mock implementations of `slippy.SlipStore` live in `internal/infrastructure/store_test.go`. The compile-time check `var _ slippy.SlipStore = (*mockSlipStore)(nil)` in `z_slipstore_interface_test.go` will catch interface drift on every build.
 - ClickHouse test mocks come from upstream `goLibMyCarrier/clickhouse/clickhousetest` (since the v1.3.100 bump, DEVOPS-343). They were vendored in `internal/testsupport/clickhousetest` while upstream's `MockConn` lacked `InsertFormat`/`QueryFormat` against clickhouse-go/v2 v2.48.0+; goLibMyCarrier#82 fixed that upstream and the vendored copy was deleted.
 
+### The claim endpoint, and why its two writes are ordered (DEVOPS-285)
+
+`POST /slips/{correlationID}/claim` exists for callers that adopt a correlation ID they did
+not create — today only pushhookparser's rerunner, which reuses the slip returned by a
+commit lookup and then dispatches workflows against it. An ended slip is repave-eligible, so
+a same-commit push in the window before the adopter's first step write deletes the row and
+every later write from that run 404s. `in_progress` is not in `repaveableSlipStatusesSQL`, so
+claiming closes the window: the push dedups onto the adopter's slip instead.
+
+- **Do not reorder the two writes.** The library has no atomic status-plus-history primitive
+  at slip level, so the marker append and the status update are separate transactions.
+  Marker first means a failed status write leaves the slip at its prior, still-repaveable
+  status with the attempt recorded — nothing dispatched, next push recovers the commit.
+  Status first would leave a slip `in_progress` with nothing running and no record of why,
+  and because `in_progress` is not repaveable, every later same-commit push would dedup onto
+  a slip that never reports again. Three adapter tests assert the order. One caveat to "with
+  the attempt recorded": a repave that lands *between* the two writes deletes the row and the
+  just-written marker with it, and the status write then 404s — on that path the surviving
+  guarantee is the 404, not the audit trail. (A repave *before* the claim fails the `Load` and
+  writes nothing.)
+- **A repeat claim on an `in_progress` slip is a deliberate no-op, never a 409.** The writes
+  run on a cancellation-detached context, so a caller that times out can see an error against
+  a slip that is already claimed; pushhookparser recovers by retrying the whole message and
+  claiming again. Any deterministic rejection (409 on already-claimed, or a refusal keyed on
+  the prior status) would burn that retry budget and DLQ the rerun. The no-op de-duplicates
+  sequential retries only — it grants no exclusivity, and the contract does not promise any.
+  `TestSlipWriterAdapter_ClaimSlip_RepeatClaimIsANoOp` pins it.
+- **Claiming a `promoted` slip overwrites the primary promotion record with no restoration
+  path.** `UpdateSlipStatus` has no transition guard. `completed` self-heals (step columns are
+  untouched, so the completion check writes `completed` back); `promoted` cannot, because a
+  feature-branch slip never has `prod_steady_state` completed. The residual record is the
+  lagging, descendant-keyed `slip_ancestry.parent_status`. This is not refused — the rerunner
+  adopts whatever the commit lookup returns and a refusal would DLQ it — so the prior status
+  in the marker message is the only in-slip trace: do not reword `claimMarker`'s format
+  casually. DEVOPS-202 (persist `promoted_to`) is the prerequisite for a non-destructive claim.
+- **`claimMarkerStep` should stay off the configured pipeline steps — and only the running
+  service can check that.** It is `slip_claimed` so no phase-duration reader backfills a real
+  step's `StartedAt` from the marker. The live pipeline config is a Vault document loaded at
+  runtime (`SLIPPY_PIPELINE_CONFIG`); the JSON configs shipped with the library are examples, so
+  no unit test here can prove the invariant. `main.go` warns at boot via
+  `infrastructure.ClaimMarkerStepCollision`; the unit test only proves absence from the synthetic
+  test config. `push_parsed` belongs to the library's own in-place reset marker; an adoption is
+  not a push.
+- **No new `SlipStatus` value, ever, for this.** DEVOPS-282 records why: an older reader
+  hitting an unknown value falls through `IsTerminal`'s `default: return false`, so
+  `IsLive()` reads it as live.
+
+**Deploy the API before any client that calls a new route or sends a new field.** huma emits
+`additionalProperties: false`, so an unknown body property is answered with 422 — a client
+that leads the API fails hard rather than degrading. This applies to `/claim` and equally to
+new request fields such as `dispatch` (DEVOPS-341). `TestClaimSlip_RejectsBadInput` pins the
+behaviour so the constraint lives in the tests rather than in folklore.
+
 ### Removed: Read-Your-Own-Writes Overlay (ClickHouse-era)
 
 The `overlayPipelineStep` / `hydrateAndPersist` read-your-own-writes overlay was **removed** in
