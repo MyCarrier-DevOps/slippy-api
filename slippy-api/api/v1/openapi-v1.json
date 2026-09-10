@@ -398,6 +398,14 @@
             "description": "Unique slip identifier (from Kafka event)",
             "type": "string"
           },
+          "dispatch": {
+            "description": "Whether this push dispatches CI work: something or nothing. Omit for unspecified. A stated value is authoritative rather than a hint: it can decide whether an earlier run's history for this commit is preserved or replaced, and can leave the returned slip tracking none of the components you supplied. See slippy.DispatchIntent before choosing a value.",
+            "enum": [
+              "something",
+              "nothing"
+            ],
+            "type": "string"
+          },
           "repository": {
             "description": "Full repository name (owner/repo)",
             "maxLength": 256,
