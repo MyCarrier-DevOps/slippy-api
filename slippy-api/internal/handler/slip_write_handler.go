@@ -71,6 +71,22 @@ type CreateSlipInput struct {
 		// would degrade slip resolution. 16 KiB bounds the field without touching real use.
 		CommitMessage string                     `json:"commit_message,omitempty" maxLength:"16384" doc:"Commit message (enables squash merge PR-based ancestry)"`
 		Components    []ComponentDefinitionInput `json:"components,omitempty" maxItems:"100" doc:"Components to track in aggregate steps"`
+		// Dispatch states whether this push will dispatch any CI work, so the library does
+		// not have to infer it from the component count (DEVOPS-341). Say "something" if the
+		// push dispatches ANY of builds, unit tests or secret scan — the scan fires for every
+		// human commit independently of builds, so a push that builds nothing and tests
+		// nothing usually still dispatches work. "nothing" is for bot image-tag commits and
+		// genuinely zero-work pushes, NOT for "this repo has no build components".
+		//
+		// The enum is enforced here rather than left to the library. The library degrades an
+		// unrecognized value to the legacy component-count inference, and that degradation is
+		// not safe: a mis-cased "Nothing" arriving with components present repaves and
+		// destroys the prior run's history. Rejecting at the boundary with a 422 is the whole
+		// point of validating here.
+		//
+		// OMIT the field to mean "unspecified" — the library's zero value, which keeps the
+		// pre-DEVOPS-341 inference. An explicit "" is rejected: state a value or say nothing.
+		Dispatch string `json:"dispatch,omitempty" enum:"something,nothing" doc:"Whether this push dispatches CI work: something (builds, unit tests OR secret scan) or nothing. Omit for unspecified."`
 	}
 }
 
@@ -299,6 +315,9 @@ func (h *SlipWriteHandler) createSlip(ctx context.Context, input *CreateSlipInpu
 			attribute.String("slip.branch", input.Body.Branch),
 			attribute.String("slip.commit_sha", input.Body.CommitSHA),
 			attribute.Int("slip.components_count", len(input.Body.Components)),
+			// Recorded even when empty: "which callers have adopted dispatch yet" is the
+			// question this answers during the DEVOPS-341 rollout.
+			attribute.String("slip.dispatch", input.Body.Dispatch),
 		),
 	)
 	defer span.End()
@@ -308,7 +327,8 @@ func (h *SlipWriteHandler) createSlip(ctx context.Context, input *CreateSlipInpu
 		"repository", input.Body.Repository,
 		"branch", input.Body.Branch,
 		"commit_sha", input.Body.CommitSHA,
-		"components_count", len(input.Body.Components))
+		"components_count", len(input.Body.Components),
+		"dispatch", input.Body.Dispatch)
 
 	components := make([]domain.ComponentDefinition, len(input.Body.Components))
 	for i, c := range input.Body.Components {
@@ -325,6 +345,7 @@ func (h *SlipWriteHandler) createSlip(ctx context.Context, input *CreateSlipInpu
 		CommitSHA:     input.Body.CommitSHA,
 		CommitMessage: input.Body.CommitMessage,
 		Components:    components,
+		Dispatch:      domain.DispatchIntent(input.Body.Dispatch),
 	})
 	if err != nil {
 		recordHandlerError(span, err)
