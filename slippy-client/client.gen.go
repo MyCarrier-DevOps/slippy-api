@@ -22,6 +22,24 @@ const (
 	WriteApiKeyScopes = "writeApiKey.Scopes"
 )
 
+// Defines values for CreateSlipInputBodyDispatch.
+const (
+	CreateSlipInputBodyDispatchNothing   CreateSlipInputBodyDispatch = "nothing"
+	CreateSlipInputBodyDispatchSomething CreateSlipInputBodyDispatch = "something"
+)
+
+// Valid indicates whether the value is a known member of the CreateSlipInputBodyDispatch enum.
+func (e CreateSlipInputBodyDispatch) Valid() bool {
+	switch e {
+	case CreateSlipInputBodyDispatchNothing:
+		return true
+	case CreateSlipInputBodyDispatchSomething:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for GetLogsParamsSort.
 const (
 	GetLogsParamsSortAsc  GetLogsParamsSort = "asc"
@@ -179,9 +197,15 @@ type CreateSlipInputBody struct {
 	// CorrelationId Unique slip identifier (from Kafka event)
 	CorrelationId string `json:"correlation_id"`
 
+	// Dispatch Whether this push dispatches CI work: something or nothing. Omit for unspecified. A stated value is authoritative rather than a hint: it can decide whether an earlier run's history for this commit is preserved or replaced, and can leave the returned slip tracking none of the components you supplied. See slippy.DispatchIntent before choosing a value.
+	Dispatch *CreateSlipInputBodyDispatch `json:"dispatch,omitempty"`
+
 	// Repository Full repository name (owner/repo)
 	Repository string `json:"repository"`
 }
+
+// CreateSlipInputBodyDispatch Whether this push dispatches CI work: something or nothing. Omit for unspecified. A stated value is authoritative rather than a hint: it can decide whether an earlier run's history for this commit is preserved or replaced, and can leave the returned slip tracking none of the components you supplied. See slippy.DispatchIntent before choosing a value.
+type CreateSlipInputBodyDispatch string
 
 // CreateSlipOutputBody defines model for CreateSlipOutputBody.
 type CreateSlipOutputBody struct {
