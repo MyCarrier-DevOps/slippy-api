@@ -24,16 +24,16 @@ const (
 
 // Defines values for GetLogsParamsSort.
 const (
-	Asc  GetLogsParamsSort = "asc"
-	Desc GetLogsParamsSort = "desc"
+	GetLogsParamsSortAsc  GetLogsParamsSort = "asc"
+	GetLogsParamsSortDesc GetLogsParamsSort = "desc"
 )
 
 // Valid indicates whether the value is a known member of the GetLogsParamsSort enum.
 func (e GetLogsParamsSort) Valid() bool {
 	switch e {
-	case Asc:
+	case GetLogsParamsSortAsc:
 		return true
-	case Desc:
+	case GetLogsParamsSortDesc:
 		return true
 	default:
 		return false
