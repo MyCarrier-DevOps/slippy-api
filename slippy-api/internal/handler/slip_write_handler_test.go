@@ -31,6 +31,7 @@ type mockWriter struct {
 	setComponentImageTagFn func(ctx context.Context, correlationID, componentName, imageTag string) error
 	promoteSlipFn          func(ctx context.Context, correlationID, promotedTo string) error
 	abandonSlipFn          func(ctx context.Context, correlationID, supersededBy string) error
+	claimSlipFn            func(ctx context.Context, correlationID, claimedBy, reason string) error
 }
 
 func (m *mockWriter) CreateSlipForPush(ctx context.Context, opts domain.PushOptions) (*domain.CreateSlipResult, error) {
@@ -60,6 +61,12 @@ func (m *mockWriter) PromoteSlip(ctx context.Context, cID, promotedTo string) er
 func (m *mockWriter) AbandonSlip(ctx context.Context, cID, supersededBy string) error {
 	if m.abandonSlipFn != nil {
 		return m.abandonSlipFn(ctx, cID, supersededBy)
+	}
+	return nil
+}
+func (m *mockWriter) ClaimSlip(ctx context.Context, cID, claimedBy, reason string) error {
+	if m.claimSlipFn != nil {
+		return m.claimSlipFn(ctx, cID, claimedBy, reason)
 	}
 	return nil
 }
@@ -632,6 +639,193 @@ func TestAbandonSlip_InternalError(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// --- ClaimSlip tests (DEVOPS-285) ---
+
+func TestClaimSlip_Success(t *testing.T) {
+	var gotCID, gotClaimedBy, gotReason string
+	w := &mockWriter{
+		claimSlipFn: func(_ context.Context, cID, claimedBy, reason string) error {
+			gotCID, gotClaimedBy, gotReason = cID, claimedBy, reason
+			return nil
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	body := `{"claimed_by":"rerunner","reason":"retrigger builds and unit tests"}`
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/claim", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, "abc-123", gotCID)
+	assert.Equal(t, "rerunner", gotClaimedBy)
+	assert.Equal(t, "retrigger builds and unit tests", gotReason)
+}
+
+func TestClaimSlip_ReasonIsOptional(t *testing.T) {
+	called := false
+	var gotReason string
+	w := &mockWriter{
+		claimSlipFn: func(_ context.Context, _, _, reason string) error {
+			called, gotReason = true, reason
+			return nil
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/claim",
+		strings.NewReader(`{"claimed_by":"rerunner"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.True(t, called, "claim must reach the writer without a reason")
+	assert.Empty(t, gotReason)
+}
+
+// A claim that fails must not look like a success to the adopter: the whole point
+// of the endpoint is that a caller which cannot claim its slip dispatches nothing.
+func TestClaimSlip_WriterFailuresAreNotSwallowed(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+	}{
+		{"repaved or never created", slippy.ErrSlipNotFound, http.StatusNotFound},
+		{"lock contention", domain.ErrWriteContended, http.StatusServiceUnavailable},
+		{"anything else", errors.New("connection reset"), http.StatusInternalServerError},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &mockWriter{
+				claimSlipFn: func(_ context.Context, _, _, _ string) error { return tc.err },
+			}
+			handler := setupWriteTestAPI(w)
+
+			req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/claim",
+				strings.NewReader(`{"claimed_by":"rerunner"}`))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			assert.Equal(t, tc.wantStatus, rec.Code)
+		})
+	}
+}
+
+func TestClaimSlip_RejectsBadInput(t *testing.T) {
+	tests := []struct {
+		name       string
+		path       string
+		body       string
+		wantStatus int
+	}{
+		// claimed_by carries no omitempty, so huma treats it as required.
+		{"claimed_by absent", "/slips/abc-123/claim", `{}`, http.StatusUnprocessableEntity},
+		{"claimed_by empty", "/slips/abc-123/claim", `{"claimed_by":""}`, http.StatusUnprocessableEntity},
+		{
+			"claimed_by malformed",
+			"/slips/abc-123/claim",
+			`{"claimed_by":"rerun ner!"}`,
+			http.StatusUnprocessableEntity,
+		},
+		// Pinned deliberately: huma rejects unknown body properties with 422, which
+		// is why a client that learns about a new field must not be deployed ahead of
+		// the API that accepts it. Same constraint the dispatch field hit (DEVOPS-341).
+		{
+			"unknown body field",
+			"/slips/abc-123/claim",
+			`{"claimed_by":"rerunner","claimed_at":"now"}`,
+			http.StatusUnprocessableEntity,
+		},
+		// Path validation runs before the writer is touched.
+		{
+			"correlation ID malformed",
+			"/slips/abc$123/claim",
+			`{"claimed_by":"rerunner"}`,
+			http.StatusBadRequest,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &mockWriter{
+				claimSlipFn: func(_ context.Context, _, _, _ string) error {
+					t.Fatal("writer must not be called for a rejected request")
+					return nil
+				},
+			}
+			handler := setupWriteTestAPI(w)
+
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			assert.Equal(t, tc.wantStatus, rec.Code)
+		})
+	}
+}
+
+// The straggler half of DEVOPS-285: a late write against a correlation ID whose row
+// was repaved away must say something an operator can act on. This asserts the
+// message names the likely cause and the recovery on an ORDINARY step write, not
+// just on the claim endpoint — the straggler case is the one that survives the
+// rerunner fix, and it arrives through the step routes.
+func TestWriteNotFound_MessageIsActionable(t *testing.T) {
+	// Each route gets its own body: huma rejects a property the operation's schema
+	// does not declare, so one shared body would 422 before reaching the writer.
+	routes := []struct {
+		name string
+		path string
+		body string
+		w    *mockWriter
+	}{
+		{
+			"start step",
+			"/slips/abc-123/steps/builds_completed/start",
+			`{"component_name":"api"}`,
+			&mockWriter{startStepFn: func(_ context.Context, _, _, _ string) error {
+				return slippy.ErrSlipNotFound
+			}},
+		},
+		{
+			"complete step",
+			"/slips/abc-123/steps/builds_completed/complete",
+			`{"component_name":"api"}`,
+			&mockWriter{completeStepFn: func(_ context.Context, _, _, _ string) error {
+				return slippy.ErrSlipNotFound
+			}},
+		},
+		{
+			"claim",
+			"/slips/abc-123/claim",
+			`{"claimed_by":"rerunner"}`,
+			&mockWriter{claimSlipFn: func(_ context.Context, _, _, _ string) error {
+				return slippy.ErrSlipNotFound
+			}},
+		},
+	}
+	for _, tc := range routes {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := setupWriteTestAPI(tc.w)
+
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusNotFound, rec.Code)
+			msg := rec.Body.String()
+			assert.Contains(t, msg, "replaced by a newer run for the same commit",
+				"the 404 must name the likely cause (a repave), not just report absence")
+			assert.Contains(t, msg, "current correlation ID",
+				"the 404 must tell the operator how to recover")
+		})
+	}
 }
 
 // --- mapWriteError tests ---

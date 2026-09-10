@@ -269,6 +269,7 @@ var operationTiers = map[string]operationPolicy{
 	"set-image-tag": {tierWrite, gateWrites},
 	"promote-slip":  {tierWrite, gateWrites},
 	"abandon-slip":  {tierWrite, gateWrites},
+	"claim-slip":    {tierWrite, gateWrites},
 }
 
 // verifyRouteSecurity reports an error when the registered routes contradict the auth

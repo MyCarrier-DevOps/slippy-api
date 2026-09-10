@@ -352,6 +352,89 @@ func (a *SlipWriterAdapter) AbandonSlip(ctx context.Context, correlationID, supe
 	)
 }
 
+// claimMarkerStep is the state-history step name for an adoption marker.
+// Deliberately NOT one of the configured pipeline steps: no phase duration or
+// aggregate is computed from it, so appending one to any slip cannot perturb a
+// dashboard that reads state_history for step timings.
+const claimMarkerStep = "slip_claimed"
+
+// ClaimSlip appends an adoption marker and then sets the slip to in_progress.
+// See domain.SlipWriter.ClaimSlip for why adopters must call this before they
+// dispatch. This comment covers the mechanics.
+//
+// The two writes are separate transactions — the library has no atomic
+// status-plus-history primitive at slip level, only the step-level
+// UpdateStepWithHistory — so one can land without the other. The order is
+// therefore load-bearing, not stylistic:
+//
+//   - Marker first (this order). A failed status write leaves the slip at its
+//     prior status carrying a marker that records the attempt. Nothing is
+//     dispatched, the slip is still repave-eligible, and the next same-commit
+//     push recovers the commit normally. The stray marker is not a lie: an
+//     adopter did try to claim this slip and did not get it.
+//   - Status first (do NOT reorder). A failed marker write leaves the slip
+//     in_progress with nothing running and no record of why. in_progress is not
+//     in repaveableSlipStatusesSQL, so every later same-commit push dedups onto
+//     a slip that will never report another event, wedging the commit with no
+//     error surfaced anywhere. That is strictly worse than the race this
+//     endpoint exists to close.
+//
+// The Load is both the existence check and the source of the prior status in the
+// marker. A claim against a correlation ID that has already been repaved away
+// fails there, before anything is written, which is exactly what the caller
+// needs to learn before it dispatches.
+//
+// Each write gets its own instrumentedWrite, rather than one wrapping both, so
+// that the 55P03 lock retry re-runs only the write that actually lost the lock.
+// A single shared wrapper would re-append the marker when the status write was
+// the one retried.
+func (a *SlipWriterAdapter) ClaimSlip(ctx context.Context, correlationID, claimedBy, reason string) error {
+	attrs := []attribute.KeyValue{
+		attribute.String("slip.correlation_id", correlationID),
+		attribute.String("slip.claimed_by", claimedBy),
+	}
+
+	if err := a.instrumentedWrite(ctx, "writer.ClaimSlip.mark", attrs,
+		func(wctx context.Context, span trace.Span) error {
+			slip, err := a.client.Load(wctx, correlationID)
+			if err != nil {
+				return err
+			}
+			span.SetAttributes(attribute.String("slip.prior_status", string(slip.Status)))
+			return a.client.AppendHistoryEntry(wctx, correlationID,
+				claimMarker(slip.Status, claimedBy, reason))
+		},
+	); err != nil {
+		return err
+	}
+
+	return a.instrumentedWrite(ctx, "writer.ClaimSlip.status", attrs,
+		func(wctx context.Context, _ trace.Span) error {
+			return a.client.UpdateSlipStatus(wctx, correlationID, slippy.SlipStatusInProgress)
+		},
+	)
+}
+
+// claimMarker builds the adoption history entry. The prior status goes in the
+// message because it is the one thing that tells an operator whether a claim was
+// routine (a failed slip being rerun, the case DEVOPS-285 is about) or worth
+// asking about (a completed or abandoned one being resurrected). The rerunner
+// adopts whatever slip the commit lookup returns without filtering on status,
+// so both happen.
+func claimMarker(priorStatus slippy.SlipStatus, claimedBy, reason string) slippy.StateHistoryEntry {
+	msg := fmt.Sprintf("adopted %s slip before dispatching", priorStatus)
+	if reason != "" {
+		msg += ": " + reason
+	}
+	return slippy.StateHistoryEntry{
+		Step:      claimMarkerStep,
+		Status:    slippy.StepStatusRunning,
+		Timestamp: time.Now(),
+		Actor:     claimedBy,
+		Message:   msg,
+	}
+}
+
 // instrumentedWrite is the single entry point for durable step/terminal
 // writes. It starts a tracer span, derives a cancellation-detached write
 // context via writeContext, and invokes op with that ctx and the span.

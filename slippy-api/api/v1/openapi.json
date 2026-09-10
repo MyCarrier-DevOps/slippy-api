@@ -305,6 +305,36 @@
         ],
         "type": "object"
       },
+      "ClaimSlipInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/ClaimSlipInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "claimed_by": {
+            "description": "Adopter that is taking over this slip (e.g. \"rerunner\"); recorded as the history entry's actor",
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._:/-]+$",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Optional scope of the adopted work (e.g. \"retrigger builds and unit tests\")",
+            "maxLength": 512,
+            "type": "string"
+          }
+        },
+        "required": [
+          "claimed_by"
+        ],
+        "type": "object"
+      },
       "ComponentDefinitionInput": {
         "additionalProperties": false,
         "properties": {
@@ -2563,6 +2593,58 @@
           }
         ],
         "summary": "Mark a routing slip as abandoned, superseded by a newer push",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/v1/slips/{correlationID}/claim": {
+      "post": {
+        "description": "Records that the caller has work in flight against a slip it did not create: appends an adoption marker to the slip's state history and sets its status to in_progress. Adopters MUST call this before dispatching any workflow. An ended slip stays eligible to be replaced by a same-commit push, which deletes the row out from under in-flight work; a claimed slip is live, so such a push deduplicates onto it instead. A non-2xx response means the caller does not own the slip and must dispatch nothing.",
+        "operationId": "claim-slip",
+        "parameters": [
+          {
+            "description": "Routing slip correlation ID",
+            "in": "path",
+            "name": "correlationID",
+            "required": true,
+            "schema": {
+              "description": "Routing slip correlation ID",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClaimSlipInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "writeApiKey": []
+          }
+        ],
+        "summary": "Claim an adopted routing slip before dispatching work against it",
         "tags": [
           "v1"
         ]

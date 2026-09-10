@@ -154,4 +154,21 @@ type SlipWriter interface {
 
 	// AbandonSlip marks a slip as abandoned, superseded by a newer push.
 	AbandonSlip(ctx context.Context, correlationID, supersededBy string) error
+
+	// ClaimSlip records that an adopter now has work in flight against an
+	// existing slip: it appends an adoption marker to the slip's state history
+	// and sets the slip's status to in_progress.
+	//
+	// Any caller that adopts a correlation ID it did not create must claim it
+	// BEFORE dispatching work. An ended slip (failed, completed, abandoned,
+	// promoted, compensated) stays repave-eligible, so a same-commit push in the
+	// window between adoption and the adopter's first step write deletes the row
+	// out from under the in-flight work and every later write 404s. Claiming
+	// closes that window: in_progress is not repaveable, so the push dedups onto
+	// the adopter's slip instead (DEVOPS-285).
+	//
+	// An error means the caller does NOT own the slip and must dispatch nothing.
+	// claimedBy names the adopter (it becomes the history entry's actor); reason
+	// is optional free text describing the scope of the adopted work.
+	ClaimSlip(ctx context.Context, correlationID, claimedBy, reason string) error
 }
