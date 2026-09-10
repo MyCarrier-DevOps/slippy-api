@@ -160,6 +160,28 @@ When bumping `goLibMyCarrier/slippy` to a new version:
 7. Scan for `PromoteSlip`/`AbandonSlip` call sites followed by step mutations — since v1.3.77, slip.status is preserved after those terminal operations (no longer overwritten by late step events).
 8. No source code changes expected beyond `go.mod`, `go.sum`, and test mocks.
 
+**v1.3.102 adds Postgres migration v5 (`one_slip_per_commit`, DEVOPS-231 Phase B).** No
+interface change and no source change here — but deploying this bump is what APPLIES that
+migration, because `slippy-migrator`'s default `target-version` is latest. v5 adds
+`uq_routing_slips_repo_sha` on `(lower(repository), commit_sha)` plus `ON DELETE CASCADE` FKs
+from `slip_component_states` / `slip_ancestry` on `correlation_id`. Two things follow:
+
+- **Do not deploy it to an environment whose cleanup has not run.** v5 refuses a database that
+  still holds more than one `routing_slips` row per commit, or any orphan child row, and the
+  migrator's per-migration transaction rolls it back — the pre-deploy Job then crash-loops with
+  the recorded version stuck at 4, and because ensurers only run after all migrations succeed,
+  new step columns and indexes do not land either. `target-version` cannot cap the up-path.
+  Recovery is to run the cleanup script (attached to DEVOPS-231) or pin back to a pre-v5 goLib.
+  Both dev and prod `ci` were cleaned on 2026-09-09, so this bump is safe for them.
+- **Do not pre-create the index or the FKs by hand.** v5 is idempotent by name but asserts by
+  shape: it RAISEs unless the object it kept has exactly the expected definition. A same-named
+  object of another shape — a `NO ACTION` or `NOT VALID` FK, an index without `lower()`, an
+  invalid leftover from a hand-run `CREATE INDEX CONCURRENTLY` — fails the migration by design.
+
+Once v5 is applied, `Create` can return `ErrDuplicateSlip` for a real concurrent same-commit
+insert, which arms `handleDuplicateSlipBackstop` in the library for the first time. slippy-api
+needs no change for that: it surfaces the library's result as it already does.
+
 ### Behavioral Notes (v1.3.77+)
 
 - `checkPipelineCompletion` short-circuits on `Completed`, `Abandoned`, `Promoted` (was `Completed` only before v1.3.77). Post-`PromoteSlip`/`AbandonSlip` terminal step events no longer overwrite `slip.status`.
