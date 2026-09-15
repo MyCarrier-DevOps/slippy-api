@@ -745,12 +745,20 @@ func TestSlipWriterAdapter_ClaimSlip_ForwardsToTheAtomicStoreCall(t *testing.T) 
 		expected       []slippy.SlipStatus
 		calls          int
 	}
-	store := &mockSlipStore{claimSlipFn: func(_ context.Context, id string, expected []slippy.SlipStatus, by, reason string) (slippy.SlipStatus, error) {
-		got.id, got.expected, got.by, got.reason, got.calls = id, expected, by, reason, got.calls+1
-		return slippy.SlipStatusFailed, nil
-	}}
+	store := &mockSlipStore{
+		claimSlipFn: func(_ context.Context, id string, expected []slippy.SlipStatus, by, reason string) (slippy.SlipStatus, error) {
+			got.id, got.expected, got.by, got.reason, got.calls = id, expected, by, reason, got.calls+1
+			return slippy.SlipStatusFailed, nil
+		},
+	}
 	adapter := newTestWriterAdapter(store)
-	err := adapter.ClaimSlip(context.Background(), "corr-1", []slippy.SlipStatus{slippy.SlipStatusFailed}, "rerunner", "retrigger builds")
+	err := adapter.ClaimSlip(
+		context.Background(),
+		"corr-1",
+		[]slippy.SlipStatus{slippy.SlipStatusFailed},
+		"rerunner",
+		"retrigger builds",
+	)
 	require.NoError(t, err)
 	assert.Equal(t, 1, got.calls, "exactly one store call; no Load, no separate history/status writes")
 	assert.Equal(t, "corr-1", got.id)
@@ -760,11 +768,18 @@ func TestSlipWriterAdapter_ClaimSlip_ForwardsToTheAtomicStoreCall(t *testing.T) 
 }
 
 func TestSlipWriterAdapter_ClaimSlip_PropagatesPreconditionFailure(t *testing.T) {
-	store := &mockSlipStore{claimSlipFn: func(_ context.Context, id string, _ []slippy.SlipStatus, _, _ string) (slippy.SlipStatus, error) {
-		return "", fmt.Errorf("claim %s: %w", id, slippy.ErrClaimPreconditionFailed)
-	}}
+	store := &mockSlipStore{
+		claimSlipFn: func(_ context.Context, id string, _ []slippy.SlipStatus, _, _ string) (slippy.SlipStatus, error) {
+			return "", fmt.Errorf("claim %s: %w", id, slippy.ErrClaimPreconditionFailed)
+		},
+	}
 	err := newTestWriterAdapter(store).ClaimSlip(context.Background(), "corr-1", nil, "rerunner", "")
-	require.ErrorIs(t, err, slippy.ErrClaimPreconditionFailed, "the handler maps this to 409; it must survive the adapter unwrapped")
+	require.ErrorIs(
+		t,
+		err,
+		slippy.ErrClaimPreconditionFailed,
+		"the handler maps this to 409; it must survive the adapter unwrapped",
+	)
 }
 
 func TestSlipWriterAdapter_ReleaseClaim_ForwardsAndPropagatesNotClaimed(t *testing.T) {
@@ -796,7 +811,12 @@ func TestClaimMarkerStep_IsNotAPipelineStep(t *testing.T) {
 	assert.Empty(t, ClaimMarkerStepCollision(cfg))
 	assert.NotEqual(t, "push_parsed", claimMarkerStep,
 		"the library's own reset marker owns push_parsed; an adoption is not a push")
-	assert.Nil(t, cfg.GetStep(releaseMarkerStep), "releaseMarkerStep %q must not name a configured step", releaseMarkerStep)
+	assert.Nil(
+		t,
+		cfg.GetStep(releaseMarkerStep),
+		"releaseMarkerStep %q must not name a configured step",
+		releaseMarkerStep,
+	)
 	assert.NotEqual(t, claimMarkerStep, releaseMarkerStep)
 }
 

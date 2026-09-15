@@ -65,7 +65,13 @@ func (m *mockWriter) AbandonSlip(ctx context.Context, cID, supersededBy string) 
 	}
 	return nil
 }
-func (m *mockWriter) ClaimSlip(ctx context.Context, cID string, ifStatus []slippy.SlipStatus, claimedBy, reason string) error {
+
+func (m *mockWriter) ClaimSlip(
+	ctx context.Context,
+	cID string,
+	ifStatus []slippy.SlipStatus,
+	claimedBy, reason string,
+) error {
 	if m.claimSlipFn != nil {
 		return m.claimSlipFn(ctx, cID, ifStatus, claimedBy, reason)
 	}

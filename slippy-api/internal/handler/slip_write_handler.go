@@ -713,7 +713,13 @@ func (h *SlipWriteHandler) claimSlip(ctx context.Context, input *ClaimSlipInput)
 	for _, s := range input.Body.IfStatus {
 		ifStatus = append(ifStatus, slippy.SlipStatus(s))
 	}
-	if err := h.writer.ClaimSlip(ctx, input.CorrelationID, ifStatus, input.Body.ClaimedBy, input.Body.Reason); err != nil {
+	if err := h.writer.ClaimSlip(
+		ctx,
+		input.CorrelationID,
+		ifStatus,
+		input.Body.ClaimedBy,
+		input.Body.Reason,
+	); err != nil {
 		recordHandlerError(span, err)
 		// Logged at Error, not Warn, even for the expected not-found: the caller is
 		// about to abandon a dispatch it was asked to perform, and the operator who

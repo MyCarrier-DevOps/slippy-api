@@ -160,7 +160,12 @@ func (m *mockSlipStore) AppendHistory(ctx context.Context, id string, entry slip
 	return nil
 }
 
-func (m *mockSlipStore) ClaimSlip(ctx context.Context, id string, expected []slippy.SlipStatus, claimedBy, reason string) (slippy.SlipStatus, error) {
+func (m *mockSlipStore) ClaimSlip(
+	ctx context.Context,
+	id string,
+	expected []slippy.SlipStatus,
+	claimedBy, reason string,
+) (slippy.SlipStatus, error) {
 	if m.claimSlipFn != nil {
 		return m.claimSlipFn(ctx, id, expected, claimedBy, reason)
 	}

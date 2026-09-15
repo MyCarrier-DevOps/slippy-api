@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/danielgtaylor/huma/v2"

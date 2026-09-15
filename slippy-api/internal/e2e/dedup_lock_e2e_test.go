@@ -206,7 +206,12 @@ func (s *asyncInsertSlipStore) AppendHistory(_ context.Context, _ string, _ slip
 }
 
 // ClaimSlip / ReleaseClaim: this double exercises Create-time dedup only.
-func (s *asyncInsertSlipStore) ClaimSlip(_ context.Context, id string, _ []slippy.SlipStatus, _, _ string) (slippy.SlipStatus, error) {
+func (s *asyncInsertSlipStore) ClaimSlip(
+	_ context.Context,
+	id string,
+	_ []slippy.SlipStatus,
+	_, _ string,
+) (slippy.SlipStatus, error) {
 	return "", fmt.Errorf("ClaimSlip(%s): %w", id, slippy.ErrClaimUnsupported)
 }
 
