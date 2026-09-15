@@ -225,11 +225,18 @@ adopter's slip instead.
   refused regardless of `if_status`. The CLI pre-job passes `["failed"]`; the rerunner passes
   the ended set. A repeat claim on an already-claimed slip is still an idempotent no-op, for
   the same reason as before: a caller's retry after a lost response *is* the recovery.
-- **`POST /slips/{correlationID}/release` undoes a claim whose work will not report.** It
-  restores `claimed_from` and clears it, appending a `slip_released` marker — only while the
-  slip is still `in_progress` with a claim recorded. Anything else is 409 (`ErrNotClaimed`)
-  and untouched, so callers may release on any failure path without undoing real progress.
-  The CLI post-job calls it when its terminal write fails.
+- **`POST /slips/{correlationID}/release` ends a claim when the claimant's run is over.** It
+  clears `claimed_from` and appends a `slip_released` marker whatever the status is, and
+  settles the status in the same transaction: restored to the pre-claim value if the run
+  wrote nothing (still the claim's own `in_progress`), kept as the run wrote it otherwise.
+  It never writes over a status the run wrote, so callers may release on any exit path. An
+  unclaimed slip is 409 (`ErrNotClaimed`). The claim also ends without a release when the
+  library writes a terminal status or a `failed` with nothing running (goLibMyCarrier ≥
+  v1.3.103), so a release is the recovery for a run that died, not the normal path.
+- **The claim outlives status writes.** A step failure writes `failed` over the claim's
+  `in_progress`; `claimed_from` stays set and the library's `Repave` refuses the row
+  (`ErrSlipWentLive`, deduplicated onto by the push path) until the claim ends. A repeat
+  claim on a held claim is a no-op that checks `if_status` against the recorded prior.
 - **Deploy order still holds.** A client that sends `if_status` or calls `/release` before
   this API is deployed gets a 422 or 404; for a claim that means nothing dispatched. API to
   both environments first, always.

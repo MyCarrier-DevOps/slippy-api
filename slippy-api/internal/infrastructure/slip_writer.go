@@ -411,9 +411,9 @@ func (a *SlipWriterAdapter) ClaimSlip(
 	)
 }
 
-// ReleaseClaim restores a claimed slip's pre-claim status. The store guards it — only a
-// slip still in_progress with a claim recorded is touched — so callers may invoke it on
-// any failure path without risk of undoing progress (DEVOPS-367).
+// ReleaseClaim ends a claim. The store clears it whatever the status is and restores the
+// pre-claim status only if the run wrote nothing, so callers may invoke it on any exit path
+// without risk of undoing progress (DEVOPS-367).
 func (a *SlipWriterAdapter) ReleaseClaim(ctx context.Context, correlationID, releasedBy, reason string) error {
 	attrs := []attribute.KeyValue{
 		attribute.String("slip.correlation_id", correlationID),
@@ -421,11 +421,11 @@ func (a *SlipWriterAdapter) ReleaseClaim(ctx context.Context, correlationID, rel
 	}
 	return a.instrumentedWrite(ctx, "writer.ReleaseClaim", attrs,
 		func(wctx context.Context, span trace.Span) error {
-			restored, err := a.client.ReleaseClaim(wctx, correlationID, releasedBy, reason)
+			status, err := a.client.ReleaseClaim(wctx, correlationID, releasedBy, reason)
 			if err != nil {
 				return err
 			}
-			span.SetAttributes(attribute.String("slip.restored_status", string(restored)))
+			span.SetAttributes(attribute.String("slip.status_after_release", string(status)))
 			return nil
 		},
 	)

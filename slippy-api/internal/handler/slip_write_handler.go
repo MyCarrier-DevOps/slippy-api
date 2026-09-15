@@ -338,12 +338,13 @@ func RegisterWriteRoutes(api huma.API, h *SlipWriteHandler) {
 		OperationID: "release-claim",
 		Method:      http.MethodPost,
 		Path:        "/slips/{correlationID}/release",
-		Summary:     "Release a claim whose work will not report, restoring the pre-claim status",
-		Description: "Undoes a prior claim: restores the slip's status to what it was before the claim and " +
-			"clears the claim, appending a release marker — but only while the slip is still in_progress " +
-			"with a claim recorded. A slip whose pipeline advanced past the claim is left untouched and " +
-			"answered 409, so callers may invoke this on any failure path (a post-job whose terminal write " +
-			"failed, an adopter that decided not to dispatch) without risk of undoing real progress (DEVOPS-367).",
+		Summary:     "Release a claim when the claimant's run is over",
+		Description: "Ends a prior claim: clears it and appends a release marker whatever the slip's status is, " +
+			"and settles the status in the same transaction — restored to the pre-claim value if the run " +
+			"wrote nothing (the slip is still the claim's own in_progress), kept exactly as the run wrote it " +
+			"otherwise. It never writes over a status the run wrote, so callers may invoke it on any exit " +
+			"path (a post-job whose terminal write failed, an adopter that decided not to dispatch). An " +
+			"unclaimed slip is 409 (DEVOPS-367).",
 		Security:      writeApiKeySecurity,
 		DefaultStatus: http.StatusNoContent,
 		Tags:          []string{"v1"},
