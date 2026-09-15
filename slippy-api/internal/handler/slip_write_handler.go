@@ -205,6 +205,19 @@ type ClaimSlipInput struct {
 		// the history later, which is the whole point of the marker.
 		ClaimedBy string `json:"claimed_by" minLength:"1" maxLength:"128" pattern:"^[A-Za-z0-9._:/-]+$" doc:"Adopter that is taking over this slip (e.g. \"rerunner\"); recorded as the history entry's actor"`
 		Reason    string `json:"reason,omitempty" maxLength:"512" doc:"Optional scope of the adopted work (e.g. \"retrigger builds and unit tests\")"`
+		// Optional compare-and-set: claim only if the slip is currently in one of these
+		// statuses, enforced in the store's transaction. Omit to claim out of any ended
+		// status. A mismatch is 409 with nothing written (DEVOPS-367).
+		IfStatus []string `json:"if_status,omitempty" maxItems:"8" uniqueItems:"true" enum:"pending,in_progress,failed,compensating,completed,compensated,abandoned,promoted" doc:"Claim only if the slip's current status is one of these; omit for any ended status"`
+	}
+}
+
+// ReleaseClaimInput captures path params and body for releasing a claim.
+type ReleaseClaimInput struct {
+	CorrelationID string `path:"correlationID" doc:"Routing slip correlation ID"`
+	Body          struct {
+		ReleasedBy string `json:"released_by" minLength:"1" maxLength:"128" pattern:"^[A-Za-z0-9._:/-]+$" doc:"Who is releasing the claim (e.g. \"slippy-cli/post-job\"); recorded as the history entry's actor"`
+		Reason     string `json:"reason,omitempty" maxLength:"512" doc:"Why the claimed work will not report (e.g. the terminal write that failed)"`
 	}
 }
 
@@ -320,6 +333,21 @@ func RegisterWriteRoutes(api huma.API, h *SlipWriteHandler) {
 		DefaultStatus: http.StatusNoContent,
 		Tags:          []string{"v1"},
 	}, h.claimSlip)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "release-claim",
+		Method:      http.MethodPost,
+		Path:        "/slips/{correlationID}/release",
+		Summary:     "Release a claim whose work will not report, restoring the pre-claim status",
+		Description: "Undoes a prior claim: restores the slip's status to what it was before the claim and " +
+			"clears the claim, appending a release marker — but only while the slip is still in_progress " +
+			"with a claim recorded. A slip whose pipeline advanced past the claim is left untouched and " +
+			"answered 409, so callers may invoke this on any failure path (a post-job whose terminal write " +
+			"failed, an adopter that decided not to dispatch) without risk of undoing real progress (DEVOPS-367).",
+		Security:      writeApiKeySecurity,
+		DefaultStatus: http.StatusNoContent,
+		Tags:          []string{"v1"},
+	}, h.releaseClaim)
 }
 
 // --- Validation ----------------------------------------------------------
@@ -681,7 +709,11 @@ func (h *SlipWriteHandler) claimSlip(ctx context.Context, input *ClaimSlipInput)
 		"correlation_id", input.CorrelationID,
 		"claimed_by", input.Body.ClaimedBy, "reason", input.Body.Reason)
 
-	if err := h.writer.ClaimSlip(ctx, input.CorrelationID, input.Body.ClaimedBy, input.Body.Reason); err != nil {
+	ifStatus := make([]slippy.SlipStatus, 0, len(input.Body.IfStatus))
+	for _, s := range input.Body.IfStatus {
+		ifStatus = append(ifStatus, slippy.SlipStatus(s))
+	}
+	if err := h.writer.ClaimSlip(ctx, input.CorrelationID, ifStatus, input.Body.ClaimedBy, input.Body.Reason); err != nil {
 		recordHandlerError(span, err)
 		// Logged at Error, not Warn, even for the expected not-found: the caller is
 		// about to abandon a dispatch it was asked to perform, and the operator who
@@ -695,6 +727,40 @@ func (h *SlipWriteHandler) claimSlip(ctx context.Context, input *ClaimSlipInput)
 	span.SetStatus(codes.Ok, "")
 	slog.InfoContext(ctx, "slip: claimed",
 		"correlation_id", input.CorrelationID, "claimed_by", input.Body.ClaimedBy)
+	return &struct{}{}, nil
+}
+
+func (h *SlipWriteHandler) releaseClaim(ctx context.Context, input *ReleaseClaimInput) (*struct{}, error) {
+	if err := validateCorrelationIDFormat(input.CorrelationID); err != nil {
+		return nil, err
+	}
+	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.releaseClaim",
+		trace.WithAttributes(
+			attribute.String("slip.correlation_id", input.CorrelationID),
+			attribute.String("slip.released_by", input.Body.ReleasedBy),
+		),
+	)
+	defer span.End()
+
+	slog.InfoContext(ctx, "slip: release claim",
+		"correlation_id", input.CorrelationID,
+		"released_by", input.Body.ReleasedBy, "reason", input.Body.Reason)
+
+	if err := h.writer.ReleaseClaim(ctx, input.CorrelationID, input.Body.ReleasedBy, input.Body.Reason); err != nil {
+		recordHandlerError(span, err)
+		if errors.Is(err, slippy.ErrNotClaimed) {
+			// Expected on any path where the pipeline advanced first; not an operator problem.
+			slog.InfoContext(ctx, "slip: nothing to release", "correlation_id", input.CorrelationID)
+		} else {
+			slog.ErrorContext(ctx, "slip: release claim failed",
+				"correlation_id", input.CorrelationID, "released_by", input.Body.ReleasedBy, "error", err)
+		}
+		return nil, mapWriteError(err)
+	}
+	h.invalidate(ctx, input.CorrelationID)
+	span.SetStatus(codes.Ok, "")
+	slog.InfoContext(ctx, "slip: claim released",
+		"correlation_id", input.CorrelationID, "released_by", input.Body.ReleasedBy)
 	return &struct{}{}, nil
 }
 
@@ -734,6 +800,18 @@ func mapWriteError(err error) error {
 			http.StatusConflict,
 			"step already in terminal state; transition rejected (I5 freshness gate)",
 		)
+	case errors.Is(err, slippy.ErrClaimPreconditionFailed):
+		// The slip's status at write time was not one the caller agreed to claim out of,
+		// or it is a live unclaimed run. Nothing was written; the caller decided on a
+		// stale read and must re-read before deciding again — a blind retry gets the
+		// same answer.
+		return huma.NewError(
+			http.StatusConflict,
+			"slip status did not match if_status (or the slip is a live run); nothing written — re-read the slip before claiming",
+		)
+	case errors.Is(err, slippy.ErrNotClaimed):
+		// Normal outcome when the pipeline advanced the slip before the release ran.
+		return huma.NewError(http.StatusConflict, "slip is not currently claimed; nothing to release")
 	case errors.Is(err, domain.ErrWriteContended):
 		// Per-slip write-lock contention that outlasted the DB lock_timeout and the
 		// in-adapter retries (translated from the driver error at the adapter boundary).

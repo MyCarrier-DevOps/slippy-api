@@ -270,6 +270,7 @@ var operationTiers = map[string]operationPolicy{
 	"promote-slip":  {tierWrite, gateWrites},
 	"abandon-slip":  {tierWrite, gateWrites},
 	"claim-slip":    {tierWrite, gateWrites},
+	"release-claim": {tierWrite, gateWrites},
 }
 
 // verifyRouteSecurity reports an error when the registered routes contradict the auth

@@ -33,6 +33,8 @@ type mockSlipStore struct {
 	appendHistoryFn         func(ctx context.Context, id string, entry slippy.StateHistoryEntry) error
 	setComponentImageTagFn  func(ctx context.Context, id, step, comp, tag string) error
 	repaveFn                func(ctx context.Context, oldID string, newSlip *slippy.Slip, parent *slippy.AncestryEntry) error
+	claimSlipFn             func(ctx context.Context, id string, expected []slippy.SlipStatus, claimedBy, reason string) (slippy.SlipStatus, error)
+	releaseClaimFn          func(ctx context.Context, id, releasedBy, reason string) (slippy.SlipStatus, error)
 	pingFn                  func(ctx context.Context) error
 }
 
@@ -156,6 +158,20 @@ func (m *mockSlipStore) AppendHistory(ctx context.Context, id string, entry slip
 		return m.appendHistoryFn(ctx, id, entry)
 	}
 	return nil
+}
+
+func (m *mockSlipStore) ClaimSlip(ctx context.Context, id string, expected []slippy.SlipStatus, claimedBy, reason string) (slippy.SlipStatus, error) {
+	if m.claimSlipFn != nil {
+		return m.claimSlipFn(ctx, id, expected, claimedBy, reason)
+	}
+	return "", nil
+}
+
+func (m *mockSlipStore) ReleaseClaim(ctx context.Context, id, releasedBy, reason string) (slippy.SlipStatus, error) {
+	if m.releaseClaimFn != nil {
+		return m.releaseClaimFn(ctx, id, releasedBy, reason)
+	}
+	return "", nil
 }
 
 func (m *mockSlipStore) InsertAncestryLink(_ context.Context, _ *slippy.Slip, _ slippy.AncestryEntry) error {

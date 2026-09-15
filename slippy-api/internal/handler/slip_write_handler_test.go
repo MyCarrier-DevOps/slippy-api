@@ -31,7 +31,8 @@ type mockWriter struct {
 	setComponentImageTagFn func(ctx context.Context, correlationID, componentName, imageTag string) error
 	promoteSlipFn          func(ctx context.Context, correlationID, promotedTo string) error
 	abandonSlipFn          func(ctx context.Context, correlationID, supersededBy string) error
-	claimSlipFn            func(ctx context.Context, correlationID, claimedBy, reason string) error
+	claimSlipFn            func(ctx context.Context, correlationID string, ifStatus []slippy.SlipStatus, claimedBy, reason string) error
+	releaseClaimFn         func(ctx context.Context, correlationID, releasedBy, reason string) error
 }
 
 func (m *mockWriter) CreateSlipForPush(ctx context.Context, opts domain.PushOptions) (*domain.CreateSlipResult, error) {
@@ -64,9 +65,16 @@ func (m *mockWriter) AbandonSlip(ctx context.Context, cID, supersededBy string) 
 	}
 	return nil
 }
-func (m *mockWriter) ClaimSlip(ctx context.Context, cID, claimedBy, reason string) error {
+func (m *mockWriter) ClaimSlip(ctx context.Context, cID string, ifStatus []slippy.SlipStatus, claimedBy, reason string) error {
 	if m.claimSlipFn != nil {
-		return m.claimSlipFn(ctx, cID, claimedBy, reason)
+		return m.claimSlipFn(ctx, cID, ifStatus, claimedBy, reason)
+	}
+	return nil
+}
+
+func (m *mockWriter) ReleaseClaim(ctx context.Context, cID, releasedBy, reason string) error {
+	if m.releaseClaimFn != nil {
+		return m.releaseClaimFn(ctx, cID, releasedBy, reason)
 	}
 	return nil
 }
@@ -722,7 +730,7 @@ func TestAbandonSlip_InternalError(t *testing.T) {
 func TestClaimSlip_Success(t *testing.T) {
 	var gotCID, gotClaimedBy, gotReason string
 	w := &mockWriter{
-		claimSlipFn: func(_ context.Context, cID, claimedBy, reason string) error {
+		claimSlipFn: func(_ context.Context, cID string, _ []slippy.SlipStatus, claimedBy, reason string) error {
 			gotCID, gotClaimedBy, gotReason = cID, claimedBy, reason
 			return nil
 		},
@@ -745,7 +753,7 @@ func TestClaimSlip_ReasonIsOptional(t *testing.T) {
 	called := false
 	var gotReason string
 	w := &mockWriter{
-		claimSlipFn: func(_ context.Context, _, _, reason string) error {
+		claimSlipFn: func(_ context.Context, _ string, _ []slippy.SlipStatus, _, reason string) error {
 			called, gotReason = true, reason
 			return nil
 		},
@@ -778,7 +786,7 @@ func TestClaimSlip_WriterFailuresAreNotSwallowed(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			w := &mockWriter{
-				claimSlipFn: func(_ context.Context, _, _, _ string) error { return tc.err },
+				claimSlipFn: func(_ context.Context, _ string, _ []slippy.SlipStatus, _, _ string) error { return tc.err },
 			}
 			handler := setupWriteTestAPI(w)
 
@@ -829,7 +837,7 @@ func TestClaimSlip_RejectsBadInput(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			w := &mockWriter{
-				claimSlipFn: func(_ context.Context, _, _, _ string) error {
+				claimSlipFn: func(_ context.Context, _ string, _ []slippy.SlipStatus, _, _ string) error {
 					t.Fatal("writer must not be called for a rejected request")
 					return nil
 				},
@@ -880,7 +888,7 @@ func TestWriteNotFound_MessageIsActionable(t *testing.T) {
 			"claim",
 			"/slips/abc-123/claim",
 			`{"claimed_by":"rerunner"}`,
-			&mockWriter{claimSlipFn: func(_ context.Context, _, _, _ string) error {
+			&mockWriter{claimSlipFn: func(_ context.Context, _ string, _ []slippy.SlipStatus, _, _ string) error {
 				return slippy.ErrSlipNotFound
 			}},
 		},

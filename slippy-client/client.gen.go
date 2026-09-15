@@ -22,6 +22,42 @@ const (
 	WriteApiKeyScopes = "writeApiKey.Scopes"
 )
 
+// Defines values for ClaimSlipInputBodyIfStatus.
+const (
+	ClaimSlipInputBodyIfStatusAbandoned    ClaimSlipInputBodyIfStatus = "abandoned"
+	ClaimSlipInputBodyIfStatusCompensated  ClaimSlipInputBodyIfStatus = "compensated"
+	ClaimSlipInputBodyIfStatusCompensating ClaimSlipInputBodyIfStatus = "compensating"
+	ClaimSlipInputBodyIfStatusCompleted    ClaimSlipInputBodyIfStatus = "completed"
+	ClaimSlipInputBodyIfStatusFailed       ClaimSlipInputBodyIfStatus = "failed"
+	ClaimSlipInputBodyIfStatusInProgress   ClaimSlipInputBodyIfStatus = "in_progress"
+	ClaimSlipInputBodyIfStatusPending      ClaimSlipInputBodyIfStatus = "pending"
+	ClaimSlipInputBodyIfStatusPromoted     ClaimSlipInputBodyIfStatus = "promoted"
+)
+
+// Valid indicates whether the value is a known member of the ClaimSlipInputBodyIfStatus enum.
+func (e ClaimSlipInputBodyIfStatus) Valid() bool {
+	switch e {
+	case ClaimSlipInputBodyIfStatusAbandoned:
+		return true
+	case ClaimSlipInputBodyIfStatusCompensated:
+		return true
+	case ClaimSlipInputBodyIfStatusCompensating:
+		return true
+	case ClaimSlipInputBodyIfStatusCompleted:
+		return true
+	case ClaimSlipInputBodyIfStatusFailed:
+		return true
+	case ClaimSlipInputBodyIfStatusInProgress:
+		return true
+	case ClaimSlipInputBodyIfStatusPending:
+		return true
+	case ClaimSlipInputBodyIfStatusPromoted:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for CreateSlipInputBodyDispatch.
 const (
 	CreateSlipInputBodyDispatchNothing   CreateSlipInputBodyDispatch = "nothing"
@@ -152,9 +188,15 @@ type ClaimSlipInputBody struct {
 	// ClaimedBy Adopter that is taking over this slip (e.g. "rerunner"); recorded as the history entry's actor
 	ClaimedBy string `json:"claimed_by"`
 
+	// IfStatus Claim only if the slip's current status is one of these; omit for any ended status
+	IfStatus *[]ClaimSlipInputBodyIfStatus `json:"if_status,omitempty"`
+
 	// Reason Optional scope of the adopted work (e.g. "retrigger builds and unit tests")
 	Reason *string `json:"reason,omitempty"`
 }
+
+// ClaimSlipInputBodyIfStatus defines model for ClaimSlipInputBody.IfStatus.
+type ClaimSlipInputBodyIfStatus string
 
 // ComponentDefinitionInput defines model for ComponentDefinitionInput.
 type ComponentDefinitionInput struct {
@@ -395,6 +437,18 @@ type PromoteSlipInputBody struct {
 	PromotedTo string `json:"promoted_to"`
 }
 
+// ReleaseClaimInputBody defines model for ReleaseClaimInputBody.
+type ReleaseClaimInputBody struct {
+	// Schema A URL to the JSON Schema for this object.
+	Schema *string `json:"$schema,omitempty"`
+
+	// Reason Why the claimed work will not report (e.g. the terminal write that failed)
+	Reason *string `json:"reason,omitempty"`
+
+	// ReleasedBy Who is releasing the claim (e.g. "slippy-cli/post-job"); recorded as the history entry's actor
+	ReleasedBy string `json:"released_by"`
+}
+
 // SetImageTagInputBody defines model for SetImageTagInputBody.
 type SetImageTagInputBody struct {
 	// Schema A URL to the JSON Schema for this object.
@@ -423,6 +477,7 @@ type Slip struct {
 	Aggregates    map[string]*[]ComponentStepData `json:"aggregates"`
 	Ancestry      *[]AncestryEntry                `json:"ancestry"`
 	Branch        string                          `json:"branch"`
+	ClaimedFrom   *string                         `json:"claimed_from,omitempty"`
 	CommitSha     string                          `json:"commit_sha"`
 	CorrelationId string                          `json:"correlation_id"`
 	CreatedAt     time.Time                       `json:"created_at"`
@@ -595,6 +650,9 @@ type SetImageTagJSONRequestBody = SetImageTagInputBody
 // PromoteSlipJSONRequestBody defines body for PromoteSlip for application/json ContentType.
 type PromoteSlipJSONRequestBody = PromoteSlipInputBody
 
+// ReleaseClaimJSONRequestBody defines body for ReleaseClaim for application/json ContentType.
+type ReleaseClaimJSONRequestBody = ReleaseClaimInputBody
+
 // CompleteStepJSONRequestBody defines body for CompleteStep for application/json ContentType.
 type CompleteStepJSONRequestBody = StepBody
 
@@ -741,6 +799,11 @@ type ClientInterface interface {
 	PromoteSlipWithBody(ctx context.Context, correlationID string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	PromoteSlip(ctx context.Context, correlationID string, body PromoteSlipJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ReleaseClaimWithBody request with any body
+	ReleaseClaimWithBody(ctx context.Context, correlationID string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ReleaseClaim(ctx context.Context, correlationID string, body ReleaseClaimJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetStepPrerequisites request
 	GetStepPrerequisites(ctx context.Context, correlationID string, stepName string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -1032,6 +1095,30 @@ func (c *Client) PromoteSlipWithBody(ctx context.Context, correlationID string, 
 
 func (c *Client) PromoteSlip(ctx context.Context, correlationID string, body PromoteSlipJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPromoteSlipRequest(c.Server, correlationID, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ReleaseClaimWithBody(ctx context.Context, correlationID string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewReleaseClaimRequestWithBody(c.Server, correlationID, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ReleaseClaim(ctx context.Context, correlationID string, body ReleaseClaimJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewReleaseClaimRequest(c.Server, correlationID, body)
 	if err != nil {
 		return nil, err
 	}
@@ -2228,6 +2315,53 @@ func NewPromoteSlipRequestWithBody(server string, correlationID string, contentT
 	return req, nil
 }
 
+// NewReleaseClaimRequest calls the generic ReleaseClaim builder with application/json body
+func NewReleaseClaimRequest(server string, correlationID string, body ReleaseClaimJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewReleaseClaimRequestWithBody(server, correlationID, "application/json", bodyReader)
+}
+
+// NewReleaseClaimRequestWithBody generates requests for ReleaseClaim with any type of body
+func NewReleaseClaimRequestWithBody(server string, correlationID string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "correlationID", correlationID, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/slips/%s/release", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewGetStepPrerequisitesRequest generates requests for GetStepPrerequisites
 func NewGetStepPrerequisitesRequest(server string, correlationID string, stepName string) (*http.Request, error) {
 	var err error
@@ -2589,6 +2723,11 @@ type ClientWithResponsesInterface interface {
 	PromoteSlipWithBodyWithResponse(ctx context.Context, correlationID string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PromoteSlipResponse, error)
 
 	PromoteSlipWithResponse(ctx context.Context, correlationID string, body PromoteSlipJSONRequestBody, reqEditors ...RequestEditorFn) (*PromoteSlipResponse, error)
+
+	// ReleaseClaimWithBodyWithResponse request with any body
+	ReleaseClaimWithBodyWithResponse(ctx context.Context, correlationID string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ReleaseClaimResponse, error)
+
+	ReleaseClaimWithResponse(ctx context.Context, correlationID string, body ReleaseClaimJSONRequestBody, reqEditors ...RequestEditorFn) (*ReleaseClaimResponse, error)
 
 	// GetStepPrerequisitesWithResponse request
 	GetStepPrerequisitesWithResponse(ctx context.Context, correlationID string, stepName string, reqEditors ...RequestEditorFn) (*GetStepPrerequisitesResponse, error)
@@ -2978,6 +3117,28 @@ func (r PromoteSlipResponse) StatusCode() int {
 	return 0
 }
 
+type ReleaseClaimResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r ReleaseClaimResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ReleaseClaimResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type GetStepPrerequisitesResponse struct {
 	Body                          []byte
 	HTTPResponse                  *http.Response
@@ -3287,6 +3448,23 @@ func (c *ClientWithResponses) PromoteSlipWithResponse(ctx context.Context, corre
 		return nil, err
 	}
 	return ParsePromoteSlipResponse(rsp)
+}
+
+// ReleaseClaimWithBodyWithResponse request with arbitrary body returning *ReleaseClaimResponse
+func (c *ClientWithResponses) ReleaseClaimWithBodyWithResponse(ctx context.Context, correlationID string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ReleaseClaimResponse, error) {
+	rsp, err := c.ReleaseClaimWithBody(ctx, correlationID, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseReleaseClaimResponse(rsp)
+}
+
+func (c *ClientWithResponses) ReleaseClaimWithResponse(ctx context.Context, correlationID string, body ReleaseClaimJSONRequestBody, reqEditors ...RequestEditorFn) (*ReleaseClaimResponse, error) {
+	rsp, err := c.ReleaseClaim(ctx, correlationID, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseReleaseClaimResponse(rsp)
 }
 
 // GetStepPrerequisitesWithResponse request returning *GetStepPrerequisitesResponse
@@ -3849,6 +4027,32 @@ func ParsePromoteSlipResponse(rsp *http.Response) (*PromoteSlipResponse, error) 
 	}
 
 	response := &PromoteSlipResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseReleaseClaimResponse parses an HTTP response from a ReleaseClaimWithResponse call
+func ParseReleaseClaimResponse(rsp *http.Response) (*ReleaseClaimResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ReleaseClaimResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

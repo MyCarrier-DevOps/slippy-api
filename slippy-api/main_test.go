@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -104,9 +105,12 @@ func (s *stubSlipWriter) SkipStep(_ context.Context, _, _, _, _ string) error  {
 func (s *stubSlipWriter) SetComponentImageTag(_ context.Context, _, _, _ string) error {
 	return nil
 }
-func (s *stubSlipWriter) PromoteSlip(_ context.Context, _, _ string) error  { return nil }
-func (s *stubSlipWriter) AbandonSlip(_ context.Context, _, _ string) error  { return nil }
-func (s *stubSlipWriter) ClaimSlip(_ context.Context, _, _, _ string) error { return nil }
+func (s *stubSlipWriter) PromoteSlip(_ context.Context, _, _ string) error { return nil }
+func (s *stubSlipWriter) AbandonSlip(_ context.Context, _, _ string) error { return nil }
+func (s *stubSlipWriter) ClaimSlip(_ context.Context, _ string, _ []slippy.SlipStatus, _, _ string) error {
+	return nil
+}
+func (s *stubSlipWriter) ReleaseClaim(_ context.Context, _, _, _ string) error { return nil }
 
 type stubCIJobLogReader struct{}
 

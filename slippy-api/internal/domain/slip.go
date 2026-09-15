@@ -195,5 +195,12 @@ type SlipWriter interface {
 	//
 	// claimedBy names the adopter (it becomes the history entry's actor); reason
 	// is optional free text describing the scope of the adopted work.
-	ClaimSlip(ctx context.Context, correlationID, claimedBy, reason string) error
+	// ifStatus bounds which statuses may be claimed out of; nil means any ended status.
+	// The store enforces it in the same transaction as the write (DEVOPS-367).
+	ClaimSlip(ctx context.Context, correlationID string, ifStatus []slippy.SlipStatus, claimedBy, reason string) error
+
+	// ReleaseClaim undoes a claim whose work will never report, restoring the pre-claim
+	// status — but only while the slip is still in the claimed state, so it can never undo
+	// real pipeline progress. slippy.ErrNotClaimed when there is nothing to release.
+	ReleaseClaim(ctx context.Context, correlationID, releasedBy, reason string) error
 }

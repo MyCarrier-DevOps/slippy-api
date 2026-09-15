@@ -322,6 +322,26 @@
             "pattern": "^[A-Za-z0-9._:/-]+$",
             "type": "string"
           },
+          "if_status": {
+            "description": "Claim only if the slip's current status is one of these; omit for any ended status",
+            "items": {
+              "enum": [
+                "pending",
+                "in_progress",
+                "failed",
+                "compensating",
+                "completed",
+                "compensated",
+                "abandoned",
+                "promoted"
+              ],
+              "type": "string"
+            },
+            "maxItems": 8,
+            "nullable": true,
+            "type": "array",
+            "uniqueItems": true
+          },
           "reason": {
             "description": "Optional scope of the adopted work (e.g. \"retrigger builds and unit tests\")",
             "maxLength": 512,
@@ -931,6 +951,36 @@
         ],
         "type": "object"
       },
+      "ReleaseClaimInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/ReleaseClaimInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why the claimed work will not report (e.g. the terminal write that failed)",
+            "maxLength": 512,
+            "type": "string"
+          },
+          "released_by": {
+            "description": "Who is releasing the claim (e.g. \"slippy-cli/post-job\"); recorded as the history entry's actor",
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._:/-]+$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "released_by"
+        ],
+        "type": "object"
+      },
       "SetImageTagInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -1009,6 +1059,9 @@
             "type": "array"
           },
           "branch": {
+            "type": "string"
+          },
+          "claimed_from": {
             "type": "string"
           },
           "commit_sha": {
@@ -2283,6 +2336,58 @@
           }
         ],
         "summary": "Mark a routing slip as promoted to another branch",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/slips/{correlationID}/release": {
+      "post": {
+        "description": "Undoes a prior claim: restores the slip's status to what it was before the claim and clears the claim, appending a release marker — but only while the slip is still in_progress with a claim recorded. A slip whose pipeline advanced past the claim is left untouched and answered 409, so callers may invoke this on any failure path (a post-job whose terminal write failed, an adopter that decided not to dispatch) without risk of undoing real progress (DEVOPS-367).",
+        "operationId": "release-claim",
+        "parameters": [
+          {
+            "description": "Routing slip correlation ID",
+            "in": "path",
+            "name": "correlationID",
+            "required": true,
+            "schema": {
+              "description": "Routing slip correlation ID",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReleaseClaimInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "writeApiKey": []
+          }
+        ],
+        "summary": "Release a claim whose work will not report, restoring the pre-claim status",
         "tags": [
           "v1"
         ]
