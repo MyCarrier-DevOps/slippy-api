@@ -330,14 +330,14 @@ func RegisterWriteRoutes(api huma.API, h *SlipWriteHandler) {
 		Description: "Records that the caller has work in flight against a slip it did not create: " +
 			"sets the slip's claim flag and appends an adoption marker to its state history. The claim " +
 			"never changes the slip's status. Adopters MUST call this before dispatching any workflow. An " +
-			"unclaimed slip is eligible to be replaced by a same-commit push, which deletes the row out " +
-			"from under in-flight work; a claimed slip is refused by that repave, so such a push " +
-			"deduplicates onto it instead. A non-2xx response means the claim is not confirmed and the " +
-			"caller must dispatch nothing; it does not mean the slip is unclaimed, because the write is " +
-			"not cancelled by a client timeout. Claiming again is the recovery: a repeat claim on a slip " +
-			"whose claim is still held is a no-op that still checks if_status against the slip's current " +
-			"status, never a conflict. A claim ends when the run releases it, or when a terminal status " +
-			"write ends it.",
+			"unclaimed ended slip (failed, completed, abandoned, promoted, compensated) is eligible to be " +
+			"replaced by a same-commit push, which deletes the row out from under in-flight work; a " +
+			"claimed slip is refused by that repave, so such a push deduplicates onto it instead. A " +
+			"non-2xx response means the claim is not confirmed and the caller must dispatch nothing; it " +
+			"does not mean the slip is unclaimed, because the write is not cancelled by a client " +
+			"timeout. Claiming again is the recovery: a repeat claim on a slip whose claim is still " +
+			"held is a no-op that still checks if_status against the slip's current status, never a " +
+			"conflict. A claim ends when the run releases it, or when a terminal status write ends it.",
 		Security:      writeApiKeySecurity,
 		DefaultStatus: http.StatusNoContent,
 		Tags:          []string{"v1"},
@@ -768,7 +768,8 @@ func (h *SlipWriteHandler) releaseClaim(
 	if err != nil {
 		recordHandlerError(span, err)
 		if errors.Is(err, slippy.ErrNotClaimed) {
-			// Expected on any path where the pipeline advanced first; not an operator problem.
+			// The normal outcome after a terminal status write already ended the claim; not an
+			// operator problem.
 			slog.InfoContext(ctx, "slip: nothing to release", "correlation_id", input.CorrelationID)
 		} else {
 			slog.ErrorContext(ctx, "slip: release claim failed",
@@ -776,9 +777,11 @@ func (h *SlipWriteHandler) releaseClaim(
 		}
 		return nil, mapWriteError(err)
 	}
+	// Status is written only on the released path: "a status at release" exists only when
+	// there was a release. Do not hoist it above this branch — the response shape is this
+	// handler's to hold, not something to inherit from the adapter zeroing its outcome.
 	resp := &ReleaseClaimOutput{}
 	resp.Body.Released = out.Released
-	resp.Body.Status = string(out.Status)
 	if !out.Released {
 		// The claim is kept and nothing was written, so there is no cached read to drop.
 		span.SetStatus(codes.Ok, "")
@@ -786,6 +789,7 @@ func (h *SlipWriteHandler) releaseClaim(
 			"correlation_id", input.CorrelationID, "released_by", input.Body.ReleasedBy)
 		return resp, nil
 	}
+	resp.Body.Status = string(out.Status)
 	h.invalidate(ctx, input.CorrelationID)
 	span.SetStatus(codes.Ok, "")
 	slog.InfoContext(ctx, "slip: claim released",
@@ -837,6 +841,12 @@ func mapWriteError(err error) error {
 			http.StatusConflict,
 			"slip status did not match if_status; nothing written — re-read the slip before claiming",
 		)
+	case errors.Is(err, slippy.ErrRunInFlight):
+		// UNREACHABLE BY DESIGN: the adapter turns ErrRunInFlight into a ReleaseOutcome with
+		// Released=false and a nil error, so the release handler never sends it here. This arm
+		// is insurance — if a future writer path lets the sentinel through, a held claim must
+		// read as a conflict the caller can retry, not as a 500.
+		return huma.NewError(http.StatusConflict, "claim held: the run still has work in flight")
 	case errors.Is(err, slippy.ErrNotClaimed):
 		// Normal outcome when a terminal status write ended the claim before the release ran.
 		return huma.NewError(

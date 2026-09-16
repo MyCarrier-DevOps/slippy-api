@@ -90,13 +90,28 @@ func (m *mockWriter) ReleaseClaim(
 
 // setupWriteTestAPI creates a huma API with write routes and no auth for testing.
 func setupWriteTestAPI(w domain.SlipWriter) http.Handler {
+	return setupWriteTestAPIWithInvalidator(w, nil)
+}
+
+// setupWriteTestAPIWithInvalidator is setupWriteTestAPI with the post-write cache hook
+// wired, for the tests that assert whether a write evicts the cached slip.
+func setupWriteTestAPIWithInvalidator(w domain.SlipWriter, inv domain.Invalidator) http.Handler {
 	mux := http.NewServeMux()
 	cfg := huma.DefaultConfig("Test", "1.0.0")
 	api := humago.New(mux, cfg)
 
-	h := NewSlipWriteHandler(w, nil)
+	h := NewSlipWriteHandler(w, inv)
 	RegisterWriteRoutes(api, h)
 	return mux
+}
+
+// countingInvalidator records every cache eviction the handler asks for.
+type countingInvalidator struct {
+	calls []string
+}
+
+func (c *countingInvalidator) InvalidateByCorrelationID(_ context.Context, correlationID string) {
+	c.calls = append(c.calls, correlationID)
 }
 
 // --- CreateSlip tests ---
@@ -955,10 +970,14 @@ func TestReleaseClaim_ReleasedReportsTheStatusAtRelease(t *testing.T) {
 
 // The run still has work in flight: the claim is kept, nothing was written, and that is an
 // outcome the caller reads off a 200 — not an error it has to classify.
+//
+// The writer deliberately returns a Status alongside Released=false, which the adapter never
+// does: "status only when released" is the HANDLER's contract to hold, not something inherited
+// from the adapter zeroing its outcome.
 func TestReleaseClaim_HeldInFlightIs200WithNoStatus(t *testing.T) {
 	w := &mockWriter{
 		releaseClaimFn: func(_ context.Context, _, _, _ string) (domain.ReleaseOutcome, error) {
-			return domain.ReleaseOutcome{Released: false}, nil
+			return domain.ReleaseOutcome{Released: false, Status: slippy.SlipStatusFailed}, nil
 		},
 	}
 	handler := setupWriteTestAPI(w)
@@ -976,6 +995,44 @@ func TestReleaseClaim_HeldInFlightIs200WithNoStatus(t *testing.T) {
 	assert.Equal(t, false, resp["released"])
 	assert.NotContains(t, resp, "status",
 		"nothing was released, so there is no status at release to report")
+}
+
+// A held claim writes NOTHING, so it must not evict the cached slip: an eviction there would
+// spend a round-trip and a cold read on a request that changed no state. The released path
+// must still evict, since it cleared the claim.
+func TestReleaseClaim_OnlyTheReleasedPathInvalidatesTheCache(t *testing.T) {
+	tests := []struct {
+		name      string
+		outcome   domain.ReleaseOutcome
+		wantCalls []string
+	}{
+		{
+			"released evicts",
+			domain.ReleaseOutcome{Released: true, Status: slippy.SlipStatusFailed},
+			[]string{"abc-123"},
+		},
+		{"held in flight does not evict", domain.ReleaseOutcome{Released: false}, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &mockWriter{
+				releaseClaimFn: func(_ context.Context, _, _, _ string) (domain.ReleaseOutcome, error) {
+					return tc.outcome, nil
+				},
+			}
+			inv := &countingInvalidator{}
+			handler := setupWriteTestAPIWithInvalidator(w, inv)
+
+			req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/release",
+				strings.NewReader(`{"released_by":"slippy-cli/post-job"}`))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusOK, rec.Code)
+			assert.Equal(t, tc.wantCalls, inv.calls)
+		})
+	}
 }
 
 // A slip with no claim is still 409 — the normal outcome once a terminal status write has
@@ -1027,6 +1084,9 @@ func TestMapWriteError(t *testing.T) {
 		{"creation in progress (sentinel)", domain.ErrCreationInProgress, http.StatusConflict},
 		{"claim precondition failed", slippy.ErrClaimPreconditionFailed, http.StatusConflict},
 		{"not claimed", slippy.ErrNotClaimed, http.StatusConflict},
+		// Unreachable through the release handler (the adapter turns it into an outcome), but
+		// pinned so a future writer path that lets it through gets a retryable 409, not a 500.
+		{"run in flight", slippy.ErrRunInFlight, http.StatusConflict},
 		{
 			"creation in progress (wrapped, as returned by writer)",
 			fmt.Errorf("dedup: slip for repo:sha creation in progress, retry: %w", domain.ErrCreationInProgress),
