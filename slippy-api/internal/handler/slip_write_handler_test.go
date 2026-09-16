@@ -32,7 +32,7 @@ type mockWriter struct {
 	promoteSlipFn          func(ctx context.Context, correlationID, promotedTo string) error
 	abandonSlipFn          func(ctx context.Context, correlationID, supersededBy string) error
 	claimSlipFn            func(ctx context.Context, correlationID string, ifStatus []slippy.SlipStatus, claimedBy, reason string) error
-	releaseClaimFn         func(ctx context.Context, correlationID, releasedBy, reason string) error
+	releaseClaimFn         func(ctx context.Context, correlationID, releasedBy, reason string) (domain.ReleaseOutcome, error)
 }
 
 func (m *mockWriter) CreateSlipForPush(ctx context.Context, opts domain.PushOptions) (*domain.CreateSlipResult, error) {
@@ -78,11 +78,14 @@ func (m *mockWriter) ClaimSlip(
 	return nil
 }
 
-func (m *mockWriter) ReleaseClaim(ctx context.Context, cID, releasedBy, reason string) error {
+func (m *mockWriter) ReleaseClaim(
+	ctx context.Context,
+	cID, releasedBy, reason string,
+) (domain.ReleaseOutcome, error) {
 	if m.releaseClaimFn != nil {
 		return m.releaseClaimFn(ctx, cID, releasedBy, reason)
 	}
-	return nil
+	return domain.ReleaseOutcome{Released: true, Status: slippy.SlipStatusFailed}, nil
 }
 
 // setupWriteTestAPI creates a huma API with write routes and no auth for testing.
@@ -918,6 +921,83 @@ func TestWriteNotFound_MessageIsActionable(t *testing.T) {
 	}
 }
 
+// --- ReleaseClaim tests (DEVOPS-367) ---
+
+// A release that cleared the claim reports the status it found, and never changes it.
+func TestReleaseClaim_ReleasedReportsTheStatusAtRelease(t *testing.T) {
+	var gotCID, gotReleasedBy, gotReason string
+	w := &mockWriter{
+		releaseClaimFn: func(
+			_ context.Context, cID, releasedBy, reason string,
+		) (domain.ReleaseOutcome, error) {
+			gotCID, gotReleasedBy, gotReason = cID, releasedBy, reason
+			return domain.ReleaseOutcome{Released: true, Status: slippy.SlipStatusFailed}, nil
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	body := `{"released_by":"slippy-cli/post-job","reason":"terminal write failed"}`
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/release", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "abc-123", gotCID)
+	assert.Equal(t, "slippy-cli/post-job", gotReleasedBy)
+	assert.Equal(t, "terminal write failed", gotReason)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, true, resp["released"])
+	assert.Equal(t, "failed", resp["status"])
+}
+
+// The run still has work in flight: the claim is kept, nothing was written, and that is an
+// outcome the caller reads off a 200 — not an error it has to classify.
+func TestReleaseClaim_HeldInFlightIs200WithNoStatus(t *testing.T) {
+	w := &mockWriter{
+		releaseClaimFn: func(_ context.Context, _, _, _ string) (domain.ReleaseOutcome, error) {
+			return domain.ReleaseOutcome{Released: false}, nil
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/release",
+		strings.NewReader(`{"released_by":"slippy-cli/post-job"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, false, resp["released"])
+	assert.NotContains(t, resp, "status",
+		"nothing was released, so there is no status at release to report")
+}
+
+// A slip with no claim is still 409 — the normal outcome once a terminal status write has
+// ended the claim on its own.
+func TestReleaseClaim_UnclaimedIs409(t *testing.T) {
+	w := &mockWriter{
+		releaseClaimFn: func(_ context.Context, cID, _, _ string) (domain.ReleaseOutcome, error) {
+			return domain.ReleaseOutcome{}, fmt.Errorf("release %s: %w", cID, slippy.ErrNotClaimed)
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/release",
+		strings.NewReader(`{"released_by":"slippy-cli/post-job"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "nothing to release")
+}
+
 // --- mapWriteError tests ---
 
 func TestMapWriteError(t *testing.T) {
@@ -945,6 +1025,8 @@ func TestMapWriteError(t *testing.T) {
 		},
 		{"slip error", slippy.NewSlipError("create", "id", errors.New("fail")), http.StatusUnprocessableEntity},
 		{"creation in progress (sentinel)", domain.ErrCreationInProgress, http.StatusConflict},
+		{"claim precondition failed", slippy.ErrClaimPreconditionFailed, http.StatusConflict},
+		{"not claimed", slippy.ErrNotClaimed, http.StatusConflict},
 		{
 			"creation in progress (wrapped, as returned by writer)",
 			fmt.Errorf("dedup: slip for repo:sha creation in progress, retry: %w", domain.ErrCreationInProgress),

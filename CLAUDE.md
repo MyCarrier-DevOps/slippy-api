@@ -203,43 +203,45 @@ needs no change for that: it surfaces the library's result as it already does.
 - Mock implementations of `slippy.SlipStore` live in `internal/infrastructure/store_test.go`. The compile-time check `var _ slippy.SlipStore = (*mockSlipStore)(nil)` in `z_slipstore_interface_test.go` will catch interface drift on every build.
 - ClickHouse test mocks come from upstream `goLibMyCarrier/clickhouse/clickhousetest` (since the v1.3.100 bump, DEVOPS-343). They were vendored in `internal/testsupport/clickhousetest` while upstream's `MockConn` lacked `InsertFormat`/`QueryFormat` against clickhouse-go/v2 v2.48.0+; goLibMyCarrier#82 fixed that upstream and the vendored copy was deleted.
 
-### The claim endpoint is one store transaction; release undoes it (DEVOPS-285, DEVOPS-367)
+### The claim is a flag; release ends it once nothing is in flight (DEVOPS-285, DEVOPS-367)
 
 `POST /slips/{correlationID}/claim` exists for callers that adopt a correlation ID they did
-not create — pushhookparser's rerunner, and the Slippy CLI pre-job (Slippy#28). An ended slip
-is repave-eligible, so a same-commit push in the window before the adopter's first write
-deletes the row and every later write from that run 404s. `in_progress` is not in
-`repaveableSlipStatusesSQL`, so claiming closes the window: the push dedups onto the
-adopter's slip instead.
+not create — pushhookparser's rerunner, and the Slippy CLI pre-job (Slippy#28). An unclaimed
+ended slip is repave-eligible, so a same-commit push in the window before the adopter's first
+write deletes the row and every later write from that run 404s. Claiming closes the window:
+a claimed row is refused by `Repave`, so the push dedups onto the adopter's slip instead.
 
-- **The adapter does not sequence writes any more.** goLibMyCarrier ≥ v1.3.103 performs the
-  whole claim as one `SlipStore.ClaimSlip` transaction: lock, expected-status precondition,
-  adoption marker, `status=in_progress`, `claimed_from=<prior>`. The marker-then-status
-  ordering this section used to defend, and the three tests that pinned it, are gone. The
-  store also builds the marker from the prior it reads under lock, so its message can never
-  name a stale status. Do not reintroduce a `Load` before the claim in the adapter.
+- **The claim never writes status.** goLibMyCarrier ≥ v1.3.103 performs the whole claim as
+  one `SlipStore.ClaimSlip` transaction — lock, expected-status precondition, adoption
+  marker, `claimed_from=<current status>` — and leaves `status` exactly as it found it. A
+  claimed `failed` slip is still `failed`; the claim is a separate flag, not a status. There
+  is no owner recorded, so the flag grants no exclusivity. Do not reintroduce a `Load` before
+  the claim in the adapter, and do not expect a claim to move a slip to `in_progress`.
 - **`if_status` is the compare-and-set.** The body may carry the statuses the caller agrees
-  to claim out of; the store enforces it in the same transaction. A mismatch is 409
-  (`ErrClaimPreconditionFailed`) with nothing written — the caller decided on a stale read and
-  must re-read, not retry. An `in_progress` slip with no claim recorded is a live run and is
-  refused regardless of `if_status`. The CLI pre-job passes `["failed"]`; the rerunner passes
-  the ended set. A repeat claim on an already-claimed slip is still an idempotent no-op, for
-  the same reason as before: a caller's retry after a lost response *is* the recovery.
-- **`POST /slips/{correlationID}/release` ends a claim when the claimant's run is over.** It
-  clears `claimed_from` and appends a `slip_released` marker whatever the status is, and
-  settles the status in the same transaction: restored to the pre-claim value if the run
-  wrote nothing (still the claim's own `in_progress`), kept as the run wrote it otherwise.
-  It never writes over a status the run wrote, so callers may release on any exit path. An
-  unclaimed slip is 409 (`ErrNotClaimed`). The claim also ends without a release when the
-  library writes a terminal status or a `failed` with nothing running (goLibMyCarrier ≥
-  v1.3.103), so a release is the recovery for a run that died, not the normal path.
-- **The claim outlives status writes.** A step failure writes `failed` over the claim's
-  `in_progress`; `claimed_from` stays set and the library's `Repave` refuses the row
-  (`ErrSlipWentLive`, deduplicated onto by the push path) until the claim ends. A repeat
-  claim on a held claim is a no-op that checks `if_status` against the recorded prior.
-- **Deploy order still holds.** A client that sends `if_status` or calls `/release` before
-  this API is deployed gets a 422 or 404; for a claim that means nothing dispatched. API to
-  both environments first, always.
+  to claim out of; the store enforces it in the same transaction against the slip's *current*
+  status. Omit it to claim out of any status — a live `in_progress` included, since a live
+  run is exactly what a claim protects. A mismatch is 409 (`ErrClaimPreconditionFailed`) with
+  nothing written: the caller decided on a stale read and must re-read, not retry. A slip with
+  an empty status is refused outright. A repeat claim on a held claim is an idempotent no-op
+  that still checks `if_status` against the current status — a caller's retry after a lost
+  response *is* the recovery.
+- **`POST /slips/{correlationID}/release` answers 200 `{released, status}`.** It clears
+  `claimed_from` and appends a `slip_released` marker, never touching the status; `status` is
+  the slip's status at release. While any step or aggregate component of the run is still
+  running or held (the library's own `push_parsed` excepted) the store refuses with
+  `ErrRunInFlight` and nothing is written — the adapter reports that as `released=false` on
+  a 200, not an error, because every post-job releases on exit and the last one clears. A
+  slip with no claim is 409 (`ErrNotClaimed`); a terminal status write ends a claim on its
+  own, so 409 after a completed run is the normal outcome, not a fault. 404 for a missing
+  slip.
+- **The claim outlives status writes, and terminal writes end it.** A step failure writes
+  `failed` over whatever the status was; `claimed_from` stays set and `Repave` refuses the
+  row (`ErrSlipWentLive`, deduplicated onto by the push path) until the claim ends — by a
+  release, or by the library's own terminal status write. Nothing about the claim is
+  time-based; there is no expiry.
+- **Deploy order still holds.** A client that sends `if_status`, or reads `released` off
+  `/release`, before this API is deployed gets a 422, a 404, or a 204 with no body; for a
+  claim that means nothing dispatched. API to both environments first, always.
 - **Marker step names are the library's.** `claimMarkerStep` and `releaseMarkerStep` alias
   `slippy.ClaimMarkerStep` / `slippy.ReleaseMarkerStep`; `ClaimMarkerStepCollision` checks
   both against the live pipeline config at boot. Do not rename them here.

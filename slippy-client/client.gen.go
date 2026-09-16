@@ -188,7 +188,7 @@ type ClaimSlipInputBody struct {
 	// ClaimedBy Adopter that is taking over this slip (e.g. "rerunner"); recorded as the history entry's actor
 	ClaimedBy string `json:"claimed_by"`
 
-	// IfStatus Claim only if the slip's current status is one of these; omit for any ended status
+	// IfStatus Claim only if the slip's current status is one of these; omit to claim out of any status
 	IfStatus *[]ClaimSlipInputBodyIfStatus `json:"if_status,omitempty"`
 
 	// Reason Optional scope of the adopted work (e.g. "retrigger builds and unit tests")
@@ -447,6 +447,18 @@ type ReleaseClaimInputBody struct {
 
 	// ReleasedBy Who is releasing the claim (e.g. "slippy-cli/post-job"); recorded as the history entry's actor
 	ReleasedBy string `json:"released_by"`
+}
+
+// ReleaseClaimOutputBody defines model for ReleaseClaimOutputBody.
+type ReleaseClaimOutputBody struct {
+	// Schema A URL to the JSON Schema for this object.
+	Schema *string `json:"$schema,omitempty"`
+
+	// Released true when the claim was cleared; false when the run still has a step or component in flight and the claim is kept — release again when that work reports, or let the terminal write end it
+	Released bool `json:"released"`
+
+	// Status The slip's status at release when released; a release never changes it
+	Status *string `json:"status,omitempty"`
 }
 
 // SetImageTagInputBody defines model for SetImageTagInputBody.
@@ -3120,6 +3132,7 @@ func (r PromoteSlipResponse) StatusCode() int {
 type ReleaseClaimResponse struct {
 	Body                          []byte
 	HTTPResponse                  *http.Response
+	JSON200                       *ReleaseClaimOutputBody
 	ApplicationproblemJSONDefault *ErrorModel
 }
 
@@ -4058,6 +4071,13 @@ func ParseReleaseClaimResponse(rsp *http.Response) (*ReleaseClaimResponse, error
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ReleaseClaimOutputBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest ErrorModel
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {

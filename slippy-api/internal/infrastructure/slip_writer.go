@@ -385,13 +385,14 @@ func ClaimMarkerStepCollision(cfg *slippy.PipelineConfig) string {
 	return ""
 }
 
-// ClaimSlip records that an adopter has taken ownership of an ended slip. Since
-// DEVOPS-367 the library performs the whole claim as ONE store transaction — lock,
-// expected-status precondition, adoption marker, status=in_progress, claimed_from=<prior>
-// — so the marker-then-status ordering this adapter used to reason about no longer
-// exists here. A repeat claim on an already-claimed slip is an idempotent no-op in the
-// store; a live unclaimed run or a status outside ifStatus is ErrClaimPreconditionFailed
-// with nothing written, which mapWriteError turns into a 409.
+// ClaimSlip records that a run is in flight against a slip. Since DEVOPS-367 the library
+// performs the whole claim as ONE store transaction — lock, expected-status precondition,
+// adoption marker, claimed_from=<current status> — and never writes the slip's status, so
+// the marker-then-status ordering this adapter used to reason about no longer exists here.
+// A repeat claim on a held claim is an idempotent no-op in the store that still checks
+// ifStatus against the current status; a status outside ifStatus (or a slip with no status
+// at all) is ErrClaimPreconditionFailed with nothing written, which mapWriteError turns
+// into a 409.
 func (a *SlipWriterAdapter) ClaimSlip(
 	ctx context.Context, correlationID string, ifStatus []slippy.SlipStatus, claimedBy, reason string,
 ) error {
@@ -411,24 +412,36 @@ func (a *SlipWriterAdapter) ClaimSlip(
 	)
 }
 
-// ReleaseClaim ends a claim. The store clears it whatever the status is and restores the
-// pre-claim status only if the run wrote nothing, so callers may invoke it on any exit path
-// without risk of undoing progress (DEVOPS-367).
-func (a *SlipWriterAdapter) ReleaseClaim(ctx context.Context, correlationID, releasedBy, reason string) error {
+// ReleaseClaim ends a claim once nothing is in flight. slippy.ErrRunInFlight is an outcome,
+// not an error: the run still has work running, so the claim is kept and the caller's next
+// release (or a terminal write) ends it (DEVOPS-367).
+func (a *SlipWriterAdapter) ReleaseClaim(
+	ctx context.Context, correlationID, releasedBy, reason string,
+) (domain.ReleaseOutcome, error) {
 	attrs := []attribute.KeyValue{
 		attribute.String("slip.correlation_id", correlationID),
 		attribute.String("slip.released_by", releasedBy),
 	}
-	return a.instrumentedWrite(ctx, "writer.ReleaseClaim", attrs,
+	var out domain.ReleaseOutcome
+	err := a.instrumentedWrite(ctx, "writer.ReleaseClaim", attrs,
 		func(wctx context.Context, span trace.Span) error {
 			status, err := a.client.ReleaseClaim(wctx, correlationID, releasedBy, reason)
-			if err != nil {
+			switch {
+			case err == nil:
+				out = domain.ReleaseOutcome{Released: true, Status: status}
+				span.SetAttributes(attribute.String("slip.release_outcome", "released"),
+					attribute.String("slip.status_at_release", string(status)))
+				return nil
+			case errors.Is(err, slippy.ErrRunInFlight):
+				out = domain.ReleaseOutcome{Released: false}
+				span.SetAttributes(attribute.String("slip.release_outcome", "held_in_flight"))
+				return nil
+			default:
 				return err
 			}
-			span.SetAttributes(attribute.String("slip.status_after_release", string(status)))
-			return nil
 		},
 	)
+	return out, err
 }
 
 // instrumentedWrite is the single entry point for durable step/terminal

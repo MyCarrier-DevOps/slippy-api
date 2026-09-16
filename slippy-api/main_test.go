@@ -111,7 +111,12 @@ func (s *stubSlipWriter) AbandonSlip(_ context.Context, _, _ string) error { ret
 func (s *stubSlipWriter) ClaimSlip(_ context.Context, _ string, _ []slippy.SlipStatus, _, _ string) error {
 	return nil
 }
-func (s *stubSlipWriter) ReleaseClaim(_ context.Context, _, _, _ string) error { return nil }
+func (s *stubSlipWriter) ReleaseClaim(
+	_ context.Context,
+	_, _, _ string,
+) (domain.ReleaseOutcome, error) {
+	return domain.ReleaseOutcome{Released: true}, nil
+}
 
 type stubCIJobLogReader struct{}
 

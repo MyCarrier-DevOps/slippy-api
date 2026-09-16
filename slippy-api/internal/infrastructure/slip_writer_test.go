@@ -791,9 +791,35 @@ func TestSlipWriterAdapter_ReleaseClaim_ForwardsAndPropagatesNotClaimed(t *testi
 		assert.Equal(t, "terminal write failed", reason)
 		return "", fmt.Errorf("release %s: %w", id, slippy.ErrNotClaimed)
 	}}
-	err := newTestWriterAdapter(store).ReleaseClaim(context.Background(), "corr-1", "post-job", "terminal write failed")
+	out, err := newTestWriterAdapter(store).
+		ReleaseClaim(context.Background(), "corr-1", "post-job", "terminal write failed")
 	require.ErrorIs(t, err, slippy.ErrNotClaimed)
+	assert.False(t, out.Released)
 	assert.Equal(t, 1, calls)
+}
+
+// ErrRunInFlight is the one store refusal the adapter does NOT surface as an error: every
+// post-job releases on exit, so "a sibling is still running" is the expected answer for all
+// but the last one and must not read as a failure to the caller.
+func TestSlipWriterAdapter_ReleaseClaim_InFlightIsAnOutcomeNotAnError(t *testing.T) {
+	store := &mockSlipStore{releaseClaimFn: func(_ context.Context, id, _, _ string) (slippy.SlipStatus, error) {
+		return "", fmt.Errorf("release %s: %w", id, slippy.ErrRunInFlight)
+	}}
+	out, err := newTestWriterAdapter(store).ReleaseClaim(context.Background(), "corr-1", "post-job", "")
+	require.NoError(t, err, "an in-flight run is an outcome, not an error")
+	assert.False(t, out.Released)
+	assert.Empty(t, out.Status, "nothing was released, so there is no status at release")
+}
+
+// A release that cleared the claim carries the status it found; the release never writes it.
+func TestSlipWriterAdapter_ReleaseClaim_ReleasedCarriesStatus(t *testing.T) {
+	store := &mockSlipStore{releaseClaimFn: func(_ context.Context, _, _, _ string) (slippy.SlipStatus, error) {
+		return slippy.SlipStatusFailed, nil
+	}}
+	out, err := newTestWriterAdapter(store).ReleaseClaim(context.Background(), "corr-1", "post-job", "")
+	require.NoError(t, err)
+	assert.True(t, out.Released)
+	assert.Equal(t, slippy.SlipStatusFailed, out.Status)
 }
 
 // claimMarkerStep must never collide with a configured pipeline step: an

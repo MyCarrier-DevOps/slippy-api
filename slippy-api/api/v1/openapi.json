@@ -325,7 +325,7 @@
             "type": "string"
           },
           "if_status": {
-            "description": "Claim only if the slip's current status is one of these; omit for any ended status",
+            "description": "Claim only if the slip's current status is one of these; omit to claim out of any status",
             "items": {
               "enum": [
                 "pending",
@@ -1000,6 +1000,32 @@
         },
         "required": [
           "released_by"
+        ],
+        "type": "object"
+      },
+      "ReleaseClaimOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/ReleaseClaimOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "released": {
+            "description": "true when the claim was cleared; false when the run still has a step or component in flight and the claim is kept — release again when that work reports, or let the terminal write end it",
+            "type": "boolean"
+          },
+          "status": {
+            "description": "The slip's status at release when released; a release never changes it",
+            "type": "string"
+          }
+        },
+        "required": [
+          "released"
         ],
         "type": "object"
       },
@@ -2663,7 +2689,7 @@
     },
     "/v1/slips/{correlationID}/claim": {
       "post": {
-        "description": "Records that the caller has work in flight against a slip it did not create: appends an adoption marker to the slip's state history and sets its status to in_progress. Adopters MUST call this before dispatching any workflow. An ended slip stays eligible to be replaced by a same-commit push, which deletes the row out from under in-flight work; a claimed slip is live, so such a push deduplicates onto it instead. A non-2xx response means the claim is not confirmed and the caller must dispatch nothing; it does not mean the slip is unclaimed, because the writes are not cancelled by a client timeout. Claiming again is the recovery: a repeat claim on a slip that is already in_progress is a no-op, never a conflict. Claiming a failed slip also removes it from consumer-side stranded-slip protection that keys on failed, so the adopter is exposed to a concurrent force-push or branch delete for the life of its run.",
+        "description": "Records that the caller has work in flight against a slip it did not create: sets the slip's claim flag and appends an adoption marker to its state history. The claim never changes the slip's status. Adopters MUST call this before dispatching any workflow. An unclaimed slip is eligible to be replaced by a same-commit push, which deletes the row out from under in-flight work; a claimed slip is refused by that repave, so such a push deduplicates onto it instead. A non-2xx response means the claim is not confirmed and the caller must dispatch nothing; it does not mean the slip is unclaimed, because the write is not cancelled by a client timeout. Claiming again is the recovery: a repeat claim on a slip whose claim is still held is a no-op that still checks if_status against the slip's current status, never a conflict. A claim ends when the run releases it, or when a terminal status write ends it.",
         "operationId": "claim-slip",
         "parameters": [
           {
@@ -2876,7 +2902,7 @@
     },
     "/v1/slips/{correlationID}/release": {
       "post": {
-        "description": "Undoes a prior claim: restores the slip's status to what it was before the claim and clears the claim, appending a release marker — but only while the slip is still in_progress with a claim recorded. A slip whose pipeline advanced past the claim is left untouched and answered 409, so callers may invoke this on any failure path (a post-job whose terminal write failed, an adopter that decided not to dispatch) without risk of undoing real progress (DEVOPS-367).",
+        "description": "Ends a prior claim: clears it and appends a release marker, never changing the slip's status. Refused, with released=false and nothing written, while any step or component of the run is still running or held — every post-job releases on exit and the last one clears. A slip with no claim is 409; a terminal status write already ends the claim, so 409 after a completed run is the normal outcome (DEVOPS-367).",
         "operationId": "release-claim",
         "parameters": [
           {
@@ -2901,8 +2927,15 @@
           "required": true
         },
         "responses": {
-          "204": {
-            "description": "No Content"
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseClaimOutputBody"
+                }
+              }
+            },
+            "description": "OK"
           },
           "default": {
             "content": {
@@ -2920,7 +2953,7 @@
             "writeApiKey": []
           }
         ],
-        "summary": "Release a claim whose work will not report, restoring the pre-claim status",
+        "summary": "Release a claim once the claimant's run has nothing in flight",
         "tags": [
           "v1"
         ]
