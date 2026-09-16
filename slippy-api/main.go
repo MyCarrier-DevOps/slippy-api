@@ -782,9 +782,21 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("postgres slip store: %w", err)
 	}
-	// verifyPostgresSchema only proves the tables exist; the per-step {step}_status and
-	// aggregate columns are config-derived (added by ensurers), so a config-only step change
-	// can leave the DB lagging even with the tables present. Probe the full column set the
+	// Every read path in the library selects claimed_from (migration v6, DEVOPS-367), so an
+	// API pod running a library ahead of its database answers every slip operation with
+	// Postgres 42703 instead of failing visibly. ProbeSchema asks for that column by name, so
+	// the one deploy-order mistake that breaks the whole slip surface is diagnosed as itself
+	// rather than as a generic column-lag. Refusing here means the pod exits and Kubernetes
+	// restarts it until the slippy-migrator Job has applied v6 — the Job must run first.
+	if probeErr := store.ProbeSchema(pgConnectCtx); probeErr != nil {
+		return fmt.Errorf(
+			"routing_slips schema is behind this library; apply migration v6 (slippy-migrator) before serving: %w",
+			probeErr)
+	}
+	// ProbeSchema covers only the column the library itself added; verifyPostgresSchema
+	// only proves the tables exist. The per-step {step}_status and aggregate columns are
+	// config-derived (added by ensurers), so a config-only step change can leave the DB
+	// lagging even with the tables present and v6 applied. Probe the full column set the
 	// store actually selects via a Load of the nil-UUID sentinel: ErrSlipNotFound means the
 	// schema is complete, anything else (e.g. Postgres 42703 undefined_column) means it lags
 	// the config and the migrator Job needs to re-run.

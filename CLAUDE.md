@@ -242,6 +242,14 @@ a claimed row is refused by `Repave`, so the push dedups onto the adopter's slip
 - **Deploy order still holds.** A client that sends `if_status`, or reads `released` off
   `/release`, before this API is deployed gets a 422, a 404, or a 204 with no body; for a
   claim that means nothing dispatched. API to both environments first, always.
+- **The API refuses to start against a database behind migration v6.** `claimed_from` is
+  selected by every read path in the library, so an API pod ahead of its database would
+  answer every slip operation with Postgres 42703. `run()` calls
+  `slippy.PostgresStore.ProbeSchema` right after building the store and returns a fatal
+  error while the column is missing, so the pod exits and Kubernetes restarts it until the
+  schema is there. The **slippy-migrator Job must run first** — it owns the schema via its
+  PreSync hook, and this probe is what makes that ordering enforced rather than assumed. A
+  crash-looping API right after a goLib bump is this check, not a broken image: apply v6.
 - **Marker step names are the library's.** `claimMarkerStep` and `releaseMarkerStep` alias
   `slippy.ClaimMarkerStep` / `slippy.ReleaseMarkerStep`; `ClaimMarkerStepCollision` checks
   both against the live pipeline config at boot. Do not rename them here.

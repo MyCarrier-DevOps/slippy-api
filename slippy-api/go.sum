@@ -21,8 +21,8 @@ github.com/MyCarrier-DevOps/goLibMyCarrier/postgres v1.3.102 h1:sVf6nZXoANHoYx+X
 github.com/MyCarrier-DevOps/goLibMyCarrier/postgres v1.3.102/go.mod h1:NEoXXrHkTh5WPAxgwj4mElhf95Yye4Ml5w4vDIvOdBI=
 github.com/MyCarrier-DevOps/goLibMyCarrier/postgresmigrator v1.3.102 h1:p2smnw1p3hZFEvJvPEvnYhksg5Ov2bOTaqgaZ+Oj6YY=
 github.com/MyCarrier-DevOps/goLibMyCarrier/postgresmigrator v1.3.102/go.mod h1:oIdddEL6h0xj5nQFbeKQHIvwqywQFV2x1DLxFBnGq/8=
-github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.103-feat-devops-367-claim-wedge.17 h1:niIyEf8x8sYJvEkrGlcpGThw5HkEM9fPHpoqnB+3IlQ=
-github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.103-feat-devops-367-claim-wedge.17/go.mod h1:8JxrEgcEL8QO2JrqbRPvXr9mxjC8NYtomjJ8hJsg7Po=
+github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.103-feat-devops-367-claim-wedge.19.0.20260916152010-c9b415c82973 h1:6UwG51RpsmrEBbOY/AbBioy2rst7fYoYCTZBA7M70+A=
+github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.103-feat-devops-367-claim-wedge.19.0.20260916152010-c9b415c82973/go.mod h1:8JxrEgcEL8QO2JrqbRPvXr9mxjC8NYtomjJ8hJsg7Po=
 github.com/ProtonMail/go-crypto v1.4.1 h1:9RfcZHqEQUvP8RzecWEUafnZVtEvrBVL9BiF67IQOfM=
 github.com/ProtonMail/go-crypto v1.4.1/go.mod h1:e1OaTyu5SYVrO9gKOEhTc+5UcXtTUa+P3uLudwcgPqo=
 github.com/alicebob/miniredis/v2 v2.38.0 h1:nZAzCR+Lj+Vxk4ZXzm2NuKq2O33RXj1XxJ2e2uP9jiw=
