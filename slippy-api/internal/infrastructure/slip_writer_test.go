@@ -784,12 +784,14 @@ func TestSlipWriterAdapter_ClaimSlip_PropagatesPreconditionFailure(t *testing.T)
 
 func TestSlipWriterAdapter_ReleaseClaim_ForwardsAndPropagatesNotClaimed(t *testing.T) {
 	var calls int
-	store := &mockSlipStore{releaseClaimFn: func(_ context.Context, id, by, reason string) (slippy.SlipStatus, error) {
+	store := &mockSlipStore{releaseClaimFn: func(
+		_ context.Context, id, by, reason string,
+	) (slippy.ReleaseOutcome, error) {
 		calls++
 		assert.Equal(t, "corr-1", id)
 		assert.Equal(t, "post-job", by)
 		assert.Equal(t, "terminal write failed", reason)
-		return "", fmt.Errorf("release %s: %w", id, slippy.ErrNotClaimed)
+		return slippy.ReleaseOutcome{}, fmt.Errorf("release %s: %w", id, slippy.ErrNotClaimed)
 	}}
 	out, err := newTestWriterAdapter(store).
 		ReleaseClaim(context.Background(), "corr-1", "post-job", "terminal write failed")
@@ -798,23 +800,28 @@ func TestSlipWriterAdapter_ReleaseClaim_ForwardsAndPropagatesNotClaimed(t *testi
 	assert.Equal(t, 1, calls)
 }
 
-// ErrRunInFlight is the one store refusal the adapter does NOT surface as an error: every
-// post-job releases on exit, so "a sibling is still running" is the expected answer for all
-// but the last one and must not read as a failure to the caller.
+// Work in flight is an outcome the library reports, never an error: every post-job releases
+// on exit, so "a sibling is still running" is the expected answer for all but the last one
+// and must not read as a failure to the caller. The status comes back on that arm too, since
+// the store reads it under the same lock it decides on and a release never changes it.
 func TestSlipWriterAdapter_ReleaseClaim_InFlightIsAnOutcomeNotAnError(t *testing.T) {
-	store := &mockSlipStore{releaseClaimFn: func(_ context.Context, id, _, _ string) (slippy.SlipStatus, error) {
-		return "", fmt.Errorf("release %s: %w", id, slippy.ErrRunInFlight)
+	store := &mockSlipStore{releaseClaimFn: func(
+		_ context.Context, _, _, _ string,
+	) (slippy.ReleaseOutcome, error) {
+		return slippy.ReleaseOutcome{Released: false, Status: slippy.SlipStatusInProgress}, nil
 	}}
 	out, err := newTestWriterAdapter(store).ReleaseClaim(context.Background(), "corr-1", "post-job", "")
 	require.NoError(t, err, "an in-flight run is an outcome, not an error")
 	assert.False(t, out.Released)
-	assert.Empty(t, out.Status, "nothing was released, so there is no status at release")
+	assert.Equal(t, slippy.SlipStatusInProgress, out.Status, "the status is known on the held arm too")
 }
 
 // A release that cleared the claim carries the status it found; the release never writes it.
 func TestSlipWriterAdapter_ReleaseClaim_ReleasedCarriesStatus(t *testing.T) {
-	store := &mockSlipStore{releaseClaimFn: func(_ context.Context, _, _, _ string) (slippy.SlipStatus, error) {
-		return slippy.SlipStatusFailed, nil
+	store := &mockSlipStore{releaseClaimFn: func(
+		_ context.Context, _, _, _ string,
+	) (slippy.ReleaseOutcome, error) {
+		return slippy.ReleaseOutcome{Released: true, Status: slippy.SlipStatusFailed}, nil
 	}}
 	out, err := newTestWriterAdapter(store).ReleaseClaim(context.Background(), "corr-1", "post-job", "")
 	require.NoError(t, err)

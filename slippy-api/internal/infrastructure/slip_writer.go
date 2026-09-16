@@ -412,9 +412,10 @@ func (a *SlipWriterAdapter) ClaimSlip(
 	)
 }
 
-// ReleaseClaim ends a claim once nothing is in flight. slippy.ErrRunInFlight is an outcome,
-// not an error: the run still has work running, so the claim is kept and the caller's next
-// release (or a terminal write) ends it (DEVOPS-367).
+// ReleaseClaim ends a claim once nothing is in flight. Work in flight is an OUTCOME, not an
+// error — the library returns slippy.ReleaseOutcome{Released: false} with nothing written —
+// so the claim is kept and the caller's next release (or a terminal write) ends it
+// (DEVOPS-367). The status is known on both arms, because a release never changes it.
 func (a *SlipWriterAdapter) ReleaseClaim(
 	ctx context.Context, correlationID, releasedBy, reason string,
 ) (domain.ReleaseOutcome, error) {
@@ -425,20 +426,18 @@ func (a *SlipWriterAdapter) ReleaseClaim(
 	var out domain.ReleaseOutcome
 	err := a.instrumentedWrite(ctx, "writer.ReleaseClaim", attrs,
 		func(wctx context.Context, span trace.Span) error {
-			status, err := a.client.ReleaseClaim(wctx, correlationID, releasedBy, reason)
-			switch {
-			case err == nil:
-				out = domain.ReleaseOutcome{Released: true, Status: status}
-				span.SetAttributes(attribute.String("slip.release_outcome", "released"),
-					attribute.String("slip.status_at_release", string(status)))
-				return nil
-			case errors.Is(err, slippy.ErrRunInFlight):
-				out = domain.ReleaseOutcome{Released: false}
-				span.SetAttributes(attribute.String("slip.release_outcome", "held_in_flight"))
-				return nil
-			default:
+			res, err := a.client.ReleaseClaim(wctx, correlationID, releasedBy, reason)
+			if err != nil {
 				return err
 			}
+			out = domain.ReleaseOutcome{Released: res.Released, Status: res.Status}
+			outcome := "held_in_flight"
+			if res.Released {
+				outcome = "released"
+			}
+			span.SetAttributes(attribute.String("slip.release_outcome", outcome),
+				attribute.String("slip.status_at_decision", string(res.Status)))
+			return nil
 		},
 	)
 	return out, err

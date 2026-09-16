@@ -974,7 +974,11 @@ func TestReleaseClaim_ReleasedReportsTheStatusAtRelease(t *testing.T) {
 // The writer deliberately returns a Status alongside Released=false, which the adapter never
 // does: "status only when released" is the HANDLER's contract to hold, not something inherited
 // from the adapter zeroing its outcome.
-func TestReleaseClaim_HeldInFlightIs200WithNoStatus(t *testing.T) {
+// Renamed and inverted deliberately (PR #87 re-review): the held arm used to omit `status`,
+// on the reasoning that "a status at release" exists only when there was a release. The
+// library reads the status under the same lock it decides on and never writes it, so it is
+// known on both arms — and reporting it saves a caller polling a held claim a second request.
+func TestReleaseClaim_HeldInFlightIs200WithReleasedFalse(t *testing.T) {
 	w := &mockWriter{
 		releaseClaimFn: func(_ context.Context, _, _, _ string) (domain.ReleaseOutcome, error) {
 			return domain.ReleaseOutcome{Released: false, Status: slippy.SlipStatusFailed}, nil
@@ -993,8 +997,8 @@ func TestReleaseClaim_HeldInFlightIs200WithNoStatus(t *testing.T) {
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, false, resp["released"])
-	assert.NotContains(t, resp, "status",
-		"nothing was released, so there is no status at release to report")
+	assert.Equal(t, string(slippy.SlipStatusFailed), resp["status"],
+		"the status is the slip's at decision time, reported whether or not the claim was cleared")
 }
 
 // A held claim writes NOTHING, so it must not evict the cached slip: an eviction there would
@@ -1084,9 +1088,6 @@ func TestMapWriteError(t *testing.T) {
 		{"creation in progress (sentinel)", domain.ErrCreationInProgress, http.StatusConflict},
 		{"claim precondition failed", slippy.ErrClaimPreconditionFailed, http.StatusConflict},
 		{"not claimed", slippy.ErrNotClaimed, http.StatusConflict},
-		// Unreachable through the release handler (the adapter turns it into an outcome), but
-		// pinned so a future writer path that lets it through gets a retryable 409, not a 500.
-		{"run in flight", slippy.ErrRunInFlight, http.StatusConflict},
 		{
 			"creation in progress (wrapped, as returned by writer)",
 			fmt.Errorf("dedup: slip for repo:sha creation in progress, retry: %w", domain.ErrCreationInProgress),

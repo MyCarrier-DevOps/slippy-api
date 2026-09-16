@@ -205,49 +205,65 @@ needs no change for that: it surfaces the library's result as it already does.
 
 ### The claim is a flag; release ends it once nothing is in flight (DEVOPS-285, DEVOPS-367)
 
-`POST /slips/{correlationID}/claim` exists for callers that adopt a correlation ID they did
+`POST /v1/slips/{correlationID}/claim` exists for callers that adopt a correlation ID they did
 not create — pushhookparser's rerunner, and the Slippy CLI pre-job (Slippy#28). An unclaimed
 ended slip is repave-eligible, so a same-commit push in the window before the adopter's first
 write deletes the row and every later write from that run 404s. Claiming closes the window:
 a claimed row is refused by `Repave`, so the push dedups onto the adopter's slip instead.
 
-- **The claim never writes status.** goLibMyCarrier ≥ v1.3.103 performs the whole claim as
+- **The claim never writes status.** goLibMyCarrier ≥ v1.4.0 performs the whole claim as
   one `SlipStore.ClaimSlip` transaction — lock, expected-status precondition, adoption
   marker, `claimed_from=<current status>` — and leaves `status` exactly as it found it. A
   claimed `failed` slip is still `failed`; the claim is a separate flag, not a status. There
   is no owner recorded, so the flag grants no exclusivity. Do not reintroduce a `Load` before
   the claim in the adapter, and do not expect a claim to move a slip to `in_progress`.
 - **`if_status` is the compare-and-set.** The body may carry the statuses the caller agrees
-  to claim out of; the store enforces it in the same transaction against the slip's *current*
-  status. Omit it to claim out of any status — a live `in_progress` included, since a live
-  run is exactly what a claim protects. A mismatch is 409 (`ErrClaimPreconditionFailed`) with
+  to claim out of; on a FRESH claim the store enforces it in the same transaction against the
+  slip's *current* status. Omit it to claim out of any status EXCEPT an unclaimed
+  `in_progress` — that is a live run nothing has adopted, and adopting one silently lets a
+  rerun dispatch on top of a pipeline already in flight; a caller that means to claim one
+  names `in_progress` in `if_status`. A mismatch is 409 (`ErrClaimPreconditionFailed`) with
   nothing written: the caller decided on a stale read and must re-read, not retry. A slip with
-  an empty status is refused outright. A repeat claim on a held claim is an idempotent no-op
-  that still checks `if_status` against the current status — a caller's retry after a lost
-  response *is* the recovery.
-- **`POST /slips/{correlationID}/release` answers 200 `{released, status}`.** It clears
+  an empty status is refused outright. A repeat claim on a held claim is an idempotent no-op,
+  and `if_status` is then checked against the status the claim was **recorded** out of rather
+  than the current one — so a retry after a lost response passes even once the run has moved
+  the slip on, while a different claimant that never agreed to that prior is still refused.
+- **`POST /v1/slips/{correlationID}/release` answers 200 `{released, status}`.** It clears
   `claimed_from` and appends a `slip_released` marker, never touching the status; `status` is
-  the slip's status at release. While any step or aggregate component of the run is still
-  running or held (the library's own `push_parsed` excepted) the store refuses with
-  `ErrRunInFlight` and nothing is written — the adapter reports that as `released=false` on
-  a 200, not an error, because every post-job releases on exit and the last one clears. A
-  slip with no claim is 409 (`ErrNotClaimed`); a terminal status write ends a claim on its
-  own, so 409 after a completed run is the normal outcome, not a fault. 404 for a missing
-  slip.
+  the slip's status at decision time and is reported on **both** arms, because the store reads
+  it under the same lock it decides on. While any step or aggregate component of the run is
+  still running or held (the library's own `push_parsed` excepted) the store KEEPS the claim
+  and writes nothing, returning `slippy.ReleaseOutcome{Released: false}` — not an error, since
+  every post-job releases on exit and all but the last one take that arm. `ErrRunInFlight` is
+  gone from the library; there is no sentinel to map. A slip with no claim is 409
+  (`ErrNotClaimed`); a terminal status write ends a claim on its own, so 409 after a completed
+  run is the normal outcome, not a fault. 404 for a missing slip.
+  The **wire contract is unchanged** by that library change (`released` plus `status`, 200
+  either way), so no consumer needs a coordinated release; `status` is simply now populated on
+  the held arm too.
 - **The claim outlives status writes, and terminal writes end it.** A step failure writes
   `failed` over whatever the status was; `claimed_from` stays set and `Repave` refuses the
   row (`ErrSlipWentLive`, deduplicated onto by the push path) until the claim ends — by a
-  release, or by the library's own terminal status write. Nothing about the claim is
-  time-based; there is no expiry.
+  release, or by the library's `UpdateSlipStatus` on a terminal status, which is the ONE
+  write path that ends a claim (neither `Create` nor the full-row `Update` touches the
+  column, whatever status the caller's snapshot carries). Nothing about the claim is
+  time-based; there is no expiry. When a run dies and never releases, the **stuck step holds
+  the claim**: resolve it (`POST /v1/slips/{id}/steps/{step}/complete`, or fail or skip it)
+  and then release, which now finds nothing in flight. `POST /v1/slips/{id}/abandon` also
+  ends it on a NON-terminal slip; on an already-terminal one it is a deliberate no-op and
+  clears nothing.
 - **Deploy order still holds.** A client that sends `if_status`, or reads `released` off
   `/release`, before this API is deployed gets a 422, a 404, or a 204 with no body; for a
   claim that means nothing dispatched. API to both environments first, always.
 - **The API refuses to start against a database behind migration v6.** `claimed_from` is
   selected by every read path in the library, so an API pod ahead of its database would
-  answer every slip operation with Postgres 42703. `run()` calls
-  `slippy.PostgresStore.ProbeSchema` right after building the store and returns a fatal
-  error while the column is missing, so the pod exits and Kubernetes restarts it until the
-  schema is there. The **slippy-migrator Job must run first** — it owns the schema via its
+  answer every slip operation with Postgres 42703. `run()` calls `ProbeSchema` right after
+  building the store and returns a fatal error while any selected column is missing, so the
+  pod exits and Kubernetes restarts it until the schema is there. The probe is on
+  `slippy.SlipStore` (and `slippy.Client`) as of DEVOPS-367, so it is reachable through the
+  abstraction rather than only on the concrete Postgres store, and it now checks the WHOLE
+  select column list — every configured step's column as well as `claimed_from` — so a
+  pipeline-config step deployed ahead of its migration is caught by the same gate. The **slippy-migrator Job must run first** — it owns the schema via its
   PreSync hook, and this probe is what makes that ordering enforced rather than assumed. A
   crash-looping API right after a goLib bump is this check, not a broken image: apply v6.
 - **Marker step names are the library's.** `claimMarkerStep` and `releaseMarkerStep` alias

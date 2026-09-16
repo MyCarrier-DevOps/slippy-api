@@ -215,8 +215,15 @@ func (s *asyncInsertSlipStore) ClaimSlip(
 	return "", fmt.Errorf("ClaimSlip(%s): %w", id, slippy.ErrClaimUnsupported)
 }
 
-func (s *asyncInsertSlipStore) ReleaseClaim(_ context.Context, id, _, _ string) (slippy.SlipStatus, error) {
-	return "", fmt.Errorf("ReleaseClaim(%s): %w", id, slippy.ErrClaimUnsupported)
+func (s *asyncInsertSlipStore) ReleaseClaim(
+	_ context.Context, id, _, _ string,
+) (slippy.ReleaseOutcome, error) {
+	return slippy.ReleaseOutcome{}, fmt.Errorf("ReleaseClaim(%s): %w", id, slippy.ErrClaimUnsupported)
+}
+
+// ProbeSchema joined slippy.SlipStore in DEVOPS-367; this double has no schema to check.
+func (s *asyncInsertSlipStore) ProbeSchema(_ context.Context) error {
+	return nil
 }
 
 func (s *asyncInsertSlipStore) SetComponentImageTag(_ context.Context, _, _, _, _ string) error {

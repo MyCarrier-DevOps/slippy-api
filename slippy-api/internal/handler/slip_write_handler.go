@@ -208,7 +208,7 @@ type ClaimSlipInput struct {
 		// Optional compare-and-set: claim only if the slip is currently in one of these
 		// statuses, enforced in the store's transaction. Omit to claim out of any status.
 		// A mismatch is 409 with nothing written (DEVOPS-367).
-		IfStatus []string `json:"if_status,omitempty" maxItems:"8" uniqueItems:"true" enum:"pending,in_progress,failed,compensating,completed,compensated,abandoned,promoted" doc:"Claim only if the slip's current status is one of these; omit to claim out of any status"`
+		IfStatus []string `json:"if_status,omitempty" maxItems:"8" uniqueItems:"true" enum:"pending,in_progress,failed,compensating,completed,compensated,abandoned,promoted" doc:"Claim only if the slip's current status is one of these; omit to claim out of any status except an unclaimed in_progress, which is a live run — name in_progress here to claim one deliberately"`
 	}
 }
 
@@ -225,7 +225,7 @@ type ReleaseClaimInput struct {
 type ReleaseClaimOutput struct {
 	Body struct {
 		Released bool   `json:"released" doc:"true when the claim was cleared; false when the run still has a step or component in flight and the claim is kept — release again when that work reports, or let the terminal write end it"`
-		Status   string `json:"status,omitempty" doc:"The slip's status at release when released; a release never changes it"`
+		Status   string `json:"status" doc:"the slip's status at decision time; a release never changes it"`
 	}
 }
 
@@ -336,8 +336,10 @@ func RegisterWriteRoutes(api huma.API, h *SlipWriteHandler) {
 			"non-2xx response means the claim is not confirmed and the caller must dispatch nothing; it " +
 			"does not mean the slip is unclaimed, because the write is not cancelled by a client " +
 			"timeout. Claiming again is the recovery: a repeat claim on a slip whose claim is still " +
-			"held is a no-op that still checks if_status against the slip's current status, never a " +
-			"conflict. A claim ends when the run releases it, or when a terminal status write ends it.",
+			"held is a no-op, never a conflict, and if_status is then checked against the status the " +
+			"claim was RECORDED out of rather than the current one, so a retry after a lost response " +
+			"passes even once the run has moved the slip on. A claim ends when the run releases it, or " +
+			"when a terminal status write ends it.",
 		Security:      writeApiKeySecurity,
 		DefaultStatus: http.StatusNoContent,
 		Tags:          []string{"v1"},
@@ -349,8 +351,9 @@ func RegisterWriteRoutes(api huma.API, h *SlipWriteHandler) {
 		Path:        "/slips/{correlationID}/release",
 		Summary:     "Release a claim once the claimant's run has nothing in flight",
 		Description: "Ends a prior claim: clears it and appends a release marker, never changing the slip's " +
-			"status. Refused, with released=false and nothing written, while any step or component of the " +
-			"run is still running or held — every post-job releases on exit and the last one clears. A slip " +
+			"status. While any step or component of the run is still running or held the claim is kept — " +
+			"released=false with nothing written, and the slip's status reported either way — because every " +
+			"post-job releases on exit and the last one clears. A slip " +
 			"with no claim is 409; a terminal status write already ends the claim, so 409 after a completed " +
 			"run is the normal outcome (DEVOPS-367).",
 		Security:      writeApiKeySecurity,
@@ -777,19 +780,20 @@ func (h *SlipWriteHandler) releaseClaim(
 		}
 		return nil, mapWriteError(err)
 	}
-	// Status is written only on the released path: "a status at release" exists only when
-	// there was a release. Do not hoist it above this branch — the response shape is this
-	// handler's to hold, not something to inherit from the adapter zeroing its outcome.
+	// Status is set on BOTH arms: a release never changes the status, and the store reads it
+	// under the same lock it decides on, so it is known whether or not the claim was cleared.
+	// A caller polling a held claim gets the slip's status without a second request.
 	resp := &ReleaseClaimOutput{}
 	resp.Body.Released = out.Released
+	resp.Body.Status = string(out.Status)
 	if !out.Released {
 		// The claim is kept and nothing was written, so there is no cached read to drop.
 		span.SetStatus(codes.Ok, "")
 		slog.InfoContext(ctx, "slip: claim held, run still in flight",
-			"correlation_id", input.CorrelationID, "released_by", input.Body.ReleasedBy)
+			"correlation_id", input.CorrelationID, "released_by", input.Body.ReleasedBy,
+			"status", resp.Body.Status)
 		return resp, nil
 	}
-	resp.Body.Status = string(out.Status)
 	h.invalidate(ctx, input.CorrelationID)
 	span.SetStatus(codes.Ok, "")
 	slog.InfoContext(ctx, "slip: claim released",
@@ -841,12 +845,6 @@ func mapWriteError(err error) error {
 			http.StatusConflict,
 			"slip status did not match if_status; nothing written — re-read the slip before claiming",
 		)
-	case errors.Is(err, slippy.ErrRunInFlight):
-		// UNREACHABLE BY DESIGN: the adapter turns ErrRunInFlight into a ReleaseOutcome with
-		// Released=false and a nil error, so the release handler never sends it here. This arm
-		// is insurance — if a future writer path lets the sentinel through, a held claim must
-		// read as a conflict the caller can retry, not as a 500.
-		return huma.NewError(http.StatusConflict, "claim held: the run still has work in flight")
 	case errors.Is(err, slippy.ErrNotClaimed):
 		// Normal outcome when a terminal status write ended the claim before the release ran.
 		return huma.NewError(

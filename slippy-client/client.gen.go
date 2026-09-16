@@ -188,7 +188,7 @@ type ClaimSlipInputBody struct {
 	// ClaimedBy Adopter that is taking over this slip (e.g. "rerunner"); recorded as the history entry's actor
 	ClaimedBy string `json:"claimed_by"`
 
-	// IfStatus Claim only if the slip's current status is one of these; omit to claim out of any status
+	// IfStatus Claim only if the slip's current status is one of these; omit to claim out of any status except an unclaimed in_progress, which is a live run — name in_progress here to claim one deliberately
 	IfStatus *[]ClaimSlipInputBodyIfStatus `json:"if_status,omitempty"`
 
 	// Reason Optional scope of the adopted work (e.g. "retrigger builds and unit tests")
@@ -457,8 +457,8 @@ type ReleaseClaimOutputBody struct {
 	// Released true when the claim was cleared; false when the run still has a step or component in flight and the claim is kept — release again when that work reports, or let the terminal write end it
 	Released bool `json:"released"`
 
-	// Status The slip's status at release when released; a release never changes it
-	Status *string `json:"status,omitempty"`
+	// Status the slip's status at decision time; a release never changes it
+	Status string `json:"status"`
 }
 
 // SetImageTagInputBody defines model for SetImageTagInputBody.

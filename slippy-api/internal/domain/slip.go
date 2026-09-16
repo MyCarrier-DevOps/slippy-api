@@ -198,22 +198,25 @@ type SlipWriter interface {
 	//
 	// claimedBy names the adopter (it becomes the history entry's actor); reason
 	// is optional free text describing the scope of the adopted work.
-	// ifStatus bounds which statuses may be claimed out of; nil means any status; the store
-	// enforces it in the same transaction as the write and checks it against the current
-	// status on a repeat claim (DEVOPS-367).
+	// ifStatus bounds which statuses may be claimed out of, enforced by the store in the same
+	// transaction as the write. nil means any status EXCEPT an unclaimed in_progress, which is
+	// a live run nothing has adopted — a caller that means to claim one names in_progress. On
+	// a repeat claim ifStatus is checked against the status the claim was RECORDED out of, not
+	// the current one, so a retry after a lost response is idempotent (DEVOPS-367).
 	ClaimSlip(ctx context.Context, correlationID string, ifStatus []slippy.SlipStatus, claimedBy, reason string) error
 
-	// ReleaseClaim ends a claim once nothing of the run is in flight. The store refuses with
-	// slippy.ErrRunInFlight while any step or component is running or held; the adapter
-	// reports that as Released=false rather than an error, because every post-job releases
-	// on exit and the last one clears. Never writes status. slippy.ErrNotClaimed when there
-	// is no claim (DEVOPS-367).
+	// ReleaseClaim ends a claim once nothing of the run is in flight. While any step or
+	// component is running or held the store KEEPS the claim and writes nothing, reporting
+	// Released=false with no error — every post-job releases on exit and the last one clears,
+	// so all but that last one take this arm. Never writes status. slippy.ErrNotClaimed when
+	// there is no claim (DEVOPS-367).
 	ReleaseClaim(ctx context.Context, correlationID, releasedBy, reason string) (ReleaseOutcome, error)
 }
 
 // ReleaseOutcome is what a release did. Released=false with a nil error means the claim is
-// held because the run still has work in flight; Status is the slip's status at release when
-// Released is true and empty otherwise.
+// held because the run still has work in flight and nothing was written. Status is the slip's
+// status at decision time on BOTH arms — the store reads it under the same lock it decides
+// on, and a release never changes it.
 type ReleaseOutcome struct {
 	Released bool
 	Status   slippy.SlipStatus

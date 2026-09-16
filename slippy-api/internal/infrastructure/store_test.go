@@ -34,7 +34,8 @@ type mockSlipStore struct {
 	setComponentImageTagFn  func(ctx context.Context, id, step, comp, tag string) error
 	repaveFn                func(ctx context.Context, oldID string, newSlip *slippy.Slip, parent *slippy.AncestryEntry) error
 	claimSlipFn             func(ctx context.Context, id string, expected []slippy.SlipStatus, claimedBy, reason string) (slippy.SlipStatus, error)
-	releaseClaimFn          func(ctx context.Context, id, releasedBy, reason string) (slippy.SlipStatus, error)
+	releaseClaimFn          func(ctx context.Context, id, releasedBy, reason string) (slippy.ReleaseOutcome, error)
+	probeSchemaFn           func(ctx context.Context) error
 	pingFn                  func(ctx context.Context) error
 }
 
@@ -172,11 +173,22 @@ func (m *mockSlipStore) ClaimSlip(
 	return "", nil
 }
 
-func (m *mockSlipStore) ReleaseClaim(ctx context.Context, id, releasedBy, reason string) (slippy.SlipStatus, error) {
+func (m *mockSlipStore) ReleaseClaim(
+	ctx context.Context, id, releasedBy, reason string,
+) (slippy.ReleaseOutcome, error) {
 	if m.releaseClaimFn != nil {
 		return m.releaseClaimFn(ctx, id, releasedBy, reason)
 	}
-	return "", nil
+	return slippy.ReleaseOutcome{}, nil
+}
+
+// ProbeSchema joined slippy.SlipStore in DEVOPS-367 (the readiness gate, reachable through
+// the interface consumers hold). The double has no schema, so it reports ready.
+func (m *mockSlipStore) ProbeSchema(ctx context.Context) error {
+	if m.probeSchemaFn != nil {
+		return m.probeSchemaFn(ctx)
+	}
+	return nil
 }
 
 func (m *mockSlipStore) InsertAncestryLink(_ context.Context, _ *slippy.Slip, _ slippy.AncestryEntry) error {
