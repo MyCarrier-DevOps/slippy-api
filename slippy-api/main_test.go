@@ -108,8 +108,13 @@ func (s *stubSlipWriter) SetComponentImageTag(_ context.Context, _, _, _ string)
 }
 func (s *stubSlipWriter) PromoteSlip(_ context.Context, _, _ string) error { return nil }
 func (s *stubSlipWriter) AbandonSlip(_ context.Context, _, _ string) error { return nil }
-func (s *stubSlipWriter) ClaimSlip(_ context.Context, _ string, _ []slippy.SlipStatus, _, _ string) error {
-	return nil
+func (s *stubSlipWriter) ClaimSlip(
+	_ context.Context,
+	_ string,
+	_ []slippy.SlipStatus,
+	_, _ string,
+) (domain.ClaimOutcome, error) {
+	return domain.ClaimOutcome{Claimed: true}, nil
 }
 func (s *stubSlipWriter) ReleaseClaim(
 	_ context.Context,

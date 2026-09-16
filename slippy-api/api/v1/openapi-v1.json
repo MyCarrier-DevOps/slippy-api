@@ -323,7 +323,7 @@
             "type": "string"
           },
           "if_status": {
-            "description": "Claim only if the slip's current status is one of these; omit to claim out of any status except an unclaimed in_progress, which is a live run — name in_progress here to claim one deliberately",
+            "description": "Claim only if the slip's CURRENT status is one of these, whether or not a claim is already held; omit to claim out of any status except a live run (in_progress, compensating) — name the status here to adopt one deliberately",
             "items": {
               "enum": [
                 "pending",
@@ -350,6 +350,32 @@
         },
         "required": [
           "claimed_by"
+        ],
+        "type": "object"
+      },
+      "ClaimSlipOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/ClaimSlipOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "claimed": {
+            "description": "true when this call recorded the claim; false when a claim was already held and nothing was written — the slip is claimed either way",
+            "type": "boolean"
+          },
+          "prior": {
+            "description": "the status the claim was taken out of: the current status when this call claimed, the recorded one when a claim was already held",
+            "type": "string"
+          }
+        },
+        "required": [
+          "claimed"
         ],
         "type": "object"
       },
@@ -2156,7 +2182,7 @@
     },
     "/slips/{correlationID}/claim": {
       "post": {
-        "description": "Records that the caller has work in flight against a slip it did not create: sets the slip's claim flag and appends an adoption marker to its state history. The claim never changes the slip's status. Adopters MUST call this before dispatching any workflow. An unclaimed ended slip (failed, completed, abandoned, promoted, compensated) is eligible to be replaced by a same-commit push, which deletes the row out from under in-flight work; a claimed slip is refused by that repave, so such a push deduplicates onto it instead. A non-2xx response means the claim is not confirmed and the caller must dispatch nothing; it does not mean the slip is unclaimed, because the write is not cancelled by a client timeout. Claiming again is the recovery: a repeat claim on a slip whose claim is still held is a no-op, never a conflict, and if_status is then checked against the status the claim was RECORDED out of rather than the current one, so a retry after a lost response passes even once the run has moved the slip on. A claim ends when the run releases it, or when a terminal status write ends it.",
+        "description": "Records that the caller has work in flight against a slip it did not create: sets the slip's claim flag and appends an adoption marker to its state history. The claim never changes the slip's status. Adopters MUST call this before dispatching any workflow. An unclaimed ended slip (failed, completed, abandoned, promoted, compensated) is eligible to be replaced by a same-commit push, which deletes the row out from under in-flight work; a claimed slip is refused by that repave, so such a push deduplicates onto it instead. A non-2xx response means the claim is not confirmed and the caller must dispatch nothing; it does not mean the slip is unclaimed, because the write is not cancelled by a client timeout. if_status is a COMPARE-AND-SET ON THE SLIP'S CURRENT STATUS, whether or not a claim is already held; a mismatch is 409 with nothing written. Claiming again is the recovery, and a repeat claim whose if_status still matches the current status is a no-op rather than a conflict: it answers 200 with claimed=false, meaning a claim was already held and this call wrote nothing. So a retry after a lost response claims when nothing was dispatched — the status has not moved — and is refused once a step has reported, because the dispatch being retried already happened. A claim ends when the run releases it, or when a terminal status write ends it.",
         "operationId": "claim-slip",
         "parameters": [
           {
@@ -2181,8 +2207,15 @@
           "required": true
         },
         "responses": {
-          "204": {
-            "description": "No Content"
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClaimSlipOutputBody"
+                }
+              }
+            },
+            "description": "OK"
           },
           "default": {
             "content": {

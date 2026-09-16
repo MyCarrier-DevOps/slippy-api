@@ -208,7 +208,17 @@ type ClaimSlipInput struct {
 		// Optional compare-and-set: claim only if the slip is currently in one of these
 		// statuses, enforced in the store's transaction. Omit to claim out of any status.
 		// A mismatch is 409 with nothing written (DEVOPS-367).
-		IfStatus []string `json:"if_status,omitempty" maxItems:"8" uniqueItems:"true" enum:"pending,in_progress,failed,compensating,completed,compensated,abandoned,promoted" doc:"Claim only if the slip's current status is one of these; omit to claim out of any status except an unclaimed in_progress, which is a live run — name in_progress here to claim one deliberately"`
+		IfStatus []string `json:"if_status,omitempty" maxItems:"8" uniqueItems:"true" enum:"pending,in_progress,failed,compensating,completed,compensated,abandoned,promoted" doc:"Claim only if the slip's CURRENT status is one of these, whether or not a claim is already held; omit to claim out of any status except a live run (in_progress, compensating) — name the status here to adopt one deliberately"`
+	}
+}
+
+// ClaimSlipOutput reports what the claim did. Symmetric with ReleaseClaimOutput, and for the
+// same reason: the interesting half of the outcome is which arm the store took, and a caller
+// that must not duplicate work cannot recover that from the status code alone.
+type ClaimSlipOutput struct {
+	Body struct {
+		Claimed bool   `json:"claimed" doc:"true when this call recorded the claim; false when a claim was already held and nothing was written — the slip is claimed either way"`
+		Prior   string `json:"prior,omitempty" doc:"the status the claim was taken out of: the current status when this call claimed, the recorded one when a claim was already held"`
 	}
 }
 
@@ -335,13 +345,16 @@ func RegisterWriteRoutes(api huma.API, h *SlipWriteHandler) {
 			"claimed slip is refused by that repave, so such a push deduplicates onto it instead. A " +
 			"non-2xx response means the claim is not confirmed and the caller must dispatch nothing; it " +
 			"does not mean the slip is unclaimed, because the write is not cancelled by a client " +
-			"timeout. Claiming again is the recovery: a repeat claim on a slip whose claim is still " +
-			"held is a no-op, never a conflict, and if_status is then checked against the status the " +
-			"claim was RECORDED out of rather than the current one, so a retry after a lost response " +
-			"passes even once the run has moved the slip on. A claim ends when the run releases it, or " +
+			"timeout. if_status is a COMPARE-AND-SET ON THE SLIP'S CURRENT STATUS, whether or not a " +
+			"claim is already held; a mismatch is 409 with nothing written. Claiming again is the " +
+			"recovery, and a repeat claim whose if_status still matches the current status is a no-op " +
+			"rather than a conflict: it answers 200 with claimed=false, meaning a claim was already " +
+			"held and this call wrote nothing. So a retry after a lost response claims when nothing was " +
+			"dispatched — the status has not moved — and is refused once a step has reported, because " +
+			"the dispatch being retried already happened. A claim ends when the run releases it, or " +
 			"when a terminal status write ends it.",
 		Security:      writeApiKeySecurity,
-		DefaultStatus: http.StatusNoContent,
+		DefaultStatus: http.StatusOK,
 		Tags:          []string{"v1"},
 	}, h.claimSlip)
 
@@ -705,7 +718,7 @@ func (h *SlipWriteHandler) abandonSlip(ctx context.Context, input *AbandonSlipIn
 	return &struct{}{}, nil
 }
 
-func (h *SlipWriteHandler) claimSlip(ctx context.Context, input *ClaimSlipInput) (*struct{}, error) {
+func (h *SlipWriteHandler) claimSlip(ctx context.Context, input *ClaimSlipInput) (*ClaimSlipOutput, error) {
 	if err := validateCorrelationIDFormat(input.CorrelationID); err != nil {
 		return nil, err
 	}
@@ -725,13 +738,14 @@ func (h *SlipWriteHandler) claimSlip(ctx context.Context, input *ClaimSlipInput)
 	for _, s := range input.Body.IfStatus {
 		ifStatus = append(ifStatus, slippy.SlipStatus(s))
 	}
-	if err := h.writer.ClaimSlip(
+	out, err := h.writer.ClaimSlip(
 		ctx,
 		input.CorrelationID,
 		ifStatus,
 		input.Body.ClaimedBy,
 		input.Body.Reason,
-	); err != nil {
+	)
+	if err != nil {
 		recordHandlerError(span, err)
 		// Logged at Error, not Warn, even for the expected not-found: the caller is
 		// about to abandon a dispatch it was asked to perform, and the operator who
@@ -741,11 +755,28 @@ func (h *SlipWriteHandler) claimSlip(ctx context.Context, input *ClaimSlipInput)
 			"claimed_by", input.Body.ClaimedBy, "error", err)
 		return nil, mapWriteError(err)
 	}
+	// `prior` keeps omitempty for the same reason ReleaseClaimOutput.Status does: dropping it
+	// would mark the field required in the generated spec and regenerate the published
+	// client's field as `string` rather than `*string`, a source break bought for nothing.
+	resp := &ClaimSlipOutput{}
+	resp.Body.Claimed = out.Claimed
+	resp.Body.Prior = string(out.Prior)
+	if !out.Claimed {
+		// A claim was already held and the store wrote nothing, so there is no cached read to
+		// drop — the same reasoning as the release's held arm. The slip IS claimed on return;
+		// this is information for a caller that must not dispatch twice, not a failure.
+		span.SetStatus(codes.Ok, "")
+		slog.InfoContext(ctx, "slip: already claimed, nothing written",
+			"correlation_id", input.CorrelationID, "claimed_by", input.Body.ClaimedBy,
+			"prior", resp.Body.Prior)
+		return resp, nil
+	}
 	h.invalidate(ctx, input.CorrelationID)
 	span.SetStatus(codes.Ok, "")
 	slog.InfoContext(ctx, "slip: claimed",
-		"correlation_id", input.CorrelationID, "claimed_by", input.Body.ClaimedBy)
-	return &struct{}{}, nil
+		"correlation_id", input.CorrelationID, "claimed_by", input.Body.ClaimedBy,
+		"prior", resp.Body.Prior)
+	return resp, nil
 }
 
 func (h *SlipWriteHandler) releaseClaim(

@@ -188,7 +188,7 @@ type ClaimSlipInputBody struct {
 	// ClaimedBy Adopter that is taking over this slip (e.g. "rerunner"); recorded as the history entry's actor
 	ClaimedBy string `json:"claimed_by"`
 
-	// IfStatus Claim only if the slip's current status is one of these; omit to claim out of any status except an unclaimed in_progress, which is a live run — name in_progress here to claim one deliberately
+	// IfStatus Claim only if the slip's CURRENT status is one of these, whether or not a claim is already held; omit to claim out of any status except a live run (in_progress, compensating) — name the status here to adopt one deliberately
 	IfStatus *[]ClaimSlipInputBodyIfStatus `json:"if_status,omitempty"`
 
 	// Reason Optional scope of the adopted work (e.g. "retrigger builds and unit tests")
@@ -197,6 +197,18 @@ type ClaimSlipInputBody struct {
 
 // ClaimSlipInputBodyIfStatus defines model for ClaimSlipInputBody.IfStatus.
 type ClaimSlipInputBodyIfStatus string
+
+// ClaimSlipOutputBody defines model for ClaimSlipOutputBody.
+type ClaimSlipOutputBody struct {
+	// Schema A URL to the JSON Schema for this object.
+	Schema *string `json:"$schema,omitempty"`
+
+	// Claimed true when this call recorded the claim; false when a claim was already held and nothing was written — the slip is claimed either way
+	Claimed bool `json:"claimed"`
+
+	// Prior the status the claim was taken out of: the current status when this call claimed, the recorded one when a claim was already held
+	Prior *string `json:"prior,omitempty"`
+}
 
 // ComponentDefinitionInput defines model for ComponentDefinitionInput.
 type ComponentDefinitionInput struct {
@@ -3043,6 +3055,7 @@ func (r AbandonSlipResponse) StatusCode() int {
 type ClaimSlipResponse struct {
 	Body                          []byte
 	HTTPResponse                  *http.Response
+	JSON200                       *ClaimSlipOutputBody
 	ApplicationproblemJSONDefault *ErrorModel
 }
 
@@ -3960,6 +3973,13 @@ func ParseClaimSlipResponse(rsp *http.Response) (*ClaimSlipResponse, error) {
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ClaimSlipOutputBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest ErrorModel
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {

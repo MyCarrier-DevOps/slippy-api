@@ -31,7 +31,7 @@ type mockWriter struct {
 	setComponentImageTagFn func(ctx context.Context, correlationID, componentName, imageTag string) error
 	promoteSlipFn          func(ctx context.Context, correlationID, promotedTo string) error
 	abandonSlipFn          func(ctx context.Context, correlationID, supersededBy string) error
-	claimSlipFn            func(ctx context.Context, correlationID string, ifStatus []slippy.SlipStatus, claimedBy, reason string) error
+	claimSlipFn            func(ctx context.Context, correlationID string, ifStatus []slippy.SlipStatus, claimedBy, reason string) (domain.ClaimOutcome, error)
 	releaseClaimFn         func(ctx context.Context, correlationID, releasedBy, reason string) (domain.ReleaseOutcome, error)
 }
 
@@ -71,11 +71,11 @@ func (m *mockWriter) ClaimSlip(
 	cID string,
 	ifStatus []slippy.SlipStatus,
 	claimedBy, reason string,
-) error {
+) (domain.ClaimOutcome, error) {
 	if m.claimSlipFn != nil {
 		return m.claimSlipFn(ctx, cID, ifStatus, claimedBy, reason)
 	}
-	return nil
+	return domain.ClaimOutcome{Claimed: true, Prior: slippy.SlipStatusFailed}, nil
 }
 
 func (m *mockWriter) ReleaseClaim(
@@ -754,9 +754,9 @@ func TestAbandonSlip_InternalError(t *testing.T) {
 func TestClaimSlip_Success(t *testing.T) {
 	var gotCID, gotClaimedBy, gotReason string
 	w := &mockWriter{
-		claimSlipFn: func(_ context.Context, cID string, _ []slippy.SlipStatus, claimedBy, reason string) error {
+		claimSlipFn: func(_ context.Context, cID string, _ []slippy.SlipStatus, claimedBy, reason string) (domain.ClaimOutcome, error) {
 			gotCID, gotClaimedBy, gotReason = cID, claimedBy, reason
-			return nil
+			return domain.ClaimOutcome{Claimed: true, Prior: slippy.SlipStatusFailed}, nil
 		},
 	}
 	handler := setupWriteTestAPI(w)
@@ -767,19 +767,53 @@ func TestClaimSlip_Success(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	// Inverted deliberately (PR #87 sixth review): the claim used to answer 204. It reports
+	// the outcome now, because a caller that must not dispatch twice cannot tell "I took the
+	// claim" from "someone already held it" out of a status code.
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, true, resp["claimed"])
+	assert.Equal(t, "failed", resp["prior"])
 	assert.Equal(t, "abc-123", gotCID)
 	assert.Equal(t, "rerunner", gotClaimedBy)
 	assert.Equal(t, "retrigger builds and unit tests", gotReason)
+}
+
+// The idempotent repeat: a claim was already held, the store wrote nothing, and that is a
+// SUCCESS with claimed=false — not a 409, and not something a caller may read as "unclaimed".
+// Every pre-job of a run after the first takes this arm.
+func TestClaimSlip_AlreadyClaimedIsASuccessWithClaimedFalse(t *testing.T) {
+	w := &mockWriter{
+		claimSlipFn: func(_ context.Context, _ string, _ []slippy.SlipStatus, _, _ string) (domain.ClaimOutcome, error) {
+			return domain.ClaimOutcome{Claimed: false, Prior: slippy.SlipStatusFailed}, nil
+		},
+	}
+	inv := &countingInvalidator{}
+	handler := setupWriteTestAPIWithInvalidator(w, inv)
+
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/claim",
+		strings.NewReader(`{"claimed_by":"slippy-cli/prejob"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, false, resp["claimed"], "a claim was already held; this call wrote nothing")
+	assert.Equal(t, "failed", resp["prior"],
+		"prior is the RECORDED claimed_from on a repeat, not the current status")
+	assert.Empty(t, inv.calls, "nothing was written, so there is no cached read to drop")
 }
 
 func TestClaimSlip_ReasonIsOptional(t *testing.T) {
 	called := false
 	var gotReason string
 	w := &mockWriter{
-		claimSlipFn: func(_ context.Context, _ string, _ []slippy.SlipStatus, _, reason string) error {
+		claimSlipFn: func(_ context.Context, _ string, _ []slippy.SlipStatus, _, reason string) (domain.ClaimOutcome, error) {
 			called, gotReason = true, reason
-			return nil
+			return domain.ClaimOutcome{Claimed: true, Prior: slippy.SlipStatusCompleted}, nil
 		},
 	}
 	handler := setupWriteTestAPI(w)
@@ -790,7 +824,7 @@ func TestClaimSlip_ReasonIsOptional(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.True(t, called, "claim must reach the writer without a reason")
 	assert.Empty(t, gotReason)
 }
@@ -810,7 +844,9 @@ func TestClaimSlip_WriterFailuresAreNotSwallowed(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			w := &mockWriter{
-				claimSlipFn: func(_ context.Context, _ string, _ []slippy.SlipStatus, _, _ string) error { return tc.err },
+				claimSlipFn: func(_ context.Context, _ string, _ []slippy.SlipStatus, _, _ string) (domain.ClaimOutcome, error) {
+					return domain.ClaimOutcome{}, tc.err
+				},
 			}
 			handler := setupWriteTestAPI(w)
 
@@ -861,9 +897,9 @@ func TestClaimSlip_RejectsBadInput(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			w := &mockWriter{
-				claimSlipFn: func(_ context.Context, _ string, _ []slippy.SlipStatus, _, _ string) error {
+				claimSlipFn: func(_ context.Context, _ string, _ []slippy.SlipStatus, _, _ string) (domain.ClaimOutcome, error) {
 					t.Fatal("writer must not be called for a rejected request")
-					return nil
+					return domain.ClaimOutcome{}, nil
 				},
 			}
 			handler := setupWriteTestAPI(w)
@@ -912,8 +948,10 @@ func TestWriteNotFound_MessageIsActionable(t *testing.T) {
 			"claim",
 			"/slips/abc-123/claim",
 			`{"claimed_by":"rerunner"}`,
-			&mockWriter{claimSlipFn: func(_ context.Context, _ string, _ []slippy.SlipStatus, _, _ string) error {
-				return slippy.ErrSlipNotFound
+			&mockWriter{claimSlipFn: func(
+				_ context.Context, _ string, _ []slippy.SlipStatus, _, _ string,
+			) (domain.ClaimOutcome, error) {
+				return domain.ClaimOutcome{}, slippy.ErrSlipNotFound
 			}},
 		},
 	}

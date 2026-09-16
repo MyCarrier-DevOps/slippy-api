@@ -7,7 +7,7 @@ require (
 	github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse v1.3.102
 	github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.102
 	github.com/MyCarrier-DevOps/goLibMyCarrier/postgres v1.3.102
-	github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.103-feat-devops-367-claim-wedge.20.0.20260916171304-df6c0132a31e
+	github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.4.0-feat-devops-367-claim-wedge.22.0.20260916195000-274f0e1d18d9
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/danielgtaylor/huma/v2 v2.39.1
 	github.com/google/uuid v1.6.0

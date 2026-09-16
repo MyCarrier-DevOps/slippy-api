@@ -169,7 +169,10 @@ type SlipWriter interface {
 	// closes that window: a claimed slip is not repaveable, so the push dedups
 	// onto the adopter's slip instead (DEVOPS-285).
 	//
-	// A nil result means the claim is committed. An error means the claim is NOT
+	// A nil error means the claim is committed, and ClaimOutcome says which arm did it:
+	// Claimed=true when THIS call recorded it, Claimed=false when one was already held and
+	// nothing was written. Both mean the slip is claimed on return; only a caller that must
+	// not duplicate work reads Claimed. An error means the claim is NOT
 	// CONFIRMED — it does NOT mean the slip is unclaimed: the claim commits as one
 	// store transaction on a cancellation-detached context (instrumentedWrite/
 	// writeContext), so a caller that times out can see an error against a slip that
@@ -199,11 +202,16 @@ type SlipWriter interface {
 	// claimedBy names the adopter (it becomes the history entry's actor); reason
 	// is optional free text describing the scope of the adopted work.
 	// ifStatus bounds which statuses may be claimed out of, enforced by the store in the same
-	// transaction as the write. nil means any status EXCEPT an unclaimed in_progress, which is
-	// a live run nothing has adopted — a caller that means to claim one names in_progress. On
-	// a repeat claim ifStatus is checked against the status the claim was RECORDED out of, not
-	// the current one, so a retry after a lost response is idempotent (DEVOPS-367).
-	ClaimSlip(ctx context.Context, correlationID string, ifStatus []slippy.SlipStatus, claimedBy, reason string) error
+	// transaction as the write. It is a compare-and-set on the slip's CURRENT status, whether
+	// or not a claim is already held — the idempotent repeat sits behind that check, not in
+	// front of it. nil means any status EXCEPT a live one (in_progress or compensating), which
+	// is a run in flight; a caller that means to adopt one names it in ifStatus. A retry after
+	// a lost response therefore still claims when nothing was dispatched — the status has not
+	// moved — and is refused once a step has reported, because the dispatch it is retrying
+	// already happened (DEVOPS-367).
+	ClaimSlip(
+		ctx context.Context, correlationID string, ifStatus []slippy.SlipStatus, claimedBy, reason string,
+	) (ClaimOutcome, error)
 
 	// ReleaseClaim ends a claim once nothing of the run is in flight. While any step or
 	// component is running or held the store KEEPS the claim and writes nothing, reporting
@@ -211,6 +219,16 @@ type SlipWriter interface {
 	// so all but that last one take this arm. Never writes status. slippy.ErrNotClaimed when
 	// there is no claim (DEVOPS-367).
 	ReleaseClaim(ctx context.Context, correlationID, releasedBy, reason string) (ReleaseOutcome, error)
+}
+
+// ClaimOutcome is what a claim did. Claimed=true means THIS call recorded the claim;
+// Claimed=false means one was already held and nothing was written — the idempotent repeat,
+// which is the normal outcome for every pre-job of a run after the first. Prior is the status
+// the claim was taken out of: the current status on a fresh claim, the recorded claimed_from
+// on a repeat.
+type ClaimOutcome struct {
+	Claimed bool
+	Prior   slippy.SlipStatus
 }
 
 // ReleaseOutcome is what a release did. Released=false with a nil error means the claim is

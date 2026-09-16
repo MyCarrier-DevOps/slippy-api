@@ -211,8 +211,8 @@ func (s *asyncInsertSlipStore) ClaimSlip(
 	id string,
 	_ []slippy.SlipStatus,
 	_, _ string,
-) (slippy.SlipStatus, error) {
-	return "", fmt.Errorf("ClaimSlip(%s): %w", id, slippy.ErrClaimUnsupported)
+) (slippy.ClaimOutcome, error) {
+	return slippy.ClaimOutcome{}, fmt.Errorf("ClaimSlip(%s): %w", id, slippy.ErrClaimUnsupported)
 }
 
 func (s *asyncInsertSlipStore) ReleaseClaim(

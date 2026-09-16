@@ -389,27 +389,37 @@ func ClaimMarkerStepCollision(cfg *slippy.PipelineConfig) string {
 // performs the whole claim as ONE store transaction — lock, expected-status precondition,
 // adoption marker, claimed_from=<current status> — and never writes the slip's status, so
 // the marker-then-status ordering this adapter used to reason about no longer exists here.
-// A repeat claim on a held claim is an idempotent no-op in the store that still checks
-// ifStatus against the current status; a status outside ifStatus (or a slip with no status
-// at all) is ErrClaimPreconditionFailed with nothing written, which mapWriteError turns
-// into a 409.
+// ifStatus is a compare-and-set on the CURRENT status whether or not a claim is held; a
+// status outside it (or a slip with no status at all, or a live run ifStatus did not name)
+// is ErrClaimPreconditionFailed with nothing written, which mapWriteError turns into a 409.
+// Once that check agrees, an existing claim is an idempotent no-op: ClaimOutcome{Claimed:
+// false} carrying the RECORDED prior, which this adapter reports rather than hiding, so the
+// handler can tell a caller whether its own call took the claim.
 func (a *SlipWriterAdapter) ClaimSlip(
 	ctx context.Context, correlationID string, ifStatus []slippy.SlipStatus, claimedBy, reason string,
-) error {
+) (domain.ClaimOutcome, error) {
 	attrs := []attribute.KeyValue{
 		attribute.String("slip.correlation_id", correlationID),
 		attribute.String("slip.claimed_by", claimedBy),
 	}
-	return a.instrumentedWrite(ctx, "writer.ClaimSlip", attrs,
+	var out domain.ClaimOutcome
+	err := a.instrumentedWrite(ctx, "writer.ClaimSlip", attrs,
 		func(wctx context.Context, span trace.Span) error {
-			prior, err := a.client.ClaimSlip(wctx, correlationID, ifStatus, claimedBy, reason)
+			res, err := a.client.ClaimSlip(wctx, correlationID, ifStatus, claimedBy, reason)
 			if err != nil {
 				return err
 			}
-			span.SetAttributes(attribute.String("slip.prior_status", string(prior)))
+			out = domain.ClaimOutcome{Claimed: res.Claimed, Prior: res.Prior}
+			outcome := "already_claimed"
+			if res.Claimed {
+				outcome = "claimed"
+			}
+			span.SetAttributes(attribute.String("slip.claim_outcome", outcome),
+				attribute.String("slip.prior_status", string(res.Prior)))
 			return nil
 		},
 	)
+	return out, err
 }
 
 // ReleaseClaim ends a claim once nothing is in flight. Work in flight is an OUTCOME, not an

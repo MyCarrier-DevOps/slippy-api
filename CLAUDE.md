@@ -217,17 +217,32 @@ a claimed row is refused by `Repave`, so the push dedups onto the adopter's slip
   claimed `failed` slip is still `failed`; the claim is a separate flag, not a status. There
   is no owner recorded, so the flag grants no exclusivity. Do not reintroduce a `Load` before
   the claim in the adapter, and do not expect a claim to move a slip to `in_progress`.
-- **`if_status` is the compare-and-set.** The body may carry the statuses the caller agrees
-  to claim out of; on a FRESH claim the store enforces it in the same transaction against the
-  slip's *current* status. Omit it to claim out of any status EXCEPT an unclaimed
-  `in_progress` — that is a live run nothing has adopted, and adopting one silently lets a
-  rerun dispatch on top of a pipeline already in flight; a caller that means to claim one
-  names `in_progress` in `if_status`. A mismatch is 409 (`ErrClaimPreconditionFailed`) with
-  nothing written: the caller decided on a stale read and must re-read, not retry. A slip with
-  an empty status is refused outright. A repeat claim on a held claim is an idempotent no-op,
-  and `if_status` is then checked against the status the claim was **recorded** out of rather
-  than the current one — so a retry after a lost response passes even once the run has moved
-  the slip on, while a different claimant that never agreed to that prior is still refused.
+- **`if_status` is a compare-and-set on the slip's CURRENT status, whether or not a claim is
+  already held.** The body may carry the statuses the caller agrees to claim out of, and the
+  store enforces them in the same transaction as the write — against the status the row reads
+  NOW, claimed or not. Omit it to claim out of any status EXCEPT a live run (`in_progress`,
+  `compensating`; `pending` is claimable by design, nothing has been dispatched onto it):
+  adopting a live run silently is how a rerun dispatches on top of a pipeline already in
+  flight, and a recorded claim is no exemption from that refusal. A caller that means to adopt
+  a live run names the status in `if_status` — the CLI pre-job names every non-terminal
+  status. A mismatch is 409 (`ErrClaimPreconditionFailed`) with nothing written: the caller
+  decided on a stale read and must re-read, not retry. A slip with an empty status is refused
+  outright.
+  The idempotent repeat sits BEHIND that check, not in front of it: once `if_status` agrees to
+  the current status, an existing claim is a no-op rather than a conflict. So the rerunner's
+  retry after a lost response claims when nothing was dispatched — the status has not moved —
+  and is REFUSED once a step has reported, because the dispatch it is retrying already
+  happened. (An earlier round compared `if_status` against the recorded prior instead, which
+  let a second rerun request dispatch onto a live run; PR #87 round 6 reverted that.)
+- **`POST /v1/slips/{correlationID}/claim` answers 200 `{claimed, prior}`**, symmetric with
+  the release. `claimed: true` means THIS call recorded the claim; `claimed: false` means one
+  was already held and the call wrote nothing — a success, not a conflict, and the normal
+  outcome for every pre-job of a run after the first. `prior` is the status the claim was
+  taken out of: the current status on a fresh claim, the recorded `claimed_from` on a repeat.
+  The slip is claimed on return either way, so a caller that only needs the row protected can
+  ignore the body; a caller that must not duplicate work keys on `claimed`.
+  This **replaced a 204**, so a client must accept both while the rollout is in flight (the
+  Slippy CLI and pushhookparser do).
 - **`POST /v1/slips/{correlationID}/release` answers 200 `{released, status}`.** It clears
   `claimed_from` and appends a `slip_released` marker, never touching the status; `status` is
   the slip's status at decision time and is reported on **both** arms, because the store reads
