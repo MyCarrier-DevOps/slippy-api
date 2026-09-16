@@ -263,9 +263,13 @@ a claimed row is refused by `Repave`, so the push dedups onto the adopter's slip
   `slippy.SlipStore` (and `slippy.Client`) as of DEVOPS-367, so it is reachable through the
   abstraction rather than only on the concrete Postgres store, and it now checks the WHOLE
   select column list — every configured step's column as well as `claimed_from` — so a
-  pipeline-config step deployed ahead of its migration is caught by the same gate. The **slippy-migrator Job must run first** — it owns the schema via its
-  PreSync hook, and this probe is what makes that ordering enforced rather than assumed. A
-  crash-looping API right after a goLib bump is this check, not a broken image: apply v6.
+  pipeline-config step deployed ahead of its migration is caught by the same gate. The
+  nil-UUID `Load` that follows it in `run()` is a redundant second check kept as defence in
+  depth — it exercises the real read path (the generated SELECT and its scan destinations)
+  rather than the catalogue — not a gap-filler for a column class `ProbeSchema` misses. The
+  **slippy-migrator Job must run first** — it owns the schema via its PreSync hook, and this
+  probe is what makes that ordering enforced rather than assumed. A crash-looping API right
+  after a goLib bump is this check, not a broken image: apply v6.
 - **Marker step names are the library's.** `claimMarkerStep` and `releaseMarkerStep` alias
   `slippy.ClaimMarkerStep` / `slippy.ReleaseMarkerStep`; `ClaimMarkerStepCollision` checks
   both against the live pipeline config at boot. Do not rename them here.

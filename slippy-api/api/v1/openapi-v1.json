@@ -1003,8 +1003,7 @@
           }
         },
         "required": [
-          "released",
-          "status"
+          "released"
         ],
         "type": "object"
       },

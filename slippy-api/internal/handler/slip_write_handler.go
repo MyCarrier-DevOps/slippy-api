@@ -225,7 +225,7 @@ type ReleaseClaimInput struct {
 type ReleaseClaimOutput struct {
 	Body struct {
 		Released bool   `json:"released" doc:"true when the claim was cleared; false when the run still has a step or component in flight and the claim is kept — release again when that work reports, or let the terminal write end it"`
-		Status   string `json:"status" doc:"the slip's status at decision time; a release never changes it"`
+		Status   string `json:"status,omitempty" doc:"the slip's status at decision time; a release never changes it"`
 	}
 }
 
@@ -783,6 +783,12 @@ func (h *SlipWriteHandler) releaseClaim(
 	// Status is set on BOTH arms: a release never changes the status, and the store reads it
 	// under the same lock it decides on, so it is known whether or not the claim was cleared.
 	// A caller polling a held claim gets the slip's status without a second request.
+	//
+	// The field keeps `omitempty` even though it is now always populated. Dropping it would
+	// mark `status` required in the generated spec, which regenerates the published client's
+	// field as `string` instead of `*string` — a source break for any consumer that bumps
+	// slippy-client and dereferences the pointer, bought for nothing, since the value is
+	// never empty on either arm.
 	resp := &ReleaseClaimOutput{}
 	resp.Body.Released = out.Released
 	resp.Body.Status = string(out.Status)

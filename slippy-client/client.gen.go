@@ -458,7 +458,7 @@ type ReleaseClaimOutputBody struct {
 	Released bool `json:"released"`
 
 	// Status the slip's status at decision time; a release never changes it
-	Status string `json:"status"`
+	Status *string `json:"status,omitempty"`
 }
 
 // SetImageTagInputBody defines model for SetImageTagInputBody.
