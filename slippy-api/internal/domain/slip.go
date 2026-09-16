@@ -179,12 +179,20 @@ type SlipWriter interface {
 	// is already claimed. A caller that gets an error must still dispatch nothing;
 	// the recovery is to claim again.
 	//
-	// A repeat claim on a slip whose claim is still held is therefore deliberately a
-	// NO-OP, never a 409: re-claiming is the recovery, and a deterministic rejection
-	// would burn a consumer's whole retry budget and DLQ the message. Do not add an
-	// already-claimed rejection. The claim records no owner, so a second adopter's
-	// claim is the same no-op — this grants no exclusivity, and this interface
-	// deliberately does not promise any.
+	// A repeat claim on a slip whose claim is still held is a NO-OP — ClaimOutcome{Claimed:
+	// false}, nothing written — FOR AS LONG AS ifStatus still names the slip's CURRENT status.
+	// That qualifier is the whole of DEVOPS-367's fix and is not a technicality: once the
+	// status has moved off what the caller named, the repeat is a 409 with nothing written,
+	// exactly as a first claim would be. The rerunner's retry is the case it is tuned for —
+	// it succeeds while nothing has been dispatched, and is refused once a step has reported,
+	// because the dispatch it is retrying already happened.
+	//
+	// Inside that window re-claiming is the recovery, and the no-op is what makes it safe: a
+	// deterministic rejection of every repeat would burn a consumer's whole retry budget and
+	// DLQ the message. Do not add an ALREADY-CLAIMED rejection — the 409 here is a status
+	// mismatch, never "someone else holds it". The claim records no owner, so a second
+	// adopter's claim takes the same no-op arm; this grants no exclusivity, and this
+	// interface deliberately does not promise any.
 	//
 	// If an adopter cannot dispatch after a committed claim, end the claim with
 	// ReleaseClaim. Do NOT "release" it with AbandonSlip: abandoned loses the `failed`
@@ -196,8 +204,13 @@ type SlipWriter interface {
 	//
 	// Because the claim never writes status, a `failed` slip stays `failed` while it is
 	// claimed, so consumer-side stranded-slip cleanup that keys on `failed`
-	// (pushhookparser's AbandonStrandedSlip carve-out) still matches it. Those paths
-	// must learn to recognise a claimed slip and leave it alone for the life of the run.
+	// (pushhookparser's AbandonStrandedSlip carve-out) still matches it. Those paths must
+	// recognise a claimed slip — but the exemption they owe it lasts only while the run has
+	// WORK IN FLIGHT, not for the life of the claim. pushhookparser's cleanup was narrowed to
+	// exactly that (DEVOPS-367): a claimed slip with a step or component running or held is
+	// left alone; a claimed slip with nothing in flight is reaped like an unclaimed one,
+	// because a claim taken by a pre-job whose workflow was never dispatched has nothing that
+	// will ever release it.
 	//
 	// claimedBy names the adopter (it becomes the history entry's actor); reason
 	// is optional free text describing the scope of the adopted work.
