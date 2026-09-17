@@ -17,7 +17,7 @@ require (
 	github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse v1.3.102 // indirect
 	github.com/MyCarrier-DevOps/goLibMyCarrier/clickhousemigrator v1.3.102 // indirect
 	github.com/MyCarrier-DevOps/goLibMyCarrier/github v1.3.102 // indirect
-	github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.102 // indirect
+	github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.103 // indirect
 	github.com/MyCarrier-DevOps/goLibMyCarrier/postgresmigrator v1.3.102 // indirect
 	github.com/ProtonMail/go-crypto v1.4.1 // indirect
 	github.com/andybalholm/brotli v1.2.2 // indirect

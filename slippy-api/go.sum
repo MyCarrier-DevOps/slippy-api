@@ -15,8 +15,8 @@ github.com/MyCarrier-DevOps/goLibMyCarrier/clickhousemigrator v1.3.102 h1:rQLe1b
 github.com/MyCarrier-DevOps/goLibMyCarrier/clickhousemigrator v1.3.102/go.mod h1:jVZVmpysasUjeKP2+BT3jBOq60wq2QivOQrmEcVwBj4=
 github.com/MyCarrier-DevOps/goLibMyCarrier/github v1.3.102 h1:jppi9cRbKNav5fTn4zrjiaBgN2X15ZiTn6cS298MRPE=
 github.com/MyCarrier-DevOps/goLibMyCarrier/github v1.3.102/go.mod h1:L3Mhm6DmAxCQpWQm7PNsuR8aCzHYhu7XsNAvTakpl1Q=
-github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.102 h1:zuhP9WVafCehne9/z6/32+Vu9LeIyjJlveGPGtTeUf0=
-github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.102/go.mod h1:d9T8TrZAOh50XLRL+zr8eVenSxW8eXY9afa2j9uStmg=
+github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.103 h1:eLZUtB5Y80+XODdNlmVWViF66qhzKUUmQmrBbnT1A/4=
+github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.103/go.mod h1:d9T8TrZAOh50XLRL+zr8eVenSxW8eXY9afa2j9uStmg=
 github.com/MyCarrier-DevOps/goLibMyCarrier/postgres v1.3.102 h1:sVf6nZXoANHoYx+X5vuloqGvKZWjFzHwyY8zV9YBwSk=
 github.com/MyCarrier-DevOps/goLibMyCarrier/postgres v1.3.102/go.mod h1:NEoXXrHkTh5WPAxgwj4mElhf95Yye4Ml5w4vDIvOdBI=
 github.com/MyCarrier-DevOps/goLibMyCarrier/postgresmigrator v1.3.102 h1:p2smnw1p3hZFEvJvPEvnYhksg5Ov2bOTaqgaZ+Oj6YY=
