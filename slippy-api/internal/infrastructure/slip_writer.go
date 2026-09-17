@@ -390,11 +390,15 @@ func ClaimMarkerStepCollision(cfg *slippy.PipelineConfig) string {
 // adoption marker, claimed_from=<current status> — and never writes the slip's status, so
 // the marker-then-status ordering this adapter used to reason about no longer exists here.
 // ifStatus is a compare-and-set on the CURRENT status whether or not a claim is held; a
-// status outside it (or a slip with no status at all, or a live run ifStatus did not name)
-// is ErrClaimPreconditionFailed with nothing written, which mapWriteError turns into a 409.
-// Once that check agrees, an existing claim is an idempotent no-op: ClaimOutcome{Claimed:
-// false} carrying the RECORDED prior, which this adapter reports rather than hiding, so the
-// handler can tell a caller whether its own call took the claim.
+// status outside it (or a slip with no status at all, or a run IN FLIGHT whose status ifStatus
+// did not name) is ErrClaimPreconditionFailed with nothing written, which mapWriteError turns
+// into a 409. Once that check agrees, an existing claim is an idempotent no-op:
+// ClaimOutcome{Claimed: false} carrying the RECORDED prior, which this adapter reports rather
+// than hiding, so the handler can tell a caller whether its own call took the claim.
+//
+// InFlight rides along on both arms: the library reads it from the same locked row it decides
+// on, so it cannot disagree with the decision, and it is what a caller that must not dispatch
+// twice actually branches on (domain.ClaimOutcome says why Claimed cannot).
 func (a *SlipWriterAdapter) ClaimSlip(
 	ctx context.Context, correlationID string, ifStatus []slippy.SlipStatus, claimedBy, reason string,
 ) (domain.ClaimOutcome, error) {
@@ -409,13 +413,14 @@ func (a *SlipWriterAdapter) ClaimSlip(
 			if err != nil {
 				return err
 			}
-			out = domain.ClaimOutcome{Claimed: res.Claimed, Prior: res.Prior}
+			out = domain.ClaimOutcome{Claimed: res.Claimed, Prior: res.Prior, InFlight: res.InFlight}
 			outcome := "already_claimed"
 			if res.Claimed {
 				outcome = "claimed"
 			}
 			span.SetAttributes(attribute.String("slip.claim_outcome", outcome),
-				attribute.String("slip.prior_status", string(res.Prior)))
+				attribute.String("slip.prior_status", string(res.Prior)),
+				attribute.Bool("slip.in_flight", res.InFlight))
 			return nil
 		},
 	)

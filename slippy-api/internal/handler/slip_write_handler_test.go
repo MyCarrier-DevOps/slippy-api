@@ -775,6 +775,7 @@ func TestClaimSlip_Success(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, true, resp["claimed"])
 	assert.Equal(t, "failed", resp["prior"])
+	assert.Equal(t, false, resp["in_flight"], "nothing was running: this caller is the one that dispatches")
 	assert.Equal(t, "abc-123", gotCID)
 	assert.Equal(t, "rerunner", gotClaimedBy)
 	assert.Equal(t, "retrigger builds and unit tests", gotReason)
@@ -804,7 +805,61 @@ func TestClaimSlip_AlreadyClaimedIsASuccessWithClaimedFalse(t *testing.T) {
 	assert.Equal(t, false, resp["claimed"], "a claim was already held; this call wrote nothing")
 	assert.Equal(t, "failed", resp["prior"],
 		"prior is the RECORDED claimed_from on a repeat, not the current status")
+	assert.Equal(t, false, resp["in_flight"],
+		"the held claim has no running work behind it, which is the window where dispatching is the recovery")
 	assert.Empty(t, inv.calls, "nothing was written, so there is no cached read to drop")
+}
+
+// The same repeat arm, with the run actually executing. This is the pair that claimed=false
+// alone cannot distinguish: a pre-job's step write does not move the slip's status, so a
+// second adopter arriving after the first one's dispatch sends the same if_status, passes the
+// same compare-and-set, and gets the same claimed=false as a retry whose response was lost
+// before anything ran. in_flight is the field that separates them, so it has to reach the
+// response body on this arm above all (DEVOPS-367, PR #87 seventh review).
+func TestClaimSlip_AlreadyClaimedReportsWhetherTheRunIsInFlight(t *testing.T) {
+	w := &mockWriter{
+		claimSlipFn: func(_ context.Context, _ string, _ []slippy.SlipStatus, _, _ string) (domain.ClaimOutcome, error) {
+			return domain.ClaimOutcome{Claimed: false, Prior: slippy.SlipStatusFailed, InFlight: true}, nil
+		},
+	}
+	inv := &countingInvalidator{}
+	handler := setupWriteTestAPIWithInvalidator(w, inv)
+
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/claim",
+		strings.NewReader(`{"claimed_by":"pushhookparser/rerunner","if_status":["failed"]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code, "a run in flight is information, not a conflict")
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, false, resp["claimed"])
+	assert.Equal(t, true, resp["in_flight"], "another run is executing: the caller must not dispatch")
+	assert.Empty(t, inv.calls, "still nothing written")
+}
+
+// A fresh claim can be in flight too — when the caller NAMED the status of a running run, which
+// is what the Slippy CLI pre-job does for every non-terminal status. The field is on both arms.
+func TestClaimSlip_FreshClaimAlsoReportsInFlight(t *testing.T) {
+	w := &mockWriter{
+		claimSlipFn: func(_ context.Context, _ string, _ []slippy.SlipStatus, _, _ string) (domain.ClaimOutcome, error) {
+			return domain.ClaimOutcome{Claimed: true, Prior: slippy.SlipStatusInProgress, InFlight: true}, nil
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/claim",
+		strings.NewReader(`{"claimed_by":"slippy-cli/prejob","if_status":["in_progress"]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, true, resp["claimed"])
+	assert.Equal(t, true, resp["in_flight"], "the adopter is told it took over a run that is executing")
 }
 
 func TestClaimSlip_ReasonIsOptional(t *testing.T) {

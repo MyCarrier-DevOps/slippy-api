@@ -4,7 +4,7 @@ go 1.26.6
 
 require (
 	github.com/MyCarrier-DevOps/goLibMyCarrier/postgres v1.3.102
-	github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.4.0-feat-devops-367-claim-wedge.22.0.20260916195000-274f0e1d18d9
+	github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.4.0-feat-devops-367-claim-wedge.24.0.20260917152520-2824deb6f7bb
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/stretchr/testify v1.11.1
 )

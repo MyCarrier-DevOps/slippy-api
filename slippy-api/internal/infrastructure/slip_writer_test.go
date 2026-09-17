@@ -748,7 +748,7 @@ func TestSlipWriterAdapter_ClaimSlip_ForwardsToTheAtomicStoreCall(t *testing.T) 
 	store := &mockSlipStore{
 		claimSlipFn: func(_ context.Context, id string, expected []slippy.SlipStatus, by, reason string) (slippy.ClaimOutcome, error) {
 			got.id, got.expected, got.by, got.reason, got.calls = id, expected, by, reason, got.calls+1
-			return slippy.ClaimOutcome{Claimed: true, Prior: slippy.SlipStatusFailed}, nil
+			return slippy.ClaimOutcome{Claimed: true, Prior: slippy.SlipStatusFailed, InFlight: true}, nil
 		},
 	}
 	adapter := newTestWriterAdapter(store)
@@ -765,23 +765,28 @@ func TestSlipWriterAdapter_ClaimSlip_ForwardsToTheAtomicStoreCall(t *testing.T) 
 	assert.Equal(t, []slippy.SlipStatus{slippy.SlipStatusFailed}, got.expected)
 	assert.Equal(t, "rerunner", got.by)
 	assert.Equal(t, "retrigger builds", got.reason)
-	assert.Equal(t, domain.ClaimOutcome{Claimed: true, Prior: slippy.SlipStatusFailed}, out,
-		"the store's outcome reaches the handler unchanged")
+	assert.Equal(t, domain.ClaimOutcome{Claimed: true, Prior: slippy.SlipStatusFailed, InFlight: true}, out,
+		"the store's whole outcome reaches the handler unchanged, in-flight evidence included")
 }
 
 // The idempotent repeat is a SUCCESS the adapter must report as one: Claimed=false with the
-// RECORDED prior, not an error and not an invented true (PR #87 sixth review).
+// RECORDED prior, not an error and not an invented true (PR #87 sixth review). Both in-flight
+// variants are pinned, because it is that field — not Claimed — that tells a rerun caller
+// whether the held claim has a run executing behind it (PR #87 seventh review).
 func TestSlipWriterAdapter_ClaimSlip_SurfacesTheAlreadyClaimedArm(t *testing.T) {
-	store := &mockSlipStore{
-		claimSlipFn: func(_ context.Context, _ string, _ []slippy.SlipStatus, _, _ string) (slippy.ClaimOutcome, error) {
-			return slippy.ClaimOutcome{Claimed: false, Prior: slippy.SlipStatusFailed}, nil
-		},
+	for _, inFlight := range []bool{false, true} {
+		store := &mockSlipStore{
+			claimSlipFn: func(_ context.Context, _ string, _ []slippy.SlipStatus, _, _ string) (slippy.ClaimOutcome, error) {
+				return slippy.ClaimOutcome{Claimed: false, Prior: slippy.SlipStatusFailed, InFlight: inFlight}, nil
+			},
+		}
+		out, err := newTestWriterAdapter(store).ClaimSlip(
+			context.Background(), "corr-1", []slippy.SlipStatus{slippy.SlipStatusFailed}, "slippy-cli/prejob", "")
+		require.NoError(t, err)
+		assert.False(t, out.Claimed, "a claim was already held and nothing was written")
+		assert.Equal(t, slippy.SlipStatusFailed, out.Prior)
+		assert.Equal(t, inFlight, out.InFlight, "the store's evidence reaches the handler unchanged")
 	}
-	out, err := newTestWriterAdapter(store).ClaimSlip(
-		context.Background(), "corr-1", []slippy.SlipStatus{slippy.SlipStatusFailed}, "slippy-cli/prejob", "")
-	require.NoError(t, err)
-	assert.False(t, out.Claimed, "a claim was already held and nothing was written")
-	assert.Equal(t, slippy.SlipStatusFailed, out.Prior)
 }
 
 func TestSlipWriterAdapter_ClaimSlip_PropagatesPreconditionFailure(t *testing.T) {

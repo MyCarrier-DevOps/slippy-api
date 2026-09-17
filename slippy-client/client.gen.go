@@ -188,7 +188,7 @@ type ClaimSlipInputBody struct {
 	// ClaimedBy Adopter that is taking over this slip (e.g. "rerunner"); recorded as the history entry's actor
 	ClaimedBy string `json:"claimed_by"`
 
-	// IfStatus Claim only if the slip's CURRENT status is one of these, whether or not a claim is already held; omit to claim out of any status except a live run (in_progress, compensating) — name the status here to adopt one deliberately
+	// IfStatus Claim only if the slip's CURRENT status is one of these, whether or not a claim is already held; omit to claim out of any status except one whose run has a step or component in flight — name the status here to adopt a running run deliberately
 	IfStatus *[]ClaimSlipInputBodyIfStatus `json:"if_status,omitempty"`
 
 	// Reason Optional scope of the adopted work (e.g. "retrigger builds and unit tests")
@@ -205,6 +205,9 @@ type ClaimSlipOutputBody struct {
 
 	// Claimed true when this call recorded the claim; false when a claim was already held and nothing was written — the slip is claimed either way
 	Claimed bool `json:"claimed"`
+
+	// InFlight true when a step or component of the run was running or held at decision time, read under the same row lock as the claim; with claimed=false it means another run is executing against this slip and the caller must not dispatch
+	InFlight bool `json:"in_flight"`
 
 	// Prior the status the claim was taken out of: the current status when this call claimed, the recorded one when a claim was already held
 	Prior *string `json:"prior,omitempty"`
