@@ -3,6 +3,7 @@ package e2e
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -201,6 +202,27 @@ func (s *asyncInsertSlipStore) UpdateSlipStatus(_ context.Context, _ string, _ s
 }
 
 func (s *asyncInsertSlipStore) AppendHistory(_ context.Context, _ string, _ slippy.StateHistoryEntry) error {
+	return nil
+}
+
+// ClaimSlip / ReleaseClaim: this double exercises Create-time dedup only.
+func (s *asyncInsertSlipStore) ClaimSlip(
+	_ context.Context,
+	id string,
+	_ []slippy.SlipStatus,
+	_, _ string,
+) (slippy.ClaimOutcome, error) {
+	return slippy.ClaimOutcome{}, fmt.Errorf("ClaimSlip(%s): %w", id, slippy.ErrClaimUnsupported)
+}
+
+func (s *asyncInsertSlipStore) ReleaseClaim(
+	_ context.Context, id, _, _ string,
+) (slippy.ReleaseOutcome, error) {
+	return slippy.ReleaseOutcome{}, fmt.Errorf("ReleaseClaim(%s): %w", id, slippy.ErrClaimUnsupported)
+}
+
+// ProbeSchema joined slippy.SlipStore in DEVOPS-367; this double has no schema to check.
+func (s *asyncInsertSlipStore) ProbeSchema(_ context.Context) error {
 	return nil
 }
 

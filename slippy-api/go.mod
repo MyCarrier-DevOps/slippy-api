@@ -5,9 +5,9 @@ go 1.26.6
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.48.0
 	github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse v1.3.102
-	github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.102
+	github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.3.103
 	github.com/MyCarrier-DevOps/goLibMyCarrier/postgres v1.3.102
-	github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.3.102
+	github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.4.0-feat-devops-367-claim-wedge.24.0.20260917152520-2824deb6f7bb
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/danielgtaylor/huma/v2 v2.39.1
 	github.com/google/uuid v1.6.0

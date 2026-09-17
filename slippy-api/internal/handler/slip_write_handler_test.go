@@ -31,7 +31,8 @@ type mockWriter struct {
 	setComponentImageTagFn func(ctx context.Context, correlationID, componentName, imageTag string) error
 	promoteSlipFn          func(ctx context.Context, correlationID, promotedTo string) error
 	abandonSlipFn          func(ctx context.Context, correlationID, supersededBy string) error
-	claimSlipFn            func(ctx context.Context, correlationID, claimedBy, reason string) error
+	claimSlipFn            func(ctx context.Context, correlationID string, ifStatus []slippy.SlipStatus, claimedBy, reason string) (domain.ClaimOutcome, error)
+	releaseClaimFn         func(ctx context.Context, correlationID, releasedBy, reason string) (domain.ReleaseOutcome, error)
 }
 
 func (m *mockWriter) CreateSlipForPush(ctx context.Context, opts domain.PushOptions) (*domain.CreateSlipResult, error) {
@@ -64,22 +65,53 @@ func (m *mockWriter) AbandonSlip(ctx context.Context, cID, supersededBy string) 
 	}
 	return nil
 }
-func (m *mockWriter) ClaimSlip(ctx context.Context, cID, claimedBy, reason string) error {
+
+func (m *mockWriter) ClaimSlip(
+	ctx context.Context,
+	cID string,
+	ifStatus []slippy.SlipStatus,
+	claimedBy, reason string,
+) (domain.ClaimOutcome, error) {
 	if m.claimSlipFn != nil {
-		return m.claimSlipFn(ctx, cID, claimedBy, reason)
+		return m.claimSlipFn(ctx, cID, ifStatus, claimedBy, reason)
 	}
-	return nil
+	return domain.ClaimOutcome{Claimed: true, Prior: slippy.SlipStatusFailed}, nil
+}
+
+func (m *mockWriter) ReleaseClaim(
+	ctx context.Context,
+	cID, releasedBy, reason string,
+) (domain.ReleaseOutcome, error) {
+	if m.releaseClaimFn != nil {
+		return m.releaseClaimFn(ctx, cID, releasedBy, reason)
+	}
+	return domain.ReleaseOutcome{Released: true, Status: slippy.SlipStatusFailed}, nil
 }
 
 // setupWriteTestAPI creates a huma API with write routes and no auth for testing.
 func setupWriteTestAPI(w domain.SlipWriter) http.Handler {
+	return setupWriteTestAPIWithInvalidator(w, nil)
+}
+
+// setupWriteTestAPIWithInvalidator is setupWriteTestAPI with the post-write cache hook
+// wired, for the tests that assert whether a write evicts the cached slip.
+func setupWriteTestAPIWithInvalidator(w domain.SlipWriter, inv domain.Invalidator) http.Handler {
 	mux := http.NewServeMux()
 	cfg := huma.DefaultConfig("Test", "1.0.0")
 	api := humago.New(mux, cfg)
 
-	h := NewSlipWriteHandler(w, nil)
+	h := NewSlipWriteHandler(w, inv)
 	RegisterWriteRoutes(api, h)
 	return mux
+}
+
+// countingInvalidator records every cache eviction the handler asks for.
+type countingInvalidator struct {
+	calls []string
+}
+
+func (c *countingInvalidator) InvalidateByCorrelationID(_ context.Context, correlationID string) {
+	c.calls = append(c.calls, correlationID)
 }
 
 // --- CreateSlip tests ---
@@ -722,9 +754,9 @@ func TestAbandonSlip_InternalError(t *testing.T) {
 func TestClaimSlip_Success(t *testing.T) {
 	var gotCID, gotClaimedBy, gotReason string
 	w := &mockWriter{
-		claimSlipFn: func(_ context.Context, cID, claimedBy, reason string) error {
+		claimSlipFn: func(_ context.Context, cID string, _ []slippy.SlipStatus, claimedBy, reason string) (domain.ClaimOutcome, error) {
 			gotCID, gotClaimedBy, gotReason = cID, claimedBy, reason
-			return nil
+			return domain.ClaimOutcome{Claimed: true, Prior: slippy.SlipStatusFailed}, nil
 		},
 	}
 	handler := setupWriteTestAPI(w)
@@ -735,19 +767,108 @@ func TestClaimSlip_Success(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	// Inverted deliberately (PR #87 sixth review): the claim used to answer 204. It reports
+	// the outcome now, because a caller that must not dispatch twice cannot tell "I took the
+	// claim" from "someone already held it" out of a status code.
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, true, resp["claimed"])
+	assert.Equal(t, "failed", resp["prior"])
+	assert.Equal(t, false, resp["in_flight"], "nothing was running: this caller is the one that dispatches")
 	assert.Equal(t, "abc-123", gotCID)
 	assert.Equal(t, "rerunner", gotClaimedBy)
 	assert.Equal(t, "retrigger builds and unit tests", gotReason)
+}
+
+// The idempotent repeat: a claim was already held, the store wrote nothing, and that is a
+// SUCCESS with claimed=false — not a 409, and not something a caller may read as "unclaimed".
+// Every pre-job of a run after the first takes this arm.
+func TestClaimSlip_AlreadyClaimedIsASuccessWithClaimedFalse(t *testing.T) {
+	w := &mockWriter{
+		claimSlipFn: func(_ context.Context, _ string, _ []slippy.SlipStatus, _, _ string) (domain.ClaimOutcome, error) {
+			return domain.ClaimOutcome{Claimed: false, Prior: slippy.SlipStatusFailed}, nil
+		},
+	}
+	inv := &countingInvalidator{}
+	handler := setupWriteTestAPIWithInvalidator(w, inv)
+
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/claim",
+		strings.NewReader(`{"claimed_by":"slippy-cli/prejob"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, false, resp["claimed"], "a claim was already held; this call wrote nothing")
+	assert.Equal(t, "failed", resp["prior"],
+		"prior is the RECORDED claimed_from on a repeat, not the current status")
+	assert.Equal(t, false, resp["in_flight"],
+		"the held claim has no running work behind it, which is the window where dispatching is the recovery")
+	assert.Empty(t, inv.calls, "nothing was written, so there is no cached read to drop")
+}
+
+// The same repeat arm, with the run actually executing. This is the pair that claimed=false
+// alone cannot distinguish: a pre-job's step write does not move the slip's status, so a
+// second adopter arriving after the first one's dispatch sends the same if_status, passes the
+// same compare-and-set, and gets the same claimed=false as a retry whose response was lost
+// before anything ran. in_flight is the field that separates them, so it has to reach the
+// response body on this arm above all (DEVOPS-367, PR #87 seventh review).
+func TestClaimSlip_AlreadyClaimedReportsWhetherTheRunIsInFlight(t *testing.T) {
+	w := &mockWriter{
+		claimSlipFn: func(_ context.Context, _ string, _ []slippy.SlipStatus, _, _ string) (domain.ClaimOutcome, error) {
+			return domain.ClaimOutcome{Claimed: false, Prior: slippy.SlipStatusFailed, InFlight: true}, nil
+		},
+	}
+	inv := &countingInvalidator{}
+	handler := setupWriteTestAPIWithInvalidator(w, inv)
+
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/claim",
+		strings.NewReader(`{"claimed_by":"pushhookparser/rerunner","if_status":["failed"]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code, "a run in flight is information, not a conflict")
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, false, resp["claimed"])
+	assert.Equal(t, true, resp["in_flight"], "another run is executing: the caller must not dispatch")
+	assert.Empty(t, inv.calls, "still nothing written")
+}
+
+// A fresh claim can be in flight too — when the caller NAMED the status of a running run, which
+// is what the Slippy CLI pre-job does for every non-terminal status. The field is on both arms.
+func TestClaimSlip_FreshClaimAlsoReportsInFlight(t *testing.T) {
+	w := &mockWriter{
+		claimSlipFn: func(_ context.Context, _ string, _ []slippy.SlipStatus, _, _ string) (domain.ClaimOutcome, error) {
+			return domain.ClaimOutcome{Claimed: true, Prior: slippy.SlipStatusInProgress, InFlight: true}, nil
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/claim",
+		strings.NewReader(`{"claimed_by":"slippy-cli/prejob","if_status":["in_progress"]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, true, resp["claimed"])
+	assert.Equal(t, true, resp["in_flight"], "the adopter is told it took over a run that is executing")
 }
 
 func TestClaimSlip_ReasonIsOptional(t *testing.T) {
 	called := false
 	var gotReason string
 	w := &mockWriter{
-		claimSlipFn: func(_ context.Context, _, _, reason string) error {
+		claimSlipFn: func(_ context.Context, _ string, _ []slippy.SlipStatus, _, reason string) (domain.ClaimOutcome, error) {
 			called, gotReason = true, reason
-			return nil
+			return domain.ClaimOutcome{Claimed: true, Prior: slippy.SlipStatusCompleted}, nil
 		},
 	}
 	handler := setupWriteTestAPI(w)
@@ -758,7 +879,7 @@ func TestClaimSlip_ReasonIsOptional(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.True(t, called, "claim must reach the writer without a reason")
 	assert.Empty(t, gotReason)
 }
@@ -778,7 +899,9 @@ func TestClaimSlip_WriterFailuresAreNotSwallowed(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			w := &mockWriter{
-				claimSlipFn: func(_ context.Context, _, _, _ string) error { return tc.err },
+				claimSlipFn: func(_ context.Context, _ string, _ []slippy.SlipStatus, _, _ string) (domain.ClaimOutcome, error) {
+					return domain.ClaimOutcome{}, tc.err
+				},
 			}
 			handler := setupWriteTestAPI(w)
 
@@ -829,9 +952,9 @@ func TestClaimSlip_RejectsBadInput(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			w := &mockWriter{
-				claimSlipFn: func(_ context.Context, _, _, _ string) error {
+				claimSlipFn: func(_ context.Context, _ string, _ []slippy.SlipStatus, _, _ string) (domain.ClaimOutcome, error) {
 					t.Fatal("writer must not be called for a rejected request")
-					return nil
+					return domain.ClaimOutcome{}, nil
 				},
 			}
 			handler := setupWriteTestAPI(w)
@@ -880,8 +1003,10 @@ func TestWriteNotFound_MessageIsActionable(t *testing.T) {
 			"claim",
 			"/slips/abc-123/claim",
 			`{"claimed_by":"rerunner"}`,
-			&mockWriter{claimSlipFn: func(_ context.Context, _, _, _ string) error {
-				return slippy.ErrSlipNotFound
+			&mockWriter{claimSlipFn: func(
+				_ context.Context, _ string, _ []slippy.SlipStatus, _, _ string,
+			) (domain.ClaimOutcome, error) {
+				return domain.ClaimOutcome{}, slippy.ErrSlipNotFound
 			}},
 		},
 	}
@@ -902,6 +1027,129 @@ func TestWriteNotFound_MessageIsActionable(t *testing.T) {
 				"the 404 must tell the operator how to recover")
 		})
 	}
+}
+
+// --- ReleaseClaim tests (DEVOPS-367) ---
+
+// A release that cleared the claim reports the status it found, and never changes it.
+func TestReleaseClaim_ReleasedReportsTheStatusAtRelease(t *testing.T) {
+	var gotCID, gotReleasedBy, gotReason string
+	w := &mockWriter{
+		releaseClaimFn: func(
+			_ context.Context, cID, releasedBy, reason string,
+		) (domain.ReleaseOutcome, error) {
+			gotCID, gotReleasedBy, gotReason = cID, releasedBy, reason
+			return domain.ReleaseOutcome{Released: true, Status: slippy.SlipStatusFailed}, nil
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	body := `{"released_by":"slippy-cli/post-job","reason":"terminal write failed"}`
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/release", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "abc-123", gotCID)
+	assert.Equal(t, "slippy-cli/post-job", gotReleasedBy)
+	assert.Equal(t, "terminal write failed", gotReason)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, true, resp["released"])
+	assert.Equal(t, "failed", resp["status"])
+}
+
+// The run still has work in flight: the claim is kept, nothing was written, and that is an
+// outcome the caller reads off a 200 — not an error it has to classify.
+//
+// The writer deliberately returns a Status alongside Released=false, which the adapter never
+// does: "status only when released" is the HANDLER's contract to hold, not something inherited
+// from the adapter zeroing its outcome.
+// Renamed and inverted deliberately (PR #87 re-review): the held arm used to omit `status`,
+// on the reasoning that "a status at release" exists only when there was a release. The
+// library reads the status under the same lock it decides on and never writes it, so it is
+// known on both arms — and reporting it saves a caller polling a held claim a second request.
+func TestReleaseClaim_HeldInFlightIs200WithReleasedFalse(t *testing.T) {
+	w := &mockWriter{
+		releaseClaimFn: func(_ context.Context, _, _, _ string) (domain.ReleaseOutcome, error) {
+			return domain.ReleaseOutcome{Released: false, Status: slippy.SlipStatusFailed}, nil
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/release",
+		strings.NewReader(`{"released_by":"slippy-cli/post-job"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, false, resp["released"])
+	assert.Equal(t, string(slippy.SlipStatusFailed), resp["status"],
+		"the status is the slip's at decision time, reported whether or not the claim was cleared")
+}
+
+// A held claim writes NOTHING, so it must not evict the cached slip: an eviction there would
+// spend a round-trip and a cold read on a request that changed no state. The released path
+// must still evict, since it cleared the claim.
+func TestReleaseClaim_OnlyTheReleasedPathInvalidatesTheCache(t *testing.T) {
+	tests := []struct {
+		name      string
+		outcome   domain.ReleaseOutcome
+		wantCalls []string
+	}{
+		{
+			"released evicts",
+			domain.ReleaseOutcome{Released: true, Status: slippy.SlipStatusFailed},
+			[]string{"abc-123"},
+		},
+		{"held in flight does not evict", domain.ReleaseOutcome{Released: false}, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &mockWriter{
+				releaseClaimFn: func(_ context.Context, _, _, _ string) (domain.ReleaseOutcome, error) {
+					return tc.outcome, nil
+				},
+			}
+			inv := &countingInvalidator{}
+			handler := setupWriteTestAPIWithInvalidator(w, inv)
+
+			req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/release",
+				strings.NewReader(`{"released_by":"slippy-cli/post-job"}`))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusOK, rec.Code)
+			assert.Equal(t, tc.wantCalls, inv.calls)
+		})
+	}
+}
+
+// A slip with no claim is still 409 — the normal outcome once a terminal status write has
+// ended the claim on its own.
+func TestReleaseClaim_UnclaimedIs409(t *testing.T) {
+	w := &mockWriter{
+		releaseClaimFn: func(_ context.Context, cID, _, _ string) (domain.ReleaseOutcome, error) {
+			return domain.ReleaseOutcome{}, fmt.Errorf("release %s: %w", cID, slippy.ErrNotClaimed)
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/release",
+		strings.NewReader(`{"released_by":"slippy-cli/post-job"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "nothing to release")
 }
 
 // --- mapWriteError tests ---
@@ -931,6 +1179,8 @@ func TestMapWriteError(t *testing.T) {
 		},
 		{"slip error", slippy.NewSlipError("create", "id", errors.New("fail")), http.StatusUnprocessableEntity},
 		{"creation in progress (sentinel)", domain.ErrCreationInProgress, http.StatusConflict},
+		{"claim precondition failed", slippy.ErrClaimPreconditionFailed, http.StatusConflict},
+		{"not claimed", slippy.ErrNotClaimed, http.StatusConflict},
 		{
 			"creation in progress (wrapped, as returned by writer)",
 			fmt.Errorf("dedup: slip for repo:sha creation in progress, retry: %w", domain.ErrCreationInProgress),

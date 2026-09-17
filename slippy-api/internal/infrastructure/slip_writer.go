@@ -363,7 +363,10 @@ func (a *SlipWriterAdapter) AbandonSlip(ctx context.Context, correlationID, supe
 // document loaded at runtime (SLIPPY_PIPELINE_CONFIG), and the JSON configs
 // shipped with the library are examples. ClaimMarkerStepCollision is the runtime
 // detector; main.go warns at boot if it fires.
-const claimMarkerStep = "slip_claimed"
+const claimMarkerStep = slippy.ClaimMarkerStep
+
+// releaseMarkerStep is the state-history step name for a release marker (DEVOPS-367).
+const releaseMarkerStep = slippy.ReleaseMarkerStep
 
 // ClaimMarkerStepCollision returns the adoption marker's step name if the loaded
 // pipeline config defines a step by that name, and "" otherwise. It exists so
@@ -371,130 +374,88 @@ const claimMarkerStep = "slip_claimed"
 // A warning rather than a boot failure: the consequence of a collision is a wrong
 // derived StartedAt on one step, which does not justify refusing to serve.
 func ClaimMarkerStepCollision(cfg *slippy.PipelineConfig) string {
-	if cfg != nil && cfg.GetStep(claimMarkerStep) != nil {
-		return claimMarkerStep
+	if cfg == nil {
+		return ""
+	}
+	for _, step := range []string{claimMarkerStep, releaseMarkerStep} {
+		if cfg.GetStep(step) != nil {
+			return step
+		}
 	}
 	return ""
 }
 
-// ClaimSlip appends an adoption marker and then sets the slip to in_progress.
-// See domain.SlipWriter.ClaimSlip for why adopters must call this before they
-// dispatch. This comment covers the mechanics.
+// ClaimSlip records that a run is in flight against a slip. Since DEVOPS-367 the library
+// performs the whole claim as ONE store transaction — lock, expected-status precondition,
+// adoption marker, claimed_from=<current status> — and never writes the slip's status, so
+// the marker-then-status ordering this adapter used to reason about no longer exists here.
+// ifStatus is a compare-and-set on the CURRENT status whether or not a claim is held; a
+// status outside it (or a slip with no status at all, or a run IN FLIGHT whose status ifStatus
+// did not name) is ErrClaimPreconditionFailed with nothing written, which mapWriteError turns
+// into a 409. Once that check agrees, an existing claim is an idempotent no-op:
+// ClaimOutcome{Claimed: false} carrying the RECORDED prior, which this adapter reports rather
+// than hiding, so the handler can tell a caller whether its own call took the claim.
 //
-// The two writes are separate transactions — the library has no atomic
-// status-plus-history primitive at slip level, only the step-level
-// UpdateStepWithHistory — so one can land without the other. The order is
-// therefore load-bearing, not stylistic:
-//
-//   - Marker first (this order). A failed status write leaves the slip at its
-//     prior status carrying a marker that records the attempt. Nothing is
-//     dispatched, the slip is still repave-eligible, and the next same-commit
-//     push recovers the commit normally. The stray marker is not a lie: an
-//     adopter did try to claim this slip and did not get it. One exception to
-//     "records the attempt": if a same-commit push repaves BETWEEN the two
-//     writes, the DELETE takes the row and the just-written marker with it, and
-//     the status write then 404s — on that path the surviving guarantee is the
-//     404, not the audit trail. (A repave BEFORE the claim fails the Load and
-//     writes nothing; that case is covered below.)
-//   - Status first (do NOT reorder). A failed marker write leaves the slip
-//     in_progress with nothing running and no record of why. in_progress is not
-//     in repaveableSlipStatusesSQL, so every later same-commit push dedups onto
-//     a slip that will never report another event, wedging the commit with no
-//     error surfaced anywhere. That is strictly worse than the race this
-//     endpoint exists to close.
-//
-// The Load is both the existence check and the source of the prior status in the
-// marker. A claim against a correlation ID that has already been repaved away
-// fails there, before anything is written, which is exactly what the caller
-// needs to learn before it dispatches.
-//
-// The Load also makes a repeat claim a no-op. A slip that already reads
-// in_progress has the status a claim would set, and the caller's message-level
-// retry re-claims after a lost response (the writes run on a cancellation-
-// detached context, so a client timeout does not stop them), so writing again
-// would only stack identical markers. This must stay a no-op and never become a
-// 409: a deterministic rejection would burn the consumer's whole retry budget
-// and DLQ the message. The Load holds no lock across the writes, so the no-op
-// de-duplicates SEQUENTIAL retries only and grants no exclusivity; a genuine
-// second adopter's claim goes unrecorded, and telling it apart from a retry
-// would need a claim token, which is out of scope.
-//
-// Each write gets its own instrumentedWrite, rather than one wrapping both, so
-// that the 55P03 lock retry re-runs only the write that actually lost the lock.
-// A single shared wrapper would re-append the marker when the status write was
-// the one retried.
-func (a *SlipWriterAdapter) ClaimSlip(ctx context.Context, correlationID, claimedBy, reason string) error {
+// InFlight rides along on both arms: the library reads it from the same locked row it decides
+// on, so it cannot disagree with the decision, and it is what a caller that must not dispatch
+// twice actually branches on (domain.ClaimOutcome says why Claimed cannot).
+func (a *SlipWriterAdapter) ClaimSlip(
+	ctx context.Context, correlationID string, ifStatus []slippy.SlipStatus, claimedBy, reason string,
+) (domain.ClaimOutcome, error) {
 	attrs := []attribute.KeyValue{
 		attribute.String("slip.correlation_id", correlationID),
 		attribute.String("slip.claimed_by", claimedBy),
 	}
-
-	// alreadyLive must escape the closure: a bare `return nil` inside it would
-	// still fall through to the status write below.
-	var alreadyLive bool
-	if err := a.instrumentedWrite(ctx, "writer.ClaimSlip.mark", attrs,
+	var out domain.ClaimOutcome
+	err := a.instrumentedWrite(ctx, "writer.ClaimSlip", attrs,
 		func(wctx context.Context, span trace.Span) error {
-			slip, err := a.client.Load(wctx, correlationID)
+			res, err := a.client.ClaimSlip(wctx, correlationID, ifStatus, claimedBy, reason)
 			if err != nil {
 				return err
 			}
-			span.SetAttributes(attribute.String("slip.prior_status", string(slip.Status)))
-			if slip.Status == slippy.SlipStatusInProgress {
-				// Repeat claim: see the no-op paragraph above. Re-evaluated on a
-				// 55P03 retry, so this stays correct across writeWithLockRetry.
-				alreadyLive = true
-				span.AddEvent("claim_noop_already_in_progress")
-				return nil
+			out = domain.ClaimOutcome{Claimed: res.Claimed, Prior: res.Prior, InFlight: res.InFlight}
+			outcome := "already_claimed"
+			if res.Claimed {
+				outcome = "claimed"
 			}
-			return a.client.AppendHistoryEntry(wctx, correlationID,
-				claimMarker(slip.Status, claimedBy, reason))
-		},
-	); err != nil {
-		return err
-	}
-	if alreadyLive {
-		return nil
-	}
-
-	return a.instrumentedWrite(ctx, "writer.ClaimSlip.status", attrs,
-		func(wctx context.Context, _ trace.Span) error {
-			return a.client.UpdateSlipStatus(wctx, correlationID, slippy.SlipStatusInProgress)
+			span.SetAttributes(attribute.String("slip.claim_outcome", outcome),
+				attribute.String("slip.prior_status", string(res.Prior)),
+				attribute.Bool("slip.in_flight", res.InFlight))
+			return nil
 		},
 	)
+	return out, err
 }
 
-// claimMarker builds the adoption history entry. The prior status goes in the
-// message because it is the one thing that tells an operator whether a claim was
-// routine (a failed slip being rerun, the case DEVOPS-285 is about) or worth
-// asking about (a completed, abandoned or promoted one being resurrected). The
-// rerunner adopts whatever slip the commit lookup returns without filtering on
-// status, and the lookup walks ancestry, so all of these happen.
-//
-// For promoted the cost is real and this message is the only in-slip trace of
-// it. UpdateSlipStatus has no transition guard, so the claim's own status write
-// overwrites `promoted`. A completed slip self-heals — its step columns are
-// untouched, so the completion check writes `completed` back — but a promoted
-// feature-branch slip never has prod_steady_state completed, so nothing restores
-// it. The residual record is the lagging, descendant-keyed
-// slip_ancestry.parent_status. This is not refused, because the consumer cannot
-// select on prior status and a deterministic refusal would DLQ its rerun; it is
-// made legible instead, which is why the message format below is load-bearing
-// and should not be reworded casually. StateHistoryEntry.Component is not an
-// alternative home for the prior status: the library's history readers use it
-// as the component discriminator. DEVOPS-202 (persist promoted_to) is the
-// prerequisite for a non-destructive claim.
-func claimMarker(priorStatus slippy.SlipStatus, claimedBy, reason string) slippy.StateHistoryEntry {
-	msg := fmt.Sprintf("adopted %s slip before dispatching", priorStatus)
-	if reason != "" {
-		msg += ": " + reason
+// ReleaseClaim ends a claim once nothing is in flight. Work in flight is an OUTCOME, not an
+// error — the library returns slippy.ReleaseOutcome{Released: false} with nothing written —
+// so the claim is kept and the caller's next release (or a terminal write) ends it
+// (DEVOPS-367). The status is known on both arms, because a release never changes it.
+func (a *SlipWriterAdapter) ReleaseClaim(
+	ctx context.Context, correlationID, releasedBy, reason string,
+) (domain.ReleaseOutcome, error) {
+	attrs := []attribute.KeyValue{
+		attribute.String("slip.correlation_id", correlationID),
+		attribute.String("slip.released_by", releasedBy),
 	}
-	return slippy.StateHistoryEntry{
-		Step:      claimMarkerStep,
-		Status:    slippy.StepStatusRunning,
-		Timestamp: time.Now(),
-		Actor:     claimedBy,
-		Message:   msg,
-	}
+	var out domain.ReleaseOutcome
+	err := a.instrumentedWrite(ctx, "writer.ReleaseClaim", attrs,
+		func(wctx context.Context, span trace.Span) error {
+			res, err := a.client.ReleaseClaim(wctx, correlationID, releasedBy, reason)
+			if err != nil {
+				return err
+			}
+			out = domain.ReleaseOutcome{Released: res.Released, Status: res.Status}
+			outcome := "held_in_flight"
+			if res.Released {
+				outcome = "released"
+			}
+			span.SetAttributes(attribute.String("slip.release_outcome", outcome),
+				attribute.String("slip.status_at_decision", string(res.Status)))
+			return nil
+		},
+	)
+	return out, err
 }
 
 // instrumentedWrite is the single entry point for durable step/terminal

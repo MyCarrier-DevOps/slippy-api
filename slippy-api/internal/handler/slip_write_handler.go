@@ -205,6 +205,45 @@ type ClaimSlipInput struct {
 		// the history later, which is the whole point of the marker.
 		ClaimedBy string `json:"claimed_by" minLength:"1" maxLength:"128" pattern:"^[A-Za-z0-9._:/-]+$" doc:"Adopter that is taking over this slip (e.g. \"rerunner\"); recorded as the history entry's actor"`
 		Reason    string `json:"reason,omitempty" maxLength:"512" doc:"Optional scope of the adopted work (e.g. \"retrigger builds and unit tests\")"`
+		// Optional compare-and-set: claim only if the slip is currently in one of these
+		// statuses, enforced in the store's transaction. Omit to claim out of any status.
+		// A mismatch is 409 with nothing written (DEVOPS-367).
+		IfStatus []string `json:"if_status,omitempty" maxItems:"8" uniqueItems:"true" enum:"pending,in_progress,failed,compensating,completed,compensated,abandoned,promoted" doc:"Claim only if the slip's CURRENT status is one of these, whether or not a claim is already held; omit to claim out of any status except one whose run has a step or component in flight — name the status here to adopt a running run deliberately"`
+	}
+}
+
+// ClaimSlipOutput reports what the claim did. Symmetric with ReleaseClaimOutput, and for the
+// same reason: the interesting half of the outcome is which arm the store took, and a caller
+// that must not duplicate work cannot recover that from the status code alone.
+//
+// in_flight is the field that actually answers "may I dispatch?", and claimed is not. A step
+// write does not move the slip's status, so a slip dispatched out of failed still reads failed
+// until its first post-job; a second adopter in that window passes the same if_status and gets
+// the same claimed=false as a retry whose response was lost before anything dispatched
+// (DEVOPS-367, PR #87 seventh review). Both booleans are non-omitempty so the generated client
+// renders them as plain bools and a caller cannot mistake absent for false.
+type ClaimSlipOutput struct {
+	Body struct {
+		Claimed  bool   `json:"claimed" doc:"true when this call recorded the claim; false when a claim was already held and nothing was written — the slip is claimed either way"`
+		Prior    string `json:"prior,omitempty" doc:"the status the claim was taken out of: the current status when this call claimed, the recorded one when a claim was already held"`
+		InFlight bool   `json:"in_flight" doc:"true when a step or component of the run was running or held at decision time, read under the same row lock as the claim; with claimed=false it means another run is executing against this slip and the caller must not dispatch"`
+	}
+}
+
+// ReleaseClaimInput captures path params and body for releasing a claim.
+type ReleaseClaimInput struct {
+	CorrelationID string `path:"correlationID" doc:"Routing slip correlation ID"`
+	Body          struct {
+		ReleasedBy string `json:"released_by" minLength:"1" maxLength:"128" pattern:"^[A-Za-z0-9._:/-]+$" doc:"Who is releasing the claim (e.g. \"slippy-cli/post-job\"); recorded as the history entry's actor"`
+		Reason     string `json:"reason,omitempty" maxLength:"512" doc:"Why the claimed work will not report (e.g. the terminal write that failed)"`
+	}
+}
+
+// ReleaseClaimOutput reports what the release did.
+type ReleaseClaimOutput struct {
+	Body struct {
+		Released bool   `json:"released" doc:"true when the claim was cleared; false when the run still has a step or component in flight and the claim is kept — release again when that work reports, or let the terminal write end it"`
+		Status   string `json:"status,omitempty" doc:"the slip's status at decision time; a release never changes it"`
 	}
 }
 
@@ -307,19 +346,48 @@ func RegisterWriteRoutes(api huma.API, h *SlipWriteHandler) {
 		Path:        "/slips/{correlationID}/claim",
 		Summary:     "Claim an adopted routing slip before dispatching work against it",
 		Description: "Records that the caller has work in flight against a slip it did not create: " +
-			"appends an adoption marker to the slip's state history and sets its status to in_progress. " +
-			"Adopters MUST call this before dispatching any workflow. An ended slip stays eligible to be " +
-			"replaced by a same-commit push, which deletes the row out from under in-flight work; a claimed " +
-			"slip is live, so such a push deduplicates onto it instead. A non-2xx response means the claim " +
-			"is not confirmed and the caller must dispatch nothing; it does not mean the slip is unclaimed, " +
-			"because the writes are not cancelled by a client timeout. Claiming again is the recovery: a " +
-			"repeat claim on a slip that is already in_progress is a no-op, never a conflict. Claiming a " +
-			"failed slip also removes it from consumer-side stranded-slip protection that keys on failed, so " +
-			"the adopter is exposed to a concurrent force-push or branch delete for the life of its run.",
+			"sets the slip's claim flag and appends an adoption marker to its state history. The claim " +
+			"never changes the slip's status. Adopters MUST call this before dispatching any workflow. An " +
+			"unclaimed ended slip (failed, completed, abandoned, promoted, compensated) is eligible to be " +
+			"replaced by a same-commit push, which deletes the row out from under in-flight work; a " +
+			"claimed slip is refused by that repave, so such a push deduplicates onto it instead. A " +
+			"non-2xx response means the claim is not confirmed and the caller must dispatch nothing; it " +
+			"does not mean the slip is unclaimed, because the write is not cancelled by a client " +
+			"timeout. if_status is a COMPARE-AND-SET ON THE SLIP'S CURRENT STATUS, whether or not a " +
+			"claim is already held; a mismatch is 409 with nothing written. Claiming again is the " +
+			"recovery, and a repeat claim whose if_status still matches the current status is a no-op " +
+			"rather than a conflict: it answers 200 with claimed=false, meaning a claim was already " +
+			"held and this call wrote nothing. So a retry after a lost response claims when nothing was " +
+			"dispatched — the status has not moved — and is refused once a POST-JOB has reported, " +
+			"because the dispatch being retried already happened. BRANCH ON in_flight, NOT ON claimed: " +
+			"a pre-job's step write does not move the slip's status, so a run dispatched out of failed " +
+			"still reads failed until its first post-job, and a second adopter in that window gets the " +
+			"same claimed=false as a lost-response retry. claimed=false with in_flight=true means " +
+			"another run is executing against this slip and the caller MUST NOT dispatch; " +
+			"claimed=false with in_flight=false means the held claim has no running work behind it, " +
+			"which is the window where dispatching is the recovery. omitting if_status claims out of " +
+			"any status EXCEPT one whose run has a step or component in flight. A claim ends when the " +
+			"run releases it, or when a terminal status write ends it.",
 		Security:      writeApiKeySecurity,
-		DefaultStatus: http.StatusNoContent,
+		DefaultStatus: http.StatusOK,
 		Tags:          []string{"v1"},
 	}, h.claimSlip)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "release-claim",
+		Method:      http.MethodPost,
+		Path:        "/slips/{correlationID}/release",
+		Summary:     "Release a claim once the claimant's run has nothing in flight",
+		Description: "Ends a prior claim: clears it and appends a release marker, never changing the slip's " +
+			"status. While any step or component of the run is still running or held the claim is kept — " +
+			"released=false with nothing written, and the slip's status reported either way — because every " +
+			"post-job releases on exit and the last one clears. A slip " +
+			"with no claim is 409; a terminal status write already ends the claim, so 409 after a completed " +
+			"run is the normal outcome (DEVOPS-367).",
+		Security:      writeApiKeySecurity,
+		DefaultStatus: http.StatusOK,
+		Tags:          []string{"v1"},
+	}, h.releaseClaim)
 }
 
 // --- Validation ----------------------------------------------------------
@@ -665,7 +733,7 @@ func (h *SlipWriteHandler) abandonSlip(ctx context.Context, input *AbandonSlipIn
 	return &struct{}{}, nil
 }
 
-func (h *SlipWriteHandler) claimSlip(ctx context.Context, input *ClaimSlipInput) (*struct{}, error) {
+func (h *SlipWriteHandler) claimSlip(ctx context.Context, input *ClaimSlipInput) (*ClaimSlipOutput, error) {
 	if err := validateCorrelationIDFormat(input.CorrelationID); err != nil {
 		return nil, err
 	}
@@ -681,7 +749,18 @@ func (h *SlipWriteHandler) claimSlip(ctx context.Context, input *ClaimSlipInput)
 		"correlation_id", input.CorrelationID,
 		"claimed_by", input.Body.ClaimedBy, "reason", input.Body.Reason)
 
-	if err := h.writer.ClaimSlip(ctx, input.CorrelationID, input.Body.ClaimedBy, input.Body.Reason); err != nil {
+	ifStatus := make([]slippy.SlipStatus, 0, len(input.Body.IfStatus))
+	for _, s := range input.Body.IfStatus {
+		ifStatus = append(ifStatus, slippy.SlipStatus(s))
+	}
+	out, err := h.writer.ClaimSlip(
+		ctx,
+		input.CorrelationID,
+		ifStatus,
+		input.Body.ClaimedBy,
+		input.Body.Reason,
+	)
+	if err != nil {
 		recordHandlerError(span, err)
 		// Logged at Error, not Warn, even for the expected not-found: the caller is
 		// about to abandon a dispatch it was asked to perform, and the operator who
@@ -691,11 +770,89 @@ func (h *SlipWriteHandler) claimSlip(ctx context.Context, input *ClaimSlipInput)
 			"claimed_by", input.Body.ClaimedBy, "error", err)
 		return nil, mapWriteError(err)
 	}
+	// `prior` keeps omitempty for the same reason ReleaseClaimOutput.Status does: dropping it
+	// would mark the field required in the generated spec and regenerate the published
+	// client's field as `string` rather than `*string`, a source break bought for nothing.
+	resp := &ClaimSlipOutput{}
+	resp.Body.Claimed = out.Claimed
+	resp.Body.Prior = string(out.Prior)
+	resp.Body.InFlight = out.InFlight
+	if !out.Claimed {
+		// A claim was already held and the store wrote nothing, so there is no cached read to
+		// drop — the same reasoning as the release's held arm. The slip IS claimed on return;
+		// this is information for a caller that must not dispatch twice, not a failure — and
+		// in_flight is the half of it that says whether the other run is actually executing.
+		span.SetStatus(codes.Ok, "")
+		slog.InfoContext(ctx, "slip: already claimed, nothing written",
+			"correlation_id", input.CorrelationID, "claimed_by", input.Body.ClaimedBy,
+			"prior", resp.Body.Prior, "in_flight", resp.Body.InFlight)
+		return resp, nil
+	}
 	h.invalidate(ctx, input.CorrelationID)
 	span.SetStatus(codes.Ok, "")
 	slog.InfoContext(ctx, "slip: claimed",
-		"correlation_id", input.CorrelationID, "claimed_by", input.Body.ClaimedBy)
-	return &struct{}{}, nil
+		"correlation_id", input.CorrelationID, "claimed_by", input.Body.ClaimedBy,
+		"prior", resp.Body.Prior, "in_flight", resp.Body.InFlight)
+	return resp, nil
+}
+
+func (h *SlipWriteHandler) releaseClaim(
+	ctx context.Context,
+	input *ReleaseClaimInput,
+) (*ReleaseClaimOutput, error) {
+	if err := validateCorrelationIDFormat(input.CorrelationID); err != nil {
+		return nil, err
+	}
+	ctx, span := otel.Tracer(handlerTracerName).Start(ctx, "handler.releaseClaim",
+		trace.WithAttributes(
+			attribute.String("slip.correlation_id", input.CorrelationID),
+			attribute.String("slip.released_by", input.Body.ReleasedBy),
+		),
+	)
+	defer span.End()
+
+	slog.InfoContext(ctx, "slip: release claim",
+		"correlation_id", input.CorrelationID,
+		"released_by", input.Body.ReleasedBy, "reason", input.Body.Reason)
+
+	out, err := h.writer.ReleaseClaim(ctx, input.CorrelationID, input.Body.ReleasedBy, input.Body.Reason)
+	if err != nil {
+		recordHandlerError(span, err)
+		if errors.Is(err, slippy.ErrNotClaimed) {
+			// The normal outcome after a terminal status write already ended the claim; not an
+			// operator problem.
+			slog.InfoContext(ctx, "slip: nothing to release", "correlation_id", input.CorrelationID)
+		} else {
+			slog.ErrorContext(ctx, "slip: release claim failed",
+				"correlation_id", input.CorrelationID, "released_by", input.Body.ReleasedBy, "error", err)
+		}
+		return nil, mapWriteError(err)
+	}
+	// Status is set on BOTH arms: a release never changes the status, and the store reads it
+	// under the same lock it decides on, so it is known whether or not the claim was cleared.
+	// A caller polling a held claim gets the slip's status without a second request.
+	//
+	// The field keeps `omitempty` even though it is now always populated. Dropping it would
+	// mark `status` required in the generated spec, which regenerates the published client's
+	// field as `string` instead of `*string` — a source break for any consumer that bumps
+	// slippy-client and dereferences the pointer, bought for nothing, since the value is
+	// never empty on either arm.
+	resp := &ReleaseClaimOutput{}
+	resp.Body.Released = out.Released
+	resp.Body.Status = string(out.Status)
+	if !out.Released {
+		// The claim is kept and nothing was written, so there is no cached read to drop.
+		span.SetStatus(codes.Ok, "")
+		slog.InfoContext(ctx, "slip: claim held, run still in flight",
+			"correlation_id", input.CorrelationID, "released_by", input.Body.ReleasedBy,
+			"status", resp.Body.Status)
+		return resp, nil
+	}
+	h.invalidate(ctx, input.CorrelationID)
+	span.SetStatus(codes.Ok, "")
+	slog.InfoContext(ctx, "slip: claim released",
+		"correlation_id", input.CorrelationID, "released_by", input.Body.ReleasedBy, "status", resp.Body.Status)
+	return resp, nil
 }
 
 // --- Error Mapping -------------------------------------------------------
@@ -733,6 +890,20 @@ func mapWriteError(err error) error {
 		return huma.NewError(
 			http.StatusConflict,
 			"step already in terminal state; transition rejected (I5 freshness gate)",
+		)
+	case errors.Is(err, slippy.ErrClaimPreconditionFailed):
+		// The slip's status at write time was not one the caller agreed to claim out of.
+		// Nothing was written; the caller decided on a stale read and must re-read before
+		// deciding again — a blind retry gets the same answer.
+		return huma.NewError(
+			http.StatusConflict,
+			"slip status did not match if_status; nothing written — re-read the slip before claiming",
+		)
+	case errors.Is(err, slippy.ErrNotClaimed):
+		// Normal outcome when a terminal status write ended the claim before the release ran.
+		return huma.NewError(
+			http.StatusConflict,
+			"slip is not currently claimed; nothing to release (a terminal status write ends a claim on its own)",
 		)
 	case errors.Is(err, domain.ErrWriteContended):
 		// Per-slip write-lock contention that outlasted the DB lock_timeout and the
