@@ -261,8 +261,17 @@ a claimed row is refused by `Repave`, so the push dedups onto the adopter's slip
   audit only.
   The 200 **replaced a 204**, so a client must accept both while the rollout is in flight (the
   Slippy CLI and pushhookparser do). `in_flight` is a plain (non-optional) bool in the
-  generated client, so a client built against an older spec simply does not see it — treat its
-  absence as "unknown", not as `false`.
+  generated client, so **a missing `in_flight` decodes as `false`** — and that is the rule, not
+  a gap to work around. It is what pushhookparser's client does (`pkg/slippy/http_client.go`,
+  which also returns `false` on the legacy 204 arm), and the two must agree or a caller reading
+  this doc and a caller reading that code would branch differently on the same response.
+  The rollout reason is why `false` is the right default rather than "unknown": an absent field
+  means the API predates it, and an API that predates it also predates the evidence behind it,
+  so a caller that reads `false` behaves exactly as it did before the field existed — it
+  dispatches. The new refusal therefore engages only once the API that can actually see the
+  in-flight evidence is deployed, and never on a stale client talking to a new API (that
+  direction sends the field; the client simply ignores what it does not know). Do not invent a
+  three-valued reading.
 - **`POST /v1/slips/{correlationID}/release` answers 200 `{released, status}`.** It clears
   `claimed_from` and appends a `slip_released` marker, never touching the status; `status` is
   the slip's status at decision time and is reported on **both** arms, because the store reads
