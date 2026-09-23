@@ -320,9 +320,15 @@ a claimed row is refused by `Repave`, so the push dedups onto the adopter's slip
   and then release, which now finds nothing in flight. `POST /v1/slips/{id}/abandon` also
   ends it on a NON-terminal slip; on an already-terminal one it is a deliberate no-op and
   clears nothing.
-- **Deploy order still holds.** A client that sends `if_status`, or reads `released` off
-  `/release`, before this API is deployed gets a 422, a 404, or a 204 with no body; for a
-  claim that means nothing dispatched. API to both environments first, always.
+- **Deploy order: API first, with one exception for this change.** A client that sends
+  `if_status`, or reads `released` off `/release`, before this API is deployed gets a 422, a
+  404, or a 204 with no body; for a claim that means nothing dispatched. The exception is
+  pushhookparser#55, which deploys **ahead** of this API, because the two orders are not
+  equivalent for the rerunner. The new rerunner against the old API gets a 422 before the
+  handler runs, so nothing is written, and it reports the refusal on the PR. The old rerunner
+  against this API takes the claim, then rejects the 200 (it expects 204) and dispatches
+  nothing, leaving a claim with no run behind it. Every other consumer, including the Slippy
+  CLI (#28), deploys after the API as usual.
 - **The API refuses to start against a database behind migration v6.** `claimed_from` is
   selected by every read path in the library, so an API pod ahead of its database would
   answer every slip operation with Postgres 42703. `run()` calls `ProbeSchema` right after

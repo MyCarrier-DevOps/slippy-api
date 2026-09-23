@@ -858,6 +858,8 @@ func TestClaimSlip_PreconditionFailedCoversTheInFlightCase(t *testing.T) {
 	assert.Contains(t, msg, "not in if_status", "the mismatch cause")
 	assert.Contains(t, msg, "if_status was omitted and the run has work in flight", "the in-flight cause")
 	assert.NotContains(t, msg, "re-read", "a run in flight is not a stale read")
+	assert.Contains(t, msg, "a step or component is in flight at status failed",
+		"the library's reason rides along as the error detail, naming which cause fired")
 }
 
 // The idempotent repeat: a claim was already held, the store wrote nothing, and that is a

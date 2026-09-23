@@ -896,10 +896,14 @@ func mapWriteError(err error) error {
 		// Nothing was written. Either the slip's CURRENT status was outside if_status (or it has
 		// no status), or if_status was omitted and a step or component of the run is in flight —
 		// an omitted if_status never adopts a running run; name its status to do so deliberately.
+		// The library's own error rides along as the error detail: it says which of those
+		// causes fired, including a slip with no status at all, which is a data defect rather
+		// than a status the caller declines to adopt (pushhookparser#55 review, bcarlock).
 		return huma.NewError(
 			http.StatusConflict,
 			"claim precondition failed; nothing written — the slip's current status is not in "+
 				"if_status, or if_status was omitted and the run has work in flight",
+			err,
 		)
 	case errors.Is(err, slippy.ErrNotClaimed):
 		// Normal outcome when a terminal status write ended the claim before the release ran.
