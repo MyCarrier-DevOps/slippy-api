@@ -222,6 +222,23 @@ func (s *asyncInsertSlipStore) ReleaseClaim(
 }
 
 // ProbeSchema joined slippy.SlipStore in DEVOPS-367; this double has no schema to check.
+// ResetSlipInPlace joined slippy.SlipStore in goLibMyCarrier v1.4.0 (DEVOPS-367). This double
+// models ClickHouseStore's surface — its ClaimSlip and ReleaseClaim already return
+// ErrClaimUnsupported, as ClickHouse does — and ClickHouseStore.ResetSlipInPlace returns
+// ErrResetUnsupported, so this does too.
+//
+// That choice preserves what this store exists to measure. On ErrResetUnsupported the push path
+// falls back to a plain Create, which this store records and COUNTS; a reset that instead
+// succeeded silently here would skip Create, and a phantom slip the dedup lock failed to prevent
+// could go uncounted.
+func (s *asyncInsertSlipStore) ResetSlipInPlace(_ context.Context, slip *slippy.Slip) error {
+	id := ""
+	if slip != nil {
+		id = slip.CorrelationID
+	}
+	return fmt.Errorf("ResetSlipInPlace(%s): %w", id, slippy.ErrResetUnsupported)
+}
+
 func (s *asyncInsertSlipStore) ProbeSchema(_ context.Context) error {
 	return nil
 }

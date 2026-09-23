@@ -851,43 +851,36 @@ func TestSlipWriterAdapter_ReleaseClaim_ReleasedCarriesStatus(t *testing.T) {
 	assert.Equal(t, slippy.SlipStatusFailed, out.Status)
 }
 
-// claimMarkerStep must never collide with a configured pipeline step: an
-// aggregate or phase-duration reader would otherwise pick the marker up as a
-// real step event.
-func TestClaimMarkerStep_IsNotAPipelineStep(t *testing.T) {
-	cfg, err := slippy.ParsePipelineConfig([]byte(testPipelineConfigJSON))
-	require.NoError(t, err)
-	// GetStep, not IsAggregateStep: IsAggregateStep is false for every NON-aggregate
-	// step too, so it cannot detect a collision with one. This only proves the marker
-	// is absent from the SYNTHETIC config above — the live config is a Vault document,
-	// so the real detector is ClaimMarkerStepCollision at boot (see main.go).
-	assert.Nil(t, cfg.GetStep(claimMarkerStep),
-		"claimMarkerStep %q must not name a configured pipeline step", claimMarkerStep)
-	assert.Empty(t, ClaimMarkerStepCollision(cfg))
-	assert.NotEqual(t, "push_parsed", claimMarkerStep,
-		"the library's own reset marker owns push_parsed; an adoption is not a push")
-	assert.Nil(
-		t,
-		cfg.GetStep(releaseMarkerStep),
-		"releaseMarkerStep %q must not name a configured step",
-		releaseMarkerStep,
-	)
-	assert.NotEqual(t, claimMarkerStep, releaseMarkerStep)
-}
-
-// The boot-time detector must fire when the loaded config really does define a step
-// with the marker's name — that is the one place the invariant can be checked.
-func TestClaimMarkerStepCollision_DetectsCollidingConfig(t *testing.T) {
-	cfg, err := slippy.ParsePipelineConfig([]byte(`{
+// The claim and release markers must never be configurable as pipeline steps: the library's
+// reconstructStepTimingFromHistory backfills a configured step's StartedAt from the first
+// `running` history entry naming it, so a collision would serve the claim timestamp as that
+// step's start, and pushhookparser derives who holds a claim by scanning for these names.
+//
+// This service used to guard it with a boot-time warning, because the live config is a Vault
+// document this repository cannot see. Since goLibMyCarrier v1.4.0 the LIBRARY rejects both names
+// at parse time, which is strictly stronger — and which made that detector unreachable, so it
+// was removed. This test pins the library's guarantee here, so a future loosening fails this
+// service's suite instead of silently removing the protection it used to provide itself.
+func TestPipelineConfig_RejectsMarkerStepNames(t *testing.T) {
+	for _, marker := range []string{slippy.ClaimMarkerStep, slippy.ReleaseMarkerStep} {
+		t.Run(marker, func(t *testing.T) {
+			_, err := slippy.ParsePipelineConfig([]byte(`{
 	"name": "colliding",
 	"steps": [
 		{"name": "push_parsed"},
-		{"name": "` + claimMarkerStep + `"}
+		{"name": "` + marker + `"}
 	]
 }`))
+			require.Error(t, err, "a config naming a step %q must be refused at parse", marker)
+			assert.ErrorIs(t, err, slippy.ErrReservedStepName)
+		})
+	}
+
+	// And the synthetic config this package's tests run against is not one of them.
+	cfg, err := slippy.ParsePipelineConfig([]byte(testPipelineConfigJSON))
 	require.NoError(t, err)
-	assert.Equal(t, claimMarkerStep, ClaimMarkerStepCollision(cfg))
-	assert.Empty(t, ClaimMarkerStepCollision(nil), "a nil config cannot collide")
+	assert.Nil(t, cfg.GetStep(slippy.ClaimMarkerStep))
+	assert.Nil(t, cfg.GetStep(slippy.ReleaseMarkerStep))
 }
 
 func TestIsLockTimeout(t *testing.T) {

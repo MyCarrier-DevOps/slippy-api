@@ -352,38 +352,15 @@ func (a *SlipWriterAdapter) AbandonSlip(ctx context.Context, correlationID, supe
 	)
 }
 
-// claimMarkerStep is the state-history step name for an adoption marker.
-// Deliberately NOT one of the configured pipeline steps: the library's
-// reconstructStepTimingFromHistory backfills a configured step's StartedAt from
-// the first `running` history entry naming that step, so a collision would serve
-// the claim timestamp as that step's start wherever the real one is nil (derived
-// per Load, never persisted — a wrong number, not corruption).
+// The claim and release markers (slippy.ClaimMarkerStep, slippy.ReleaseMarkerStep) must not share
+// a name with a configured pipeline step. This package used to check that at boot, with a
+// warning, because the live config is a Vault document this repository cannot see.
 //
-// This cannot be proven in this repository: the live pipeline config is a Vault
-// document loaded at runtime (SLIPPY_PIPELINE_CONFIG), and the JSON configs
-// shipped with the library are examples. ClaimMarkerStepCollision is the runtime
-// detector; main.go warns at boot if it fires.
-const claimMarkerStep = slippy.ClaimMarkerStep
-
-// releaseMarkerStep is the state-history step name for a release marker (DEVOPS-367).
-const releaseMarkerStep = slippy.ReleaseMarkerStep
-
-// ClaimMarkerStepCollision returns the adoption marker's step name if the loaded
-// pipeline config defines a step by that name, and "" otherwise. It exists so
-// main.go can warn at boot — the only point at which the real config is in hand.
-// A warning rather than a boot failure: the consequence of a collision is a wrong
-// derived StartedAt on one step, which does not justify refusing to serve.
-func ClaimMarkerStepCollision(cfg *slippy.PipelineConfig) string {
-	if cfg == nil {
-		return ""
-	}
-	for _, step := range []string{claimMarkerStep, releaseMarkerStep} {
-		if cfg.GetStep(step) != nil {
-			return step
-		}
-	}
-	return ""
-}
+// Since goLibMyCarrier v1.4.0 (DEVOPS-367) the LIBRARY enforces it: slippy.ParsePipelineConfig
+// rejects either name with slippy.ErrReservedStepName, so LoadPipelineConfig fails and main.go
+// refuses to boot on such a config. The boot-time detector could no longer fire and was removed.
+// TestPipelineConfig_RejectsMarkerStepNames pins the library's guarantee here, so this service
+// notices if it is ever loosened rather than silently losing the protection.
 
 // ClaimSlip records that a run is in flight against a slip. Since DEVOPS-367 the library
 // performs the whole claim as ONE store transaction — lock, expected-status precondition,

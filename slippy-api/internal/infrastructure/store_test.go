@@ -36,6 +36,7 @@ type mockSlipStore struct {
 	claimSlipFn             func(ctx context.Context, id string, expected []slippy.SlipStatus, claimedBy, reason string) (slippy.ClaimOutcome, error)
 	releaseClaimFn          func(ctx context.Context, id, releasedBy, reason string) (slippy.ReleaseOutcome, error)
 	probeSchemaFn           func(ctx context.Context) error
+	resetSlipInPlaceFn      func(ctx context.Context, slip *slippy.Slip) error
 	pingFn                  func(ctx context.Context) error
 }
 
@@ -187,6 +188,18 @@ func (m *mockSlipStore) ReleaseClaim(
 func (m *mockSlipStore) ProbeSchema(ctx context.Context) error {
 	if m.probeSchemaFn != nil {
 		return m.probeSchemaFn(ctx)
+	}
+	return nil
+}
+
+// ResetSlipInPlace joined slippy.SlipStore in goLibMyCarrier v1.4.0 (DEVOPS-367): the push
+// path's in-place reset, decided by the store under the row lock rather than on the push's
+// unlocked snapshot. This double stores nothing, so it cannot make that decision itself; by
+// default the reset succeeds, matching Create's default here. A test exercising the refusal
+// injects one that returns an error wrapping slippy.ErrSlipClaimed.
+func (m *mockSlipStore) ResetSlipInPlace(ctx context.Context, slip *slippy.Slip) error {
+	if m.resetSlipInPlaceFn != nil {
+		return m.resetSlipInPlaceFn(ctx, slip)
 	}
 	return nil
 }

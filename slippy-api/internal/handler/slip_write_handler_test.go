@@ -1435,3 +1435,19 @@ func TestCompleteStep_AllowsRecoveryFromFailed(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 	assert.True(t, called, "writer must be called for failed → completed recovery")
 }
+
+// goLibMyCarrier v1.4.0 refuses a caller-supplied step write under a name the library reserves
+// for the claim's audit record (slip_claimed, slip_released), and a step name here is a raw path
+// parameter with no pattern of its own. That refusal is the caller's mistake, so it must surface
+// as a 4xx: it arrives wrapped in a *slippy.StepError, which mapWriteError maps to 422. Pinned so
+// a change to that wrapping cannot silently turn a bad step name into a 500.
+func TestMapWriteError_ReservedStepNameIsAClientError(t *testing.T) {
+	inner := fmt.Errorf("step %q is a state_history marker the library owns: %w",
+		slippy.ReleaseMarkerStep, slippy.ErrReservedStepName)
+	err := slippy.NewStepError("update", "c1", slippy.ReleaseMarkerStep, "", inner)
+	require.ErrorIs(t, err, slippy.ErrReservedStepName, "the sentinel must survive the wrapping")
+
+	var se huma.StatusError
+	require.ErrorAs(t, mapWriteError(err), &se)
+	assert.Equal(t, http.StatusUnprocessableEntity, se.GetStatus())
+}

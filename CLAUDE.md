@@ -189,6 +189,30 @@ Once v5 is applied, `Create` can return `ErrDuplicateSlip` for a real concurrent
 insert, which arms `handleDuplicateSlipBackstop` in the library for the first time. slippy-api
 needs no change for that: it surfaces the library's result as it already does.
 
+**v1.4.0 (DEVOPS-367) — this bump applies Postgres migration v6 and changes boot behaviour.**
+Every goLibMyCarrier module releases at one shared version, so bump all of them together in
+**both** `slippy-api/go.mod` and `slippy-migrator/go.mod`; bumping `slippy` alone leaves
+`postgresmigrator` at its old version, and DEVOPS-344's reachable `ErrMigrationFailed` lives there.
+
+- **Migration v6 (`claimed_from`) is applied by this bump**, the same way v1.3.102 applied v5:
+  `slippy-migrator`'s default `target-version` is latest. Every read now selects
+  `claimed_from`, so the migrator must have applied v6 before any API pod on the new library
+  serves — the startup `ProbeSchema` check refuses to boot otherwise, but the ordering is the
+  operator's. v6's down refuses while any slip holds a claim.
+- **`SlipStore` gained `ResetSlipInPlace`.** `mockSlipStore` injects it like its other methods.
+  `asyncInsertSlipStore` returns `ErrResetUnsupported`, because it models ClickHouseStore's
+  surface and ClickHouse returns that — on it the push path falls back to a plain `Create`,
+  which that store counts, so a phantom slip cannot hide inside a silent "successful" reset.
+- **A config naming a step `slip_claimed` or `slip_released` no longer boots.** The library now
+  rejects both at parse with `ErrReservedStepName`, so `LoadPipelineConfig` fails where it used
+  to succeed with a boot-time warning. That reverses this service's earlier choice of a warning
+  over a boot failure; no shipped config uses either name. The warning's detector,
+  `ClaimMarkerStepCollision`, could no longer fire and was removed;
+  `TestPipelineConfig_RejectsMarkerStepNames` pins the library's guarantee instead.
+- **A step write under a reserved name returns 422**, not 500: the library refuses it inside
+  the store, `UpdateStepWithStatus` wraps that in a `*slippy.StepError`, and `mapWriteError`
+  maps any `StepError` to 422. `TestMapWriteError_ReservedStepNameIsAClientError` pins it.
+
 ### Behavioral Notes (v1.3.77+)
 
 - `checkPipelineCompletion` short-circuits on `Completed`, `Abandoned`, `Promoted` (was `Completed` only before v1.3.77). Post-`PromoteSlip`/`AbandonSlip` terminal step events no longer overwrite `slip.status`.
