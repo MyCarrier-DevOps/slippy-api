@@ -206,8 +206,9 @@ type ClaimSlipInput struct {
 		ClaimedBy string `json:"claimed_by" minLength:"1" maxLength:"128" pattern:"^[A-Za-z0-9._:/-]+$" doc:"Adopter that is taking over this slip (e.g. \"rerunner\"); recorded as the history entry's actor"`
 		Reason    string `json:"reason,omitempty" maxLength:"512" doc:"Optional scope of the adopted work (e.g. \"retrigger builds and unit tests\")"`
 		// Optional compare-and-set: claim only if the slip is currently in one of these
-		// statuses, enforced in the store's transaction. Omit to claim out of any status.
-		// A mismatch is 409 with nothing written (DEVOPS-367).
+		// statuses, enforced in the store's transaction. Omit to claim out of any status except
+		// one whose run has a step or component in flight. A refusal is 409 with nothing
+		// written (DEVOPS-367).
 		IfStatus []string `json:"if_status,omitempty" maxItems:"8" uniqueItems:"true" enum:"pending,in_progress,failed,compensating,completed,compensated,abandoned,promoted" doc:"Claim only if the slip's CURRENT status is one of these, whether or not a claim is already held; omit to claim out of any status except one whose run has a step or component in flight — name the status here to adopt a running run deliberately"`
 	}
 }
@@ -892,12 +893,13 @@ func mapWriteError(err error) error {
 			"step already in terminal state; transition rejected (I5 freshness gate)",
 		)
 	case errors.Is(err, slippy.ErrClaimPreconditionFailed):
-		// The slip's status at write time was not one the caller agreed to claim out of.
-		// Nothing was written; the caller decided on a stale read and must re-read before
-		// deciding again — a blind retry gets the same answer.
+		// Nothing was written. Either the slip's CURRENT status was outside if_status (or it has
+		// no status), or if_status was omitted and a step or component of the run is in flight —
+		// an omitted if_status never adopts a running run; name its status to do so deliberately.
 		return huma.NewError(
 			http.StatusConflict,
-			"slip status did not match if_status; nothing written — re-read the slip before claiming",
+			"claim precondition failed; nothing written — the slip's current status is not in "+
+				"if_status, or if_status was omitted and the run has work in flight",
 		)
 	case errors.Is(err, slippy.ErrNotClaimed):
 		// Normal outcome when a terminal status write ended the claim before the release ran.

@@ -781,6 +781,85 @@ func TestClaimSlip_Success(t *testing.T) {
 	assert.Equal(t, "retrigger builds and unit tests", gotReason)
 }
 
+// TestClaimSlip_ForwardsIfStatusToTheWriter pins the handler step that turns the request's
+// if_status into what the writer receives. It is the compare-and-set DEVOPS-367 rests on: were
+// the list dropped, or passed as nil, DecideClaim would skip the mismatch check and admit a
+// claim out of a status the caller never agreed to (PR #59 review, bcarlock). Order is kept,
+// and an omitted field arrives empty, which is what "no precondition" means to the store.
+func TestClaimSlip_ForwardsIfStatusToTheWriter(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want []slippy.SlipStatus
+	}{
+		{
+			name: "listed statuses arrive in order",
+			body: `{"claimed_by":"pushhookparser/rerunner","if_status":["failed","completed"]}`,
+			want: []slippy.SlipStatus{slippy.SlipStatusFailed, slippy.SlipStatusCompleted},
+		},
+		{
+			name: "an omitted if_status arrives empty",
+			body: `{"claimed_by":"pushhookparser/rerunner"}`,
+			want: []slippy.SlipStatus{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []slippy.SlipStatus
+			called := false
+			w := &mockWriter{
+				claimSlipFn: func(
+					_ context.Context, _ string, ifStatus []slippy.SlipStatus, _, _ string,
+				) (domain.ClaimOutcome, error) {
+					called = true
+					got = ifStatus
+					return domain.ClaimOutcome{Claimed: true, Prior: slippy.SlipStatusFailed}, nil
+				},
+			}
+			handler := setupWriteTestAPI(w)
+
+			req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/claim", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusOK, rec.Code)
+			require.True(t, called, "the writer must be called")
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestClaimSlip_PreconditionFailedCoversTheInFlightCase pins the 409's message.
+// ErrClaimPreconditionFailed has three causes in goLibMyCarrier's DecideClaim: the slip has no
+// status, its current status is outside a non-empty if_status, or if_status was omitted while a
+// step or component is in flight. The message must not describe only the mismatch: in the
+// in-flight case nothing was sent to mismatch and the status has not moved, so "re-read the slip"
+// sends the caller the wrong way.
+func TestClaimSlip_PreconditionFailedCoversTheInFlightCase(t *testing.T) {
+	w := &mockWriter{
+		claimSlipFn: func(_ context.Context, _ string, _ []slippy.SlipStatus, _, _ string) (domain.ClaimOutcome, error) {
+			return domain.ClaimOutcome{}, fmt.Errorf(
+				"claim abc-123: a step or component is in flight at status failed: %w",
+				slippy.ErrClaimPreconditionFailed)
+		},
+	}
+	handler := setupWriteTestAPI(w)
+
+	req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/claim",
+		strings.NewReader(`{"claimed_by":"ad-hoc"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+	msg := rec.Body.String()
+	assert.Contains(t, msg, "nothing written")
+	assert.Contains(t, msg, "not in if_status", "the mismatch cause")
+	assert.Contains(t, msg, "if_status was omitted and the run has work in flight", "the in-flight cause")
+	assert.NotContains(t, msg, "re-read", "a run in flight is not a stale read")
+}
+
 // The idempotent repeat: a claim was already held, the store wrote nothing, and that is a
 // SUCCESS with claimed=false — not a 409, and not something a caller may read as "unclaimed".
 // Every pre-job of a run after the first takes this arm.
@@ -939,6 +1018,29 @@ func TestClaimSlip_RejectsBadInput(t *testing.T) {
 			"unknown body field",
 			"/slips/abc-123/claim",
 			`{"claimed_by":"rerunner","claimed_at":"now"}`,
+			http.StatusUnprocessableEntity,
+		},
+		// if_status is validated by the schema before the writer is touched, so a malformed
+		// precondition can never reach the store as a weaker one (PR #59 review, bcarlock).
+		{
+			"if_status value outside the enum",
+			"/slips/abc-123/claim",
+			`{"claimed_by":"rerunner","if_status":["failed","bogus"]}`,
+			http.StatusUnprocessableEntity,
+		},
+		{
+			"if_status duplicate",
+			"/slips/abc-123/claim",
+			`{"claimed_by":"rerunner","if_status":["failed","failed"]}`,
+			http.StatusUnprocessableEntity,
+		},
+		// Nine items. With eight statuses in the enum and uniqueItems set, a ninth item is
+		// always a repeat too, so this pins that such a list is refused, whichever rule fires.
+		{
+			"if_status more than 8 items",
+			"/slips/abc-123/claim",
+			`{"claimed_by":"rerunner","if_status":["pending","in_progress","failed","compensating",` +
+				`"completed","compensated","abandoned","promoted","failed"]}`,
 			http.StatusUnprocessableEntity,
 		},
 		// Path validation runs before the writer is touched.
