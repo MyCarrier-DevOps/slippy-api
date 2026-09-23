@@ -157,43 +157,115 @@ type SlipWriter interface {
 	AbandonSlip(ctx context.Context, correlationID, supersededBy string) error
 
 	// ClaimSlip records that an adopter now has work in flight against an
-	// existing slip: it appends an adoption marker to the slip's state history
-	// and sets the slip's status to in_progress.
+	// existing slip: it sets the slip's claim flag (claimed_from) and appends an
+	// adoption marker to the slip's state history. The claim never writes the
+	// slip's status (DEVOPS-367).
 	//
 	// Any caller that adopts a correlation ID it did not create must claim it
 	// BEFORE dispatching work. An ended slip (failed, completed, abandoned,
 	// promoted, compensated) stays repave-eligible, so a same-commit push in the
 	// window between adoption and the adopter's first step write deletes the row
 	// out from under the in-flight work and every later write 404s. Claiming
-	// closes that window: in_progress is not repaveable, so the push dedups onto
-	// the adopter's slip instead (DEVOPS-285).
+	// closes that window: a claimed slip is not repaveable, so the push dedups
+	// onto the adopter's slip instead (DEVOPS-285).
 	//
-	// A nil result means the claim is committed. An error means the claim is NOT
-	// CONFIRMED — it does NOT mean the slip is unclaimed: each of the two writes runs
-	// on a cancellation-detached context (instrumentedWrite/writeContext), so a caller
-	// that times out can see an error against a slip already set in_progress. A caller
-	// that gets an error must still dispatch nothing; the recovery is to claim again.
+	// A nil error means the claim is committed, and ClaimOutcome says which arm did it:
+	// Claimed=true when THIS call recorded it, Claimed=false when one was already held and
+	// nothing was written. Both mean the slip is claimed on return. A caller that must not
+	// duplicate work reads InFlight rather than Claimed — see ClaimOutcome for why Claimed
+	// cannot answer that on its own. An error means the claim is NOT
+	// CONFIRMED — it does NOT mean the slip is unclaimed: the claim commits as one
+	// store transaction on a cancellation-detached context (instrumentedWrite/
+	// writeContext), so a caller that times out can see an error against a slip that
+	// is already claimed. A caller that gets an error must still dispatch nothing;
+	// the recovery is to claim again.
 	//
-	// A repeat claim on an already-in_progress slip is therefore deliberately a NO-OP,
-	// never a 409: re-claiming is the recovery, and a deterministic rejection would
-	// burn a consumer's whole retry budget and DLQ the message. Do not add an
-	// already-claimed rejection. The no-op de-duplicates SEQUENTIAL retries only — the
-	// Load holds no lock across the writes — so this grants no exclusivity, and this
+	// A repeat claim on a slip whose claim is still held is a NO-OP — ClaimOutcome{Claimed:
+	// false}, nothing written — FOR AS LONG AS ifStatus still names the slip's CURRENT status.
+	// That qualifier is the whole of DEVOPS-367's fix and is not a technicality: once the
+	// status has moved off what the caller named, the repeat is a 409 with nothing written,
+	// exactly as a first claim would be. The rerunner's retry is the case it is tuned for —
+	// it succeeds while nothing has been dispatched, and is refused once a POST-JOB has
+	// reported (a terminal step write, the only one that reconciles the slip's status),
+	// because the dispatch it is retrying already happened. Between those two lies the window
+	// InFlight covers: a dispatched run whose pre-job has started a step has not moved the
+	// status, so ifStatus still agrees and the repeat arm answers. Read InFlight there.
+	//
+	// Inside that window re-claiming is the recovery, and the no-op is what makes it safe: a
+	// deterministic rejection of every repeat would burn a consumer's whole retry budget and
+	// DLQ the message. Do not add an ALREADY-CLAIMED rejection — the 409 here is a status
+	// mismatch, never "someone else holds it". The claim records no owner, so a second
+	// adopter's claim takes the same no-op arm; this grants no exclusivity, and this
 	// interface deliberately does not promise any.
 	//
-	// If an adopter cannot dispatch after a committed claim, the slip joins the accepted
-	// zombie class documented at PostgresStore.LoadByCommit ("no timeout or escape
-	// hatch ... operator-recoverable"); it is NOT self-healing for a same-commit push.
-	// Do NOT "release" it with AbandonSlip: abandoned loses the `failed`
+	// If an adopter cannot dispatch after a committed claim, end the claim with
+	// ReleaseClaim. Do NOT "release" it with AbandonSlip: abandoned loses the `failed`
 	// empty-run-guard carve-out (see emptyRunGuardApplies) and suppresses the next
-	// push's unit tests. Escalate to an operator instead.
+	// push's unit tests. A claim left held is not self-healing for a same-commit push
+	// — the slip joins the accepted zombie class documented at
+	// PostgresStore.LoadByCommit ("no timeout or escape hatch ...
+	// operator-recoverable") — so escalate to an operator if it cannot be released.
 	//
-	// Claiming also moves a `failed` slip out of consumer-side stranded-slip protection
-	// that keys on `failed` (pushhookparser's AbandonStrandedSlip carve-out), so an
-	// adopter is exposed to a concurrent force-push or branch delete for the life of
-	// its run. Adopters' cleanup paths must learn to recognise a claimed slip.
+	// Because the claim never writes status, a `failed` slip stays `failed` while it is
+	// claimed, so consumer-side stranded-slip cleanup that keys on `failed`
+	// (pushhookparser's AbandonStrandedSlip carve-out) still matches it. Those paths must
+	// recognise a claimed slip — but the exemption they owe it lasts only while the run has
+	// WORK IN FLIGHT, not for the life of the claim. pushhookparser's cleanup was narrowed to
+	// exactly that (DEVOPS-367): a claimed slip with a step or component running or held is
+	// left alone; a claimed slip with nothing in flight is reaped like an unclaimed one,
+	// because a claim taken by a pre-job whose workflow was never dispatched has nothing that
+	// will ever release it.
 	//
 	// claimedBy names the adopter (it becomes the history entry's actor); reason
 	// is optional free text describing the scope of the adopted work.
-	ClaimSlip(ctx context.Context, correlationID, claimedBy, reason string) error
+	// ifStatus bounds which statuses may be claimed out of, enforced by the store in the same
+	// transaction as the write. It is a compare-and-set on the slip's CURRENT status, whether
+	// or not a claim is already held — the idempotent repeat sits behind that check, not in
+	// front of it. nil means any status EXCEPT one whose run has a step or component IN FLIGHT
+	// (running or held); a caller that means to adopt a running run names its status in
+	// ifStatus. That refusal reads the step and aggregate columns rather than the status NAME,
+	// so a pending slip with a step running is refused and an in_progress slip with nothing
+	// running is claimable (DEVOPS-367, PR #87 finding j3). A retry after a lost response
+	// therefore still claims when nothing was dispatched — the status has not moved — and is
+	// refused once a post-job has reported, because the dispatch it is retrying already
+	// happened.
+	ClaimSlip(
+		ctx context.Context, correlationID string, ifStatus []slippy.SlipStatus, claimedBy, reason string,
+	) (ClaimOutcome, error)
+
+	// ReleaseClaim ends a claim once nothing of the run is in flight. While any step or
+	// component is running or held the store KEEPS the claim and writes nothing, reporting
+	// Released=false with no error — every post-job releases on exit and the last one clears,
+	// so all but that last one take this arm. Never writes status. slippy.ErrNotClaimed when
+	// there is no claim (DEVOPS-367).
+	ReleaseClaim(ctx context.Context, correlationID, releasedBy, reason string) (ReleaseOutcome, error)
+}
+
+// ClaimOutcome is what a claim did. Claimed=true means THIS call recorded the claim;
+// Claimed=false means one was already held and nothing was written — the idempotent repeat,
+// which is the normal outcome for every pre-job of a run after the first. Prior is the status
+// the claim was taken out of: the current status on a fresh claim, the recorded claimed_from
+// on a repeat. InFlight reports whether a step or component of the run was running or held at
+// decision time, read by the store from the same locked row as the status and the claim.
+//
+// InFlight is the field a caller that must not duplicate work branches on, NOT Claimed. A step
+// write does not move the slip's status — StartStep writes running, which is not terminal, so
+// the pipeline-completion reconcile is never reached — so a slip dispatched out of failed still
+// reads failed until its first post-job. A second adopter arriving in that window passes the
+// same if_status and takes the same idempotent repeat arm as a retry whose response was lost
+// before anything dispatched; on Claimed alone the two are indistinguishable (DEVOPS-367,
+// PR #87 seventh review).
+type ClaimOutcome struct {
+	Claimed  bool
+	Prior    slippy.SlipStatus
+	InFlight bool
+}
+
+// ReleaseOutcome is what a release did. Released=false with a nil error means the claim is
+// held because the run still has work in flight and nothing was written. Status is the slip's
+// status at decision time on BOTH arms — the store reads it under the same lock it decides
+// on, and a release never changes it.
+type ReleaseOutcome struct {
+	Released bool
+	Status   slippy.SlipStatus
 }

@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
+
 	"github.com/alicebob/miniredis/v2"
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
@@ -104,9 +106,22 @@ func (s *stubSlipWriter) SkipStep(_ context.Context, _, _, _, _ string) error  {
 func (s *stubSlipWriter) SetComponentImageTag(_ context.Context, _, _, _ string) error {
 	return nil
 }
-func (s *stubSlipWriter) PromoteSlip(_ context.Context, _, _ string) error  { return nil }
-func (s *stubSlipWriter) AbandonSlip(_ context.Context, _, _ string) error  { return nil }
-func (s *stubSlipWriter) ClaimSlip(_ context.Context, _, _, _ string) error { return nil }
+func (s *stubSlipWriter) PromoteSlip(_ context.Context, _, _ string) error { return nil }
+func (s *stubSlipWriter) AbandonSlip(_ context.Context, _, _ string) error { return nil }
+func (s *stubSlipWriter) ClaimSlip(
+	_ context.Context,
+	_ string,
+	_ []slippy.SlipStatus,
+	_, _ string,
+) (domain.ClaimOutcome, error) {
+	return domain.ClaimOutcome{Claimed: true}, nil
+}
+func (s *stubSlipWriter) ReleaseClaim(
+	_ context.Context,
+	_, _, _ string,
+) (domain.ReleaseOutcome, error) {
+	return domain.ReleaseOutcome{Released: true}, nil
+}
 
 type stubCIJobLogReader struct{}
 

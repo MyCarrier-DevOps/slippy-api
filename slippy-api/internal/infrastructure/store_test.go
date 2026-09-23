@@ -33,6 +33,10 @@ type mockSlipStore struct {
 	appendHistoryFn         func(ctx context.Context, id string, entry slippy.StateHistoryEntry) error
 	setComponentImageTagFn  func(ctx context.Context, id, step, comp, tag string) error
 	repaveFn                func(ctx context.Context, oldID string, newSlip *slippy.Slip, parent *slippy.AncestryEntry) error
+	claimSlipFn             func(ctx context.Context, id string, expected []slippy.SlipStatus, claimedBy, reason string) (slippy.ClaimOutcome, error)
+	releaseClaimFn          func(ctx context.Context, id, releasedBy, reason string) (slippy.ReleaseOutcome, error)
+	probeSchemaFn           func(ctx context.Context) error
+	resetSlipInPlaceFn      func(ctx context.Context, slip *slippy.Slip) error
 	pingFn                  func(ctx context.Context) error
 }
 
@@ -154,6 +158,48 @@ func (m *mockSlipStore) UpdateSlipStatus(ctx context.Context, id string, status 
 func (m *mockSlipStore) AppendHistory(ctx context.Context, id string, entry slippy.StateHistoryEntry) error {
 	if m.appendHistoryFn != nil {
 		return m.appendHistoryFn(ctx, id, entry)
+	}
+	return nil
+}
+
+func (m *mockSlipStore) ClaimSlip(
+	ctx context.Context,
+	id string,
+	expected []slippy.SlipStatus,
+	claimedBy, reason string,
+) (slippy.ClaimOutcome, error) {
+	if m.claimSlipFn != nil {
+		return m.claimSlipFn(ctx, id, expected, claimedBy, reason)
+	}
+	return slippy.ClaimOutcome{}, nil
+}
+
+func (m *mockSlipStore) ReleaseClaim(
+	ctx context.Context, id, releasedBy, reason string,
+) (slippy.ReleaseOutcome, error) {
+	if m.releaseClaimFn != nil {
+		return m.releaseClaimFn(ctx, id, releasedBy, reason)
+	}
+	return slippy.ReleaseOutcome{}, nil
+}
+
+// ProbeSchema joined slippy.SlipStore in DEVOPS-367 (the readiness gate, reachable through
+// the interface consumers hold). The double has no schema, so it reports ready.
+func (m *mockSlipStore) ProbeSchema(ctx context.Context) error {
+	if m.probeSchemaFn != nil {
+		return m.probeSchemaFn(ctx)
+	}
+	return nil
+}
+
+// ResetSlipInPlace joined slippy.SlipStore in goLibMyCarrier v1.4.0 (DEVOPS-367): the push
+// path's in-place reset, decided by the store under the row lock rather than on the push's
+// unlocked snapshot. This double stores nothing, so it cannot make that decision itself; by
+// default the reset succeeds, matching Create's default here. A test exercising the refusal
+// injects one that returns an error wrapping slippy.ErrSlipClaimed.
+func (m *mockSlipStore) ResetSlipInPlace(ctx context.Context, slip *slippy.Slip) error {
+	if m.resetSlipInPlaceFn != nil {
+		return m.resetSlipInPlaceFn(ctx, slip)
 	}
 	return nil
 }

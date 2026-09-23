@@ -322,6 +322,26 @@
             "pattern": "^[A-Za-z0-9._:/-]+$",
             "type": "string"
           },
+          "if_status": {
+            "description": "Claim only if the slip's CURRENT status is one of these, whether or not a claim is already held; omit to claim out of any status except one whose run has a step or component in flight — name the status here to adopt a running run deliberately",
+            "items": {
+              "enum": [
+                "pending",
+                "in_progress",
+                "failed",
+                "compensating",
+                "completed",
+                "compensated",
+                "abandoned",
+                "promoted"
+              ],
+              "type": "string"
+            },
+            "maxItems": 8,
+            "nullable": true,
+            "type": "array",
+            "uniqueItems": true
+          },
           "reason": {
             "description": "Optional scope of the adopted work (e.g. \"retrigger builds and unit tests\")",
             "maxLength": 512,
@@ -330,6 +350,37 @@
         },
         "required": [
           "claimed_by"
+        ],
+        "type": "object"
+      },
+      "ClaimSlipOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/ClaimSlipOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "claimed": {
+            "description": "true when this call recorded the claim; false when a claim was already held and nothing was written — the slip is claimed either way",
+            "type": "boolean"
+          },
+          "in_flight": {
+            "description": "true when a step or component of the run was running or held at decision time, read under the same row lock as the claim; with claimed=false it means another run is executing against this slip and the caller must not dispatch",
+            "type": "boolean"
+          },
+          "prior": {
+            "description": "the status the claim was taken out of: the current status when this call claimed, the recorded one when a claim was already held",
+            "type": "string"
+          }
+        },
+        "required": [
+          "claimed",
+          "in_flight"
         ],
         "type": "object"
       },
@@ -931,6 +982,62 @@
         ],
         "type": "object"
       },
+      "ReleaseClaimInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/ReleaseClaimInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why the claimed work will not report (e.g. the terminal write that failed)",
+            "maxLength": 512,
+            "type": "string"
+          },
+          "released_by": {
+            "description": "Who is releasing the claim (e.g. \"slippy-cli/post-job\"); recorded as the history entry's actor",
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._:/-]+$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "released_by"
+        ],
+        "type": "object"
+      },
+      "ReleaseClaimOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/ReleaseClaimOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "released": {
+            "description": "true when the claim was cleared; false when the run still has a step or component in flight and the claim is kept — release again when that work reports, or let the terminal write end it",
+            "type": "boolean"
+          },
+          "status": {
+            "description": "the slip's status at decision time; a release never changes it",
+            "type": "string"
+          }
+        },
+        "required": [
+          "released"
+        ],
+        "type": "object"
+      },
       "SetImageTagInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -1009,6 +1116,9 @@
             "type": "array"
           },
           "branch": {
+            "type": "string"
+          },
+          "claimed_from": {
             "type": "string"
           },
           "commit_sha": {
@@ -2077,7 +2187,7 @@
     },
     "/slips/{correlationID}/claim": {
       "post": {
-        "description": "Records that the caller has work in flight against a slip it did not create: appends an adoption marker to the slip's state history and sets its status to in_progress. Adopters MUST call this before dispatching any workflow. An ended slip stays eligible to be replaced by a same-commit push, which deletes the row out from under in-flight work; a claimed slip is live, so such a push deduplicates onto it instead. A non-2xx response means the claim is not confirmed and the caller must dispatch nothing; it does not mean the slip is unclaimed, because the writes are not cancelled by a client timeout. Claiming again is the recovery: a repeat claim on a slip that is already in_progress is a no-op, never a conflict. Claiming a failed slip also removes it from consumer-side stranded-slip protection that keys on failed, so the adopter is exposed to a concurrent force-push or branch delete for the life of its run.",
+        "description": "Records that the caller has work in flight against a slip it did not create: sets the slip's claim flag and appends an adoption marker to its state history. The claim never changes the slip's status. Adopters MUST call this before dispatching any workflow. An unclaimed ended slip (failed, completed, abandoned, promoted, compensated) is eligible to be replaced by a same-commit push, which deletes the row out from under in-flight work; a claimed slip is refused by that repave, so such a push deduplicates onto it instead. A non-2xx response means the claim is not confirmed and the caller must dispatch nothing; it does not mean the slip is unclaimed, because the write is not cancelled by a client timeout. if_status is a COMPARE-AND-SET ON THE SLIP'S CURRENT STATUS, whether or not a claim is already held; a mismatch is 409 with nothing written. Claiming again is the recovery, and a repeat claim whose if_status still matches the current status is a no-op rather than a conflict: it answers 200 with claimed=false, meaning a claim was already held and this call wrote nothing. So a retry after a lost response claims when nothing was dispatched — the status has not moved — and is refused once a POST-JOB has reported, because the dispatch being retried already happened. BRANCH ON in_flight, NOT ON claimed: a pre-job's step write does not move the slip's status, so a run dispatched out of failed still reads failed until its first post-job, and a second adopter in that window gets the same claimed=false as a lost-response retry. claimed=false with in_flight=true means another run is executing against this slip and the caller MUST NOT dispatch; claimed=false with in_flight=false means the held claim has no running work behind it, which is the window where dispatching is the recovery. omitting if_status claims out of any status EXCEPT one whose run has a step or component in flight. A claim ends when the run releases it, or when a terminal status write ends it.",
         "operationId": "claim-slip",
         "parameters": [
           {
@@ -2102,8 +2212,15 @@
           "required": true
         },
         "responses": {
-          "204": {
-            "description": "No Content"
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClaimSlipOutputBody"
+                }
+              }
+            },
+            "description": "OK"
           },
           "default": {
             "content": {
@@ -2283,6 +2400,65 @@
           }
         ],
         "summary": "Mark a routing slip as promoted to another branch",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/slips/{correlationID}/release": {
+      "post": {
+        "description": "Ends a prior claim: clears it and appends a release marker, never changing the slip's status. While any step or component of the run is still running or held the claim is kept — released=false with nothing written, and the slip's status reported either way — because every post-job releases on exit and the last one clears. A slip with no claim is 409; a terminal status write already ends the claim, so 409 after a completed run is the normal outcome (DEVOPS-367).",
+        "operationId": "release-claim",
+        "parameters": [
+          {
+            "description": "Routing slip correlation ID",
+            "in": "path",
+            "name": "correlationID",
+            "required": true,
+            "schema": {
+              "description": "Routing slip correlation ID",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReleaseClaimInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseClaimOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "writeApiKey": []
+          }
+        ],
+        "summary": "Release a claim once the claimant's run has nothing in flight",
         "tags": [
           "v1"
         ]
