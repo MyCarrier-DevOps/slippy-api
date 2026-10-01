@@ -23,8 +23,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse/clickhousetest"
-
 	ch "github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse"
 
 	"github.com/MyCarrier-DevOps/slippy-api/internal/config"
@@ -548,7 +546,7 @@ func TestVerifyRouteSecurity(t *testing.T) {
 		assert.Contains(t, err.Error(), "stale row")
 	})
 
-	// Degraded boot (ClickHouse unavailable) leaves five collaborators nil and their
+	// Degraded boot (ClickHouse unavailable) leaves four collaborators nil and their
 	// routes unregistered. main.go documents that as supported, so rows behind a gate
 	// that is down must not fail the boot — otherwise the guard converts a fallback into
 	// a crashloop, inverting the availability benefit it exists to provide.
@@ -576,8 +574,6 @@ func TestVerifyRouteSecurity(t *testing.T) {
 			ciJobLogReader:              &stubCIJobLogReader{},
 			automationTestResultsReader: &stubAutomationTestResultsReader{},
 			automationTestsReader:       nil, // drill-down routes not registered
-			chSession:                   mockClickHouseSession(),
-			slipDatabase:                "slippy",
 		})
 		require.NoError(t, err,
 			"the parent-reader-only wiring is documented as supported and must still boot")
@@ -606,43 +602,42 @@ func TestVerifyRouteSecurity(t *testing.T) {
 		assert.Contains(t, err.Error(), "readerNobodyDeclared")
 	})
 
-	// The degraded shape buildHandler actually produces: ClickHouse-backed readers and
-	// the diagnostics handler nil, writes still wired.
+	// The degraded shape buildHandler actually produces: ClickHouse-backed readers nil,
+	// writes still wired.
 	t.Run("degraded ClickHouse boot is accepted", func(t *testing.T) {
 		cfg := &config.Config{APIKey: "test-key", WriteAPIKey: "write-key", Port: 8080}
 		h, err := buildHandler(handlerDeps{
 			cfg:    cfg,
 			reader: newStubSlipReader(),
 			writer: &stubSlipWriter{},
-			// ClickHouse-backed collaborators and the diagnostics handler stay nil.
+			// ClickHouse-backed collaborators stay nil.
 		})
 		require.NoError(t, err, "a ClickHouse outage must not stop the Postgres slip API from booting")
 		require.NotNil(t, h)
 	})
 
-	// The subtest above omits chSession entirely, which yields a genuinely nil interface and
-	// behaves correctly. run() does something different: it holds a *clickhouse.ClickhouseSession
-	// and assigns it into an interface-typed field. A nil *pointer* stored in an interface is
-	// NOT a nil interface, so that path read the gate as UP during an outage — registering and
-	// publishing a diagnostics route whose handler dereferences the nil session and kills the
-	// connection. The fixture and production disagreed about the one value that decides the gate.
-	t.Run("a failed ClickHouse connection leaves the diagnostics gate down", func(t *testing.T) {
+	// The subtest above leaves the ClickHouse collaborators out entirely, which yields
+	// genuinely nil interfaces. run() does something different: it holds a
+	// *clickhouse.ClickhouseSession and converts it into the interface the readers take. A nil
+	// *pointer* stored in an interface is NOT a nil interface, so without
+	// clickHouseSessionOrNil run()'s `chSession != nil` guard would read true during an outage
+	// and build all four readers over the nil session, putting their gates up.
+	//
+	// Both subtests compare with ==, not require.Nil: testify's Nil reflects through the
+	// interface and passes for a typed nil, which is exactly the value being guarded against.
+	t.Run("a failed ClickHouse connection yields a nil session interface", func(t *testing.T) {
 		var failed *ch.ClickhouseSession // exactly what run() holds when the dial fails
 
 		sess := clickHouseSessionOrNil(failed, errors.New("dial tcp: connection refused"))
-		require.Nil(t, sess, "a failed dial must produce a nil interface, not a typed nil")
-
-		gates := gateStatus(handlerDeps{chSession: sess})
-		assert.False(t, gates[gateDiagnostics],
-			"gate must read down, or the route is registered against a nil session")
+		assert.True(t, sess == nil, "a failed dial must produce a nil interface, not a typed nil")
 	})
 
-	// The same trap without an error: a nil session and nil error still must not gate up.
-	t.Run("a nil session with no error leaves the diagnostics gate down", func(t *testing.T) {
+	// The same trap without an error: a nil session and nil error still must not read as live.
+	t.Run("a nil session with no error yields a nil session interface", func(t *testing.T) {
 		var failed *ch.ClickhouseSession
 
-		gates := gateStatus(handlerDeps{chSession: clickHouseSessionOrNil(failed, nil)})
-		assert.False(t, gates[gateDiagnostics])
+		sess := clickHouseSessionOrNil(failed, nil)
+		assert.True(t, sess == nil, "a nil session must produce a nil interface, not a typed nil")
 	})
 }
 
@@ -668,31 +663,12 @@ func fetchOpenAPISpec(t *testing.T, h http.Handler) map[string]any {
 	return spec
 }
 
-// mockClickHouseSession returns a ClickHouse session whose only answer is
-// "the schema_version table does not exist".
-//
-// That is enough for the diagnostic handler to complete: clickhousemigrator's
-// GetSchemaVersion scans a count() first and short-circuits to version 0 when it is
-// zero, so one row satisfies the whole call and no second query is issued. A live
-// session is not needed to prove the route's auth behavior, only a non-nil one — the
-// handler dereferences session.Conn() as soon as a request clears auth.
-func mockClickHouseSession() ch.ClickhouseSessionInterface {
-	return &clickhousetest.MockSession{
-		ConnConn: &clickhousetest.MockConn{
-			QueryRowRow: &clickhousetest.MockRow{ScanData: []any{uint64(0)}},
-		},
-	}
-}
-
 // buildFullyWiredHandler builds the handler with every route-registering dependency
 // supplied, so the OpenAPI document covers every operation buildHandler can register.
 //
 // pipelineCfg is nil, which is not an omission: main.go registers the pipeline-config
 // and step-prerequisites routes unconditionally, so their operations appear in the
 // document either way. Only the handlers guarded by a nil check need supplying.
-//
-// The diagnostics handler gets a mock ClickHouse session rather than nil so requests
-// that clear auth can reach it — see TestBuildHandler_DiagnosticRouteRequiresKey.
 //
 // mux may be nil, in which case buildHandler creates its own;
 // TestBuildHandler_CredentialFreeSurfaceIsClosed passes a recording mux.
@@ -709,23 +685,11 @@ func buildFullyWiredHandler(t *testing.T, mux humago.Mux) http.Handler {
 		ciJobLogReader:              &stubCIJobLogReader{},
 		automationTestResultsReader: &stubAutomationTestResultsReader{},
 		automationTestsReader:       &stubAutomationTestsReader{},
-		chSession:                   mockClickHouseSession(),
-		slipDatabase:                "slippy",
 	})
 	require.NoError(t, err)
 	require.NotNil(t, h)
 	return h
 }
-
-// operationsExcludedFromPublishedSpec names operations that buildFullyWiredHandler
-// registers but TestGenerateOpenAPISpec deliberately leaves out of api/v1/*.json.
-//
-// The two constructions differ, so the audited surface is a strict superset of the
-// published contract. That divergence is intentional — publishing the diagnostic
-// would add a path and a schema to the committed spec and a method to slippy-client,
-// which is outside DEVOPS-217 — but it must not be able to grow silently, so the
-// exclusion is named here and asserted in both directions.
-var operationsExcludedFromPublishedSpec = []string{"get-clickhouse-schema-version"}
 
 // operationTiers, tierPublic, tierRead and tierWrite live in main.go: the startup guard
 // consults the table too, so it is production data rather than test fixture. The audit
@@ -931,14 +895,13 @@ func TestBuildHandler_EveryOperationIsSecuredOrAllowlisted(t *testing.T) {
 	}
 
 	// Guard against a vacuous pass: the audit must have covered a public route, a
-	// read-key route on both prefixes, a write-key route, and the diagnostic.
+	// read-key route on both prefixes, and a write-key route.
 	for _, opID := range []string{
 		"health-check",
 		"v1-health-check",
 		"get-slip",
 		"v1-get-slip",
 		"create-slip",
-		"get-clickhouse-schema-version",
 	} {
 		assert.Contains(t, seenOps, opID, "expected the audit to cover operation %q", opID)
 	}
@@ -1055,35 +1018,23 @@ func TestBuildHandler_CredentialFreeSurfaceIsClosed(t *testing.T) {
 			"docs/architecture.md if this is intended.")
 }
 
-// TestGenerateOpenAPISpec_PublishedSurfaceMatchesAudited pins the deliberate gap
-// between the audited route surface and the published contract.
+// TestGenerateOpenAPISpec_PublishedSurfaceMatchesAudited pins the published contract
+// to the audited route surface.
 //
-// buildFullyWiredHandler supplies the diagnostics handler; TestGenerateOpenAPISpec
-// does not, so api/v1/openapi.json and the generated slippy-client omit the
-// diagnostic. That is intentional and out of scope for DEVOPS-217, but two divergent
-// "wire everything" constructions in one file will drift, and CI auto-commits the
-// regenerated spec. This asserts the difference is exactly the named exclusion — in
-// both directions — so a second omission cannot slip in unnoticed.
+// buildFullyWiredHandler feeds the route audit; buildSpecGenerationHandler feeds
+// api/v1/*.json and the generated slippy-client. Two "wire everything" constructions in
+// one file will drift, and CI auto-commits the regenerated spec, so this asserts they
+// register exactly the same operations, in both directions: an operation audited but not
+// published is missing from the contract, and one published but not audited ships a
+// route the audit never checked.
 func TestGenerateOpenAPISpec_PublishedSurfaceMatchesAudited(t *testing.T) {
 	audited := operationIDs(t, fetchOpenAPISpec(t, buildFullyWiredHandler(t, nil)))
 	published := operationIDs(t, fetchOpenAPISpec(t, buildSpecGenerationHandler(t)))
 
-	for _, opID := range operationsExcludedFromPublishedSpec {
-		assert.Contains(t, audited, opID, "excluded operation %q should still be audited", opID)
-		assert.NotContains(t, published, opID,
-			"operation %q is named in operationsExcludedFromPublishedSpec but appears in the "+
-				"published spec — remove it from the exclusion list", opID)
-	}
-
-	for opID := range audited {
-		if slices.Contains(operationsExcludedFromPublishedSpec, opID) {
-			continue
-		}
-		assert.Contains(t, published, opID,
-			"operation %q is audited but missing from the published spec. Either register it in "+
-				"TestGenerateOpenAPISpec's handler, or add it to "+
-				"operationsExcludedFromPublishedSpec with a reason.", opID)
-	}
+	assert.Equal(t, audited, published,
+		"the audited and published surfaces register different operations. Wire the same "+
+			"route-registering collaborators into buildFullyWiredHandler and "+
+			"buildSpecGenerationHandler.")
 }
 
 // operationIDs collects every operationId in an OpenAPI document.
@@ -1108,87 +1059,35 @@ func operationIDs(t *testing.T, spec map[string]any) map[string]struct{} {
 	return ids
 }
 
-// TestBuildHandler_DiagnosticRouteIsRenamedAndSecured pins the other half of
-// DEVOPS-217: the ClickHouse schema-version probe no longer sits under /v1/admin/
-// — a namespace that reads as privileged and invited genuinely administrative
-// (and unauthenticated) additions — and it now requires the read key.
-func TestBuildHandler_DiagnosticRouteIsRenamedAndSecured(t *testing.T) {
-	spec := fetchOpenAPISpec(t, buildFullyWiredHandler(t, nil))
-
-	paths, ok := spec["paths"].(map[string]any)
-	require.True(t, ok)
-
-	assert.NotContains(t, paths, "/admin/schema-version")
-	assert.NotContains(t, paths, "/v1/admin/schema-version")
-	require.Contains(t, paths, "/v1/diagnostics/clickhouse-schema-version")
-
-	methods, ok := paths["/v1/diagnostics/clickhouse-schema-version"].(map[string]any)
-	require.True(t, ok)
-	op, ok := methods["get"].(map[string]any)
-	require.True(t, ok)
-
-	assert.Equal(t, "get-clickhouse-schema-version", op["operationId"])
-
-	security, ok := op["security"].([]any)
-	require.True(t, ok, "diagnostic must declare a security requirement")
-	require.Len(t, security, 1)
-	scheme, ok := security[0].(map[string]any)
-	require.True(t, ok)
-	assert.Contains(t, scheme, "apiKey", "diagnostic should accept the read key")
-}
-
-// TestBuildHandler_DiagnosticRouteRequiresKey exercises the renamed route end to end
-// through the middleware, in both directions.
+// TestBuildHandler_RetiredSchemaVersionRoutesAreNotServed pins that no schema-version
+// probe is served. The diagnostics route reported the legacy ClickHouse slip schema
+// through a library function that goLibMyCarrier v1.5.0 deletes with the rest of the
+// ClickHouse slip store, so the route is removed (DEVOPS-343). The admin paths are the
+// unauthenticated probe it replaced (DEVOPS-217).
 //
-// The positive path is the point: DEVOPS-217's headline change to this route is
-// unauthenticated -> read-key-required, and a 401-only test cannot tell "auth
-// enforced" from "route broken" — flipping apiKeySecurity to writeApiKeySecurity, or
-// regressing the read branch, would pass. Asserting that the read key gets a 200
-// requires a handler that survives being reached, which is why
-// buildFullyWiredHandler supplies a mock ClickHouse session rather than nil.
-func TestBuildHandler_DiagnosticRouteRequiresKey(t *testing.T) {
-	const diagnosticPath = "/v1/diagnostics/clickhouse-schema-version"
+// Every request carries the read key, so the 404 is the mux answering an unregistered
+// route, not the middleware refusing a missing credential.
+func TestBuildHandler_RetiredSchemaVersionRoutesAreNotServed(t *testing.T) {
+	h := buildFullyWiredHandler(t, nil)
+	paths, ok := fetchOpenAPISpec(t, h)["paths"].(map[string]any)
+	require.True(t, ok)
 
-	tests := []struct {
-		name       string
-		token      string
-		wantStatus int
-	}{
-		{"no credential", "", http.StatusUnauthorized},
-		{"read key accepted", "test-key", http.StatusOK},
-		{"write key accepted", "write-key", http.StatusOK},
-		{"wrong key rejected", "nope", http.StatusForbidden},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			h := buildFullyWiredHandler(t, nil)
+	for _, path := range []string{
+		"/v1/diagnostics/clickhouse-schema-version",
+		"/v1/admin/schema-version",
+		"/admin/schema-version",
+	} {
+		t.Run(path, func(t *testing.T) {
+			_, documented := paths[path]
+			assert.False(t, documented, "%s must not be in the OpenAPI document", path)
 
-			req := httptest.NewRequest(http.MethodGet, diagnosticPath, nil)
-			if tt.token != "" {
-				req.Header.Set("Authorization", "Bearer "+tt.token)
-			}
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			req.Header.Set("Authorization", "Bearer test-key")
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, req)
-
-			assert.Equal(t, tt.wantStatus, w.Code)
-			if tt.wantStatus == http.StatusOK {
-				var body map[string]any
-				require.NoError(t, json.NewDecoder(w.Body).Decode(&body))
-				assert.Contains(t, body, "current",
-					"a request that clears auth must reach the handler and get a version back")
-			}
+			assert.Equal(t, http.StatusNotFound, w.Code, "%s must not be served", path)
 		})
 	}
-
-	t.Run("retired admin path is gone", func(t *testing.T) {
-		h := buildFullyWiredHandler(t, nil)
-
-		req := httptest.NewRequest(http.MethodGet, "/v1/admin/schema-version", nil)
-		req.Header.Set("Authorization", "Bearer test-key")
-		w := httptest.NewRecorder()
-		h.ServeHTTP(w, req)
-		assert.Equal(t, http.StatusNotFound, w.Code)
-	})
 }
 
 // --- Optional handler registration tests ---
@@ -1256,10 +1155,9 @@ func TestBuildHandler_WithAllOptionalHandlers(t *testing.T) {
 // buildSpecGenerationHandler builds the handler whose OpenAPI document is published
 // to api/v1/*.json and, via make generate-client, to slippy-client.
 //
-// It deliberately omits the diagnostics handler, so the published contract is the
-// audited surface minus operationsExcludedFromPublishedSpec. Keep the two in step
-// through that list — TestGenerateOpenAPISpec_PublishedSurfaceMatchesAudited asserts
-// the difference is exactly what is named there.
+// It wires the same route-registering collaborators as buildFullyWiredHandler, so the
+// published contract is the audited surface;
+// TestGenerateOpenAPISpec_PublishedSurfaceMatchesAudited asserts the two stay equal.
 func buildSpecGenerationHandler(t *testing.T) http.Handler {
 	t.Helper()
 

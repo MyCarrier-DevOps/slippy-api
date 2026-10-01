@@ -83,14 +83,6 @@ type handlerDeps struct {
 	automationTestResultsReader domain.AutomationTestResultsReader
 	automationTestsReader       domain.AutomationTestsReader
 
-	// chSession backs the ClickHouse schema-version diagnostic, and slipDatabase names the
-	// database it probes. The session rather than a built *handler.DiagnosticsHandler: this
-	// struct carries collaborators and buildHandler owns handler construction — it builds
-	// the other seven — so receiving one pre-built made run() reach into the handler layer
-	// for no reason and left one field a product where every other is an ingredient.
-	chSession    clickhouse.ClickhouseSessionInterface
-	slipDatabase string
-
 	// rateLimiter applies per-identity backoff to failed authentication. Nil disables it,
 	// which is the default until SLIPPY_RATE_LIMIT_ENABLED is set — and also what happens
 	// when Dragonfly is unavailable, since the counters have nowhere shared to live.
@@ -106,7 +98,7 @@ const (
 
 // Gates naming the optional collaborator whose presence registers an operation.
 //
-// buildHandler registers conditionally: when ClickHouse is unavailable it leaves five
+// buildHandler registers conditionally: when ClickHouse is unavailable it leaves four
 // collaborators nil and their routes go unregistered, which main.go documents as a
 // supported degraded mode. Recording which gate gates which row is what lets the startup
 // guard check the reverse direction of operationTiers — that every row still names a
@@ -129,18 +121,19 @@ const (
 	// with the same failure mode — it is a mirror, not a link.
 	gateAutomationTests = "automationTestsReader" // autotest_results.* per-test drill-down
 	gateWrites          = "writer"                // slip mutations
-	gateDiagnostics     = "chSession"             // legacy CH schema-version probe
 )
 
 // clickHouseSessionOrNil converts the concrete session run() receives into the interface
-// handlerDeps carries, returning a genuinely nil interface when there is no usable session.
+// the ClickHouse-backed readers take, returning a genuinely nil interface when there is no
+// usable session.
 //
 // This exists because the conversion is a trap rather than a formality. A nil *pointer*
 // stored in an interface produces a NON-nil interface, so assigning a failed
-// *clickhouse.ClickhouseSession straight into an interface-typed field makes every
-// `!= nil` check downstream read true. The gate would come up during a ClickHouse outage,
-// registering and publishing a diagnostics route whose handler dereferences the nil session
-// and drops the connection — the opposite of the degraded-boot behaviour main.go documents.
+// *clickhouse.ClickhouseSession straight into an interface-typed variable makes every
+// `!= nil` check downstream read true. During a ClickHouse outage run() would then build the
+// four readers over the nil session, their gates would come up, and their routes would be
+// registered and published against a session that panics on the first query and drops the
+// connection — the opposite of the degraded-boot behaviour main.go documents.
 //
 // Taking the concrete type as a parameter is what makes the nil check here a real pointer
 // comparison, and what makes the trap unit-testable without reflection.
@@ -156,7 +149,7 @@ func clickHouseSessionOrNil(
 
 // gateStatus is the single definition of which gates exist and which of them are up.
 //
-// Both facts used to be written more than once. The five nil checks that decide
+// Both facts used to be written more than once. The nil checks that decide
 // registration in buildHandler were restated — not derived — in the map handed to
 // verifyRouteSecurity a few lines below, and the set of gates appeared a third time in a
 // standalone knownGates. Both desync directions were reachable: a gate truer than its
@@ -183,7 +176,6 @@ func gateStatus(deps handlerDeps) map[string]bool {
 		// with no compile-time link — see gateAutomationTests above.
 		gateAutomationTests: automation && deps.automationTestsReader != nil,
 		gateWrites:          deps.writer != nil,
-		gateDiagnostics:     deps.chSession != nil,
 	}
 }
 
@@ -259,8 +251,6 @@ var operationTiers = map[string]operationPolicy{
 	"get-automation-test-results-tests":            {tierRead, gateAutomationTests},
 	"get-automation-test-result-by-id-correlation": {tierRead, gateAutomationTests},
 
-	"get-clickhouse-schema-version": {tierRead, gateDiagnostics},
-
 	"create-slip":   {tierWrite, gateWrites},
 	"start-step":    {tierWrite, gateWrites},
 	"complete-step": {tierWrite, gateWrites},
@@ -333,7 +323,7 @@ var operationTiers = map[string]operationPolicy{
 // entirely, so requests 404 and the middleware never runs.)
 //
 // Gates are what make (7) safe. buildHandler registers conditionally — a ClickHouse
-// outage leaves five collaborators nil and their routes unregistered — so the check runs
+// outage leaves four collaborators nil and their routes unregistered — so the check runs
 // only for rows whose gate is up. A degraded boot stays a boot.
 //
 // Read-tier declarations are deliberately NOT checked here, though the audit checks them
@@ -454,9 +444,8 @@ func routeSecurityError(names []string, what, why string) error {
 
 // buildHandler creates the fully-wired HTTP handler with auth, routes, and
 // OpenTelemetry instrumentation. This is extracted from run() for testability.
-// The imageTagReader, ciJobLogReader, automationTestResultsReader,
-// automationTestsReader, and chSession are optional — if nil, their
-// endpoints are not registered.
+// The imageTagReader, ciJobLogReader, automationTestResultsReader, and
+// automationTestsReader are optional — if nil, their endpoints are not registered.
 //
 // It returns an error when the registered routes fail verifyRouteSecurity, so a
 // wiring mistake stops the process at boot instead of serving 401s.
@@ -538,13 +527,6 @@ func buildHandler(deps handlerDeps) (http.Handler, error) {
 		}
 		wh := handler.NewSlipWriteHandler(deps.writer, inv)
 		handler.RegisterWriteRoutes(v1Only, wh)
-	}
-
-	// Diagnostic routes: v1-only. Read-only probes of the service's own datastores;
-	// they require the read key like every other read operation.
-	if gates[gateDiagnostics] {
-		dh := handler.NewDiagnosticsHandler(deps.chSession, deps.slipDatabase)
-		handler.RegisterDiagnosticsRoutes(v1Only, dh)
 	}
 
 	// Fail the wiring rather than the requests: a route that requires no credential
@@ -711,8 +693,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
-	log.Printf("config loaded (port=%d, cache=%v, db=%s)",
-		cfg.Port, cfg.CacheEnabled(), cfg.SlipDatabase)
+	log.Printf("config loaded (port=%d, cache=%v)", cfg.Port, cfg.CacheEnabled())
 
 	// --- Library logger ---
 	// Single shared logger for the slippy library, ClickHouse store, migrations,
@@ -808,16 +789,16 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("clickhouse config: %w", err)
 	}
-	// ClickHouse now backs only the non-slip readers (buildinfo/ciJob/autotest) and the
-	// schema-version diagnostic — the slip path is 100% Postgres. So a ClickHouse outage must NOT gate
-	// startup of a healthy slip API: log a warning and run degraded (those routes are left
-	// unregistered → 404) while the Postgres slip endpoints serve normally.
+	// ClickHouse now backs only the non-slip readers (buildinfo/ciJob/autotest) — the slip
+	// path is 100% Postgres. So a ClickHouse outage must NOT gate startup of a healthy slip
+	// API: log a warning and run degraded (those routes are left unregistered → 404) while
+	// the Postgres slip endpoints serve normally.
 	chConnectCtx, chConnectCancel := context.WithTimeout(context.Background(), startupConnectTimeout)
 	defer chConnectCancel()
 	chSess, chErr := clickhouse.NewClickhouseSession(chCfg, chConnectCtx)
 	chSession := clickHouseSessionOrNil(chSess, chErr)
 	if chSession == nil {
-		log.Printf("warning: clickhouse session unavailable — non-slip readers + diagnostics run degraded: %v", chErr)
+		log.Printf("warning: clickhouse session unavailable — non-slip readers run degraded: %v", chErr)
 	} else {
 		defer func() {
 			if closeErr := chSess.Close(); closeErr != nil {
@@ -857,7 +838,7 @@ func run() error {
 	reader, rdb := connectCache(cfg, slipReader, redisDial)
 	defer closeRedis(rdb) // released at shutdown (no-op when caching is disabled / ping failed)
 
-	// --- ClickHouse-backed non-slip readers + diagnostics (nil ⇒ routes skipped in degraded mode) ---
+	// --- ClickHouse-backed non-slip readers (nil ⇒ routes skipped in degraded mode) ---
 	// All of these query ClickHouse via the standalone session. When that session is
 	// unavailable (above), they stay nil and buildHandler leaves their routes unregistered,
 	// so the Postgres slip API keeps serving.
@@ -942,8 +923,6 @@ func run() error {
 		automationTestsReader:       automationTestsReader,
 		pipelineCfg:                 pipelineCfg,
 		rateLimiter:                 rateLimiter,
-		chSession:                   chSession,
-		slipDatabase:                cfg.SlipDatabase,
 	})
 	if err != nil {
 		return err

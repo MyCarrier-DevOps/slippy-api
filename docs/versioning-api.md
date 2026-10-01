@@ -36,6 +36,12 @@ Both sets of routes use the same handlers. The legacy routes exist solely for ba
 - Changing error response codes for existing conditions
 - Changing authentication requirements
 
+Recorded instance, landed in `/v1` without a new major version:
+
+- **DEVOPS-343** — `GET /v1/diagnostics/clickhouse-schema-version` was removed outright, with no deprecation window and no `410 Gone`. That is "Removing an endpoint" from the list above, and it does **not** fall under the security-corrective carve-out below: the route was read-only and already required the read key, so removing it closes no exposure. It lands in `/v1` because nothing is left for it to report through. It returned the version of the legacy, frozen ClickHouse slip schema via `slippy.GetCurrentSchemaVersion`, and goLibMyCarrier v1.5.0 deletes that function and `slippy.Config.Database` along with the rest of the ClickHouse slip store. The route was also never part of the published contract — it was deliberately kept out of `api/v1/*.json` and the generated `slippy-client` — and a code search across the company's GitHub organisations found no caller outside slippy-api.
+
+  Caller-visible effect: the path now returns `404` with or without a credential, where it previously returned `200` to either API key, `401` with no credential and `403` with a wrong one. It already returned `404` whenever the ClickHouse session was unavailable at boot. The published spec and `slippy-client` are unchanged. The Postgres slip schema, owned by the `slippy-migrator` Job, was never reported here.
+
 ### Non-Breaking Changes (stay in current version)
 
 - Adding a new optional field to a response

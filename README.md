@@ -77,7 +77,6 @@ Two limits on the audit are worth knowing, and they differ in kind. It walks the
 | `GET` | `/v1/automation-test-results/by-correlation/{correlationID}` | Run-summary rows from `autotest_results.RunResults`. Filter by `environment`, `stack`, `stage`, `attempt`. When `attempt` is omitted, returns the latest attempt per (env, stack, stage) tuple. |
 | `GET` | `/v1/automation-test-results/by-correlation/{correlationID}/tests` | Per-test rows from `autotest_results.TestResultsCor` for a slip, paginated. Same parent filters plus `status` (default `Failed`; pass `*` or `all` to disable), `limit`, `cursor`. Bounded to a 14-day lookback for partition pruning. |
 | `GET` | `/v1/automation-test-results/by-correlation/{correlationID}/tests/{testId}` | Single test row (with stack trace). 404 when not in scope. |
-| `GET` | `/v1/diagnostics/clickhouse-schema-version` | Version of the **legacy, frozen** ClickHouse slip schema. Registered only when the ClickHouse session is available. The operational Postgres schema is owned by the `slippy-migrator` Job and is not reported here. |
 | `GET` | `/openapi.json` | Auto-generated OpenAPI 3.1 specification |
 | `GET` | `/docs` | Interactive API documentation (Stoplight Elements) |
 
