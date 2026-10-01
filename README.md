@@ -59,7 +59,7 @@ Authentication is **fail-closed**: the middleware rejects any operation that req
 
 Rows 1, 2 and 4 are the same total, simultaneous probe outage (kubelet liveness *and* readiness, every replica) arriving by different routes; refusing to boot turns any of them into a rollout that never completes. Rows 3 and 5 are the opposite shape — the route keeps working and nothing surfaces at all while the read key gains a mutation — which is why they cannot be left to runtime. All classes are reported together rather than one per boot.
 
-Each `operationTiers` row carries a **gate** naming the optional collaborator whose presence registers it, and the stale-row check runs only for rows whose gate is up. That is what lets the reverse direction be enforced at startup without breaking the supported degraded-ClickHouse boot, where five collaborators are nil and their routes are intentionally absent. Read-tier declarations stay CI-only: a mistake there costs one route a `403` rather than the fleet.
+Each `operationTiers` row carries a **gate** naming the optional collaborator whose presence registers it, and the stale-row check runs only for rows whose gate is up. That is what lets the reverse direction be enforced at startup without breaking the supported degraded-ClickHouse boot, where four collaborators are nil and their routes are intentionally absent. Read-tier declarations stay CI-only: a mistake there costs one route a `403` rather than the fleet.
 
 Two limits on the audit are worth knowing, and they differ in kind. It walks the OpenAPI document built by a fully-wired test fixture, so it does not **build-check** operations marked `Hidden` (huma omits those from the document) or routes behind a config branch the fixture does not enable — but those are still subject to the middleware at runtime, so an omission there fails closed with a `401`, not open. Only the six adapter routes above genuinely **bypass** auth. `TestBuildHandler_CredentialFreeAdapterRoutes` proves those six are served; `TestBuildHandler_CredentialFreeSurfaceIsClosed` proves there are only six, by set-differencing the routes actually registered on the mux against the documented operations — so a huma upgrade adding a seventh, or a `Hidden` route, fails the build rather than widening the surface silently.
 
@@ -330,7 +330,6 @@ All configuration is via environment variables. No config files, no Vault.
 | `SLIPPY_ANCESTRY_DEPTH` | Max commits to walk for ancestry resolution | `25` |
 | `CLICKHOUSE_PORT` | ClickHouse port | `9440` |
 | `CLICKHOUSE_SKIP_VERIFY` | Skip TLS verification | `false` |
-| `K8S_NAMESPACE` | Kubernetes namespace; `-test` or `-dev` suffix selects `ci_test` database | _(ci)_ |
 | `SLIPPY_SKIP_MIGRATIONS` | Skip ClickHouse schema migrations at startup | `true` |
 | `DRAGONFLY_HOST` | Dragonfly/Redis host (enables caching when set) | _(disabled)_ |
 | `DRAGONFLY_PORT` | Dragonfly/Redis port | `6379` |

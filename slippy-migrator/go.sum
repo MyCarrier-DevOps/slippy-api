@@ -7,12 +7,12 @@ github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERo
 github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
 github.com/MyCarrier-DevOps/goLibMyCarrier/github v1.5.0 h1:lFs+Ru4LNlQyUFYv1HkI6xiAGsilFctB5G/c5c0Y8So=
 github.com/MyCarrier-DevOps/goLibMyCarrier/github v1.5.0/go.mod h1:fB/lsY4aGh+ULrDzN4faErcIiZ7NMuw4zWNem9oEqsg=
-github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.4.1 h1:w+hUENCtax2QmJqM4dVgGaBUeYbgqt2KK3HGKjhPVe0=
-github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.4.1/go.mod h1:d9T8TrZAOh50XLRL+zr8eVenSxW8eXY9afa2j9uStmg=
+github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.5.0 h1:kJxXpSMEWor7/KG9vl9i4fB09CYE6LQWPIEwCD8fDWw=
+github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.5.0/go.mod h1:d9T8TrZAOh50XLRL+zr8eVenSxW8eXY9afa2j9uStmg=
 github.com/MyCarrier-DevOps/goLibMyCarrier/postgres v1.5.0 h1:IxZM3zV+EK7tmKyAC9wtix4+hn87VKSefRyhXyjr8jo=
 github.com/MyCarrier-DevOps/goLibMyCarrier/postgres v1.5.0/go.mod h1:Sws0meaJn76OnAREX+NqV+0stdZnWDo0w1E42l9HUrA=
-github.com/MyCarrier-DevOps/goLibMyCarrier/postgresmigrator v1.4.1 h1:NOy9E6bJ6SsWf5lTbw8t/VtGhCFCfPv6Ed748PUodzk=
-github.com/MyCarrier-DevOps/goLibMyCarrier/postgresmigrator v1.4.1/go.mod h1:wlHGJp1Q/WVLbqLMXuFUrvsM8Im+i9/vkfhrsa5/OP4=
+github.com/MyCarrier-DevOps/goLibMyCarrier/postgresmigrator v1.5.0 h1:FHL2cvp2Rer6QBCae/L4PSu2OPoF+Ue4IGWbwI4YWnM=
+github.com/MyCarrier-DevOps/goLibMyCarrier/postgresmigrator v1.5.0/go.mod h1:gWjMR0uZWaD8JBLCIsNDJI9A8/rDaojKKLq43buuX0g=
 github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.5.0 h1:xdSXl+93FQg66yuy59TUV89GCn6d3o4PEN9BzelnJmY=
 github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.5.0/go.mod h1:0P6cdVUpgptXKIlBPRIwxIkxXf5dtroxsz0S99l0R9U=
 github.com/ProtonMail/go-crypto v1.5.1 h1:pTrLDQHyOT8y3DFYIpijgPBTw/7E2GLMimutvOlceuE=
