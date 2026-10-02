@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
 	"github.com/MyCarrier-DevOps/slippy-api/internal/domain"
@@ -165,4 +166,50 @@ func TestSlipWriterAdapter_CreateSlipForPush_DedupArmsTranslateTransient(t *test
 		_, err := newWriterAdapterWithDeps(failingStore(), locker, nil).CreateSlipForPush(context.Background(), opts)
 		assert.ErrorIs(t, err, domain.ErrStoreUnavailable)
 	})
+}
+
+// A raw *pgconn.PgError out of the store must reach the caller as ErrStoreUnavailable on every
+// step write, through the real goLib client path (not a hand-built StepError). Guards against a
+// goLib bump that flattens the cause with %s and sends skip-step back to the 422 default.
+func TestSlipWriterAdapter_StepWrites_StorePgErrorTranslation(t *testing.T) {
+	ctx := context.Background()
+	calls := map[string]func(a *SlipWriterAdapter) error{
+		"StartStep": func(a *SlipWriterAdapter) error {
+			return a.StartStep(ctx, "corr-1", "push_parsed", "")
+		},
+		"CompleteStep": func(a *SlipWriterAdapter) error {
+			return a.CompleteStep(ctx, "corr-1", "push_parsed", "")
+		},
+		"FailStep": func(a *SlipWriterAdapter) error {
+			return a.FailStep(ctx, "corr-1", "push_parsed", "", "boom")
+		},
+		"SkipStep": func(a *SlipWriterAdapter) error {
+			return a.SkipStep(ctx, "corr-1", "push_parsed", "", "not needed")
+		},
+	}
+	for method, call := range calls {
+		for _, tc := range []struct {
+			code      string
+			transient bool
+		}{
+			{"57P01", true},
+			{"23505", false},
+		} {
+			t.Run(method+"/"+tc.code, func(t *testing.T) {
+				store := &mockSlipStore{
+					updateStepWithHistoryFn: func(context.Context, string, string, string, slippy.StepStatus,
+						slippy.StateHistoryEntry) error {
+						return &pgconn.PgError{Code: tc.code}
+					},
+				}
+				err := call(newTestWriterAdapter(store))
+				require.Error(t, err)
+				if tc.transient {
+					assert.ErrorIs(t, err, domain.ErrStoreUnavailable)
+				} else {
+					assert.NotErrorIs(t, err, domain.ErrStoreUnavailable)
+				}
+			})
+		}
+	}
 }
