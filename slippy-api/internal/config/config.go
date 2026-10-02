@@ -9,8 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
 )
 
 const defaultAncestryDepth = 25
@@ -63,9 +61,6 @@ type Config struct {
 
 	// AncestryDepth is how many commits to walk when resolving ancestry (default: 25)
 	AncestryDepth int
-
-	// SlipDatabase is the ClickHouse database containing routing_slips (default: "ci")
-	SlipDatabase string
 
 	// WriteAPIKey is the bearer token for write endpoints (required).
 	WriteAPIKey string
@@ -127,7 +122,6 @@ func Load() (*Config, error) {
 		DragonflyPort: 6379,
 		CacheTTL:      10 * time.Minute,
 		AncestryDepth: defaultAncestryDepth,
-		SlipDatabase:  slippy.DefaultConfig().Database,
 		XFFDepth:      defaultXFFDepth,
 	}
 
