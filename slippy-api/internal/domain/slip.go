@@ -21,6 +21,16 @@ var ErrCreationInProgress = errors.New("slip creation in progress")
 // importing driver types.
 var ErrWriteContended = errors.New("slip write contended on the per-slip lock")
 
+// ErrStoreUnavailable is the storage-agnostic signal that a slip write failed because the
+// backing store was transiently unavailable — connection loss, failover or shutdown, too many
+// connections, serialization/deadlock abort. The write may not have completed (a connection
+// can drop mid-commit); slip state is replay-safe, so a retry is safe, but a replayed write
+// may append a duplicate history entry. Pool exhaustion is NOT this error: acquire blocks
+// until the context deadline and surfaces as context.DeadlineExceeded (504). Translated by
+// the adapter from driver errors; the transport layer maps it (-> HTTP 503, retryable)
+// without importing driver types. Deterministic failures are never wrapped in it.
+var ErrStoreUnavailable = errors.New("slip store transiently unavailable")
+
 // ErrStatementTimeout is the storage-agnostic signal that a slip write exceeded the
 // database's server-side statement timeout (Postgres SQLSTATE 57014). Translated by the
 // adapter so the transport layer maps it (→ HTTP 504) without importing driver types.

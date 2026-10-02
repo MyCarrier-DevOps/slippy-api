@@ -1276,6 +1276,20 @@ func TestMapWriteError(t *testing.T) {
 			http.StatusServiceUnavailable,
 		},
 		{"statement timeout (domain sentinel)", domain.ErrStatementTimeout, http.StatusGatewayTimeout},
+		{"store unavailable (domain sentinel)", domain.ErrStoreUnavailable, http.StatusServiceUnavailable},
+		{
+			// DEVOPS-314 3c: the lib wraps store errors in a StepError, which the default arm
+			// maps to 422 (a non-retryable CLI exit). The sentinel arm must win over it.
+			"store unavailable wrapped in StepError beats the 422 default",
+			slippy.NewStepError("update", "id", "step", "comp",
+				fmt.Errorf("%w: %w", domain.ErrStoreUnavailable, errors.New("57P01"))),
+			http.StatusServiceUnavailable,
+		},
+		{
+			"store unavailable wrapped in SlipError beats the 422 default",
+			slippy.NewSlipError("update", "id", fmt.Errorf("%w: boom", domain.ErrStoreUnavailable)),
+			http.StatusServiceUnavailable,
+		},
 		{
 			"step error",
 			slippy.NewStepError("update", "id", "step", "comp", errors.New("fail")),
