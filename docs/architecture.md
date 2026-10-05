@@ -91,7 +91,7 @@ All classes are reported together via `errors.Join`, not just the first: under a
 
 **`Hidden` operations.** huma omits them from the OpenAPI document while still routing them, so checks (1)–(6) cannot see such a route. Check (7) is the exception and points the other way: a Hidden operation with a live-gated row looks unregistered, so the process refuses to boot. That coupling is deliberate — re-keying the stale scan on mux patterns would let Hidden routes boot silently, and the middleware fails closed on a *missing* credential but not on the *wrong tier*, so a Hidden mutation declaring `apiKey` would then be served to the read key with nothing to catch it.
 
-`operationTiers` lives in `main.go` rather than the test file because the guard consults it. Each row carries a **gate** naming the optional collaborator whose presence registers it, so check (7) runs only for rows whose gate is up — a ClickHouse outage leaves five collaborators nil and their routes unregistered, and that degraded mode stays bootable. The gate map is built from the same nil checks that decided registration, so the guard's view of what *should* exist is exact in both full and degraded boots. Read-tier declarations are checked only by the audit, against the fully-wired fixture, since a mistake there costs one route a 403 rather than the fleet.
+`operationTiers` lives in `main.go` rather than the test file because the guard consults it. Each row carries a **gate** naming the optional collaborator whose presence registers it, so check (7) runs only for rows whose gate is up — a ClickHouse outage leaves four collaborators nil and their routes unregistered, and that degraded mode stays bootable. The gate map is built from the same nil checks that decided registration, so the guard's view of what *should* exist is exact in both full and degraded boots. Read-tier declarations are checked only by the audit, against the fully-wired fixture, since a mistake there costs one route a 403 rather than the fleet.
 
 The audit's blind spots are `Hidden` operations and routes behind config branches the test fixture does not enable — both still subject to the middleware at runtime, so omission is fail-closed rather than fail-open. `TestBuildHandler_CredentialFreeSurfaceIsClosed` covers the first by set-differencing the registered mux patterns against the documented operations, which also detects a huma upgrade adding a seventh adapter route.
 
@@ -364,7 +364,6 @@ OTel spans distinguish client errors (not-found, invalid input → `Unset` statu
 | `CLICKHOUSE_PASSWORD` | Yes | — | ClickHouse auth |
 | `CLICKHOUSE_DATABASE` | No | ci | ClickHouse database |
 | `CLICKHOUSE_PORT` | No | 9000 | ClickHouse native port |
-| `K8S_NAMESPACE` | No | — | Selects `ci_test` or `ci_dev` database |
 | `DRAGONFLY_HOST` | No | — | Enables caching when set |
 | `DRAGONFLY_PORT` | No | 6379 | Cache port |
 | `DRAGONFLY_PASSWORD` | No | — | Cache auth |

@@ -264,7 +264,6 @@ func TestIsPublicRoute(t *testing.T) {
 		{"path prefix is not enough", http.MethodGet, "/health/deep", false},
 		{"read route", http.MethodGet, "/v1/slips/abc", false},
 		{"write route", http.MethodPost, "/v1/slips", false},
-		{"diagnostic", http.MethodGet, "/v1/diagnostics/clickhouse-schema-version", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
