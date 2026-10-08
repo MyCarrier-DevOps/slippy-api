@@ -2,11 +2,15 @@ package infrastructure
 
 import (
 	"context"
+	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -166,6 +170,7 @@ func (a *SlipWriterAdapter) CreateSlipForPush(
 	if a.locker == nil {
 		result, err := a.client.CreateSlipForPush(ctx, opts)
 		if err != nil {
+			err = translateStoreError(err)
 			recordWriterError(span, err)
 			return nil, err
 		}
@@ -182,6 +187,7 @@ func (a *SlipWriterAdapter) CreateSlipForPush(
 			trace.WithAttributes(attribute.String("error", lockErr.Error())))
 		result, err := a.client.CreateSlipForPush(ctx, opts)
 		if err != nil {
+			err = translateStoreError(err)
 			recordWriterError(span, err)
 			return nil, err
 		}
@@ -214,6 +220,7 @@ func (a *SlipWriterAdapter) CreateSlipForPush(
 				span.AddEvent("dedup_lock_release_failed",
 					trace.WithAttributes(attribute.String("error", relErr.Error())))
 			}
+			err = translateStoreError(err)
 			recordWriterError(span, err)
 			return nil, err
 		}
@@ -520,18 +527,69 @@ func pgErrorCode(err error) string {
 // which the per-slip FOR UPDATE serialization can produce under high fan-in.
 func isLockTimeout(err error) bool { return pgErrorCode(err) == "55P03" }
 
+// isTransientSQLState reports whether a Postgres SQLSTATE means "the store could not serve this
+// write right now" — a retry may succeed (the write may not have completed if the connection
+// dropped mid-commit):
+//   - class 08: connection exception (08P01 is treated transient pending topology
+//     confirmation, bd mycarrier-zvwp)
+//   - class 53: insufficient resources (53300 too_many_connections, 53200 out_of_memory, ...)
+//   - 57P01/57P02/57P03: admin shutdown, crash shutdown, cannot connect now (failover/restart)
+//   - 40001/40P01: serialization failure, deadlock detected (the txn was rolled back)
+//   - 25006: read_only_sql_transaction (a write routed to a demoted primary during failover)
+//
+// 53100 (disk full) and 53400 (configuration limit) are excluded from class 53.
+func isTransientSQLState(code string) bool {
+	switch code {
+	case "57P01", "57P02", "57P03", "40001", "40P01", "25006":
+		return true
+	case "53100", "53400":
+		// Disk full / configuration limit: a retry will not clear these within a retry window.
+		return false
+	}
+	return strings.HasPrefix(code, "08") || strings.HasPrefix(code, "53")
+}
+
+// isTransientStoreError reports whether err is a connectivity/availability failure of the store
+// rather than a deterministic refusal. Detection is typed (errors.As / errors.Is through the
+// lib's %w wrapping of StepError/SlipError), never by message text.
+//
+// A context.Canceled / context.DeadlineExceeded anywhere in the chain is NOT transient here: it
+// keeps its own mapping (mapWriteError → 504) — the driver wraps a deadline in net/pg errors, so
+// this check must come first.
+func isTransientStoreError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return isTransientSQLState(pgErr.Code)
+	}
+	// Dial failures (pgx *ConnectError wrapping a dial error) are net errors.
+	var netErr net.Error
+	return errors.As(err, &netErr) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, driver.ErrBadConn) ||
+		errors.Is(err, pgconn.ErrConnClosed)
+}
+
 // translateStoreError maps a backend-specific store error onto a storage-agnostic domain
 // sentinel so the transport layer maps HTTP status without knowing about pgconn/SQLSTATE.
 // Unrecognized errors pass through unchanged.
+//
+// Classification runs on the whole chain, before the transport layer's StepError/SlipError 422
+// default, so a store outage wrapped by the lib in a StepError is not reported as a
+// deterministic refusal.
 func translateStoreError(err error) error {
 	switch pgErrorCode(err) {
 	case "55P03": // lock_timeout on the per-slip FOR UPDATE
 		return fmt.Errorf("%w: %w", domain.ErrWriteContended, err)
 	case "57014": // statement_timeout
 		return fmt.Errorf("%w: %w", domain.ErrStatementTimeout, err)
-	default:
-		return err
 	}
+	if isTransientStoreError(err) {
+		return fmt.Errorf("%w: %w", domain.ErrStoreUnavailable, err)
+	}
+	return err
 }
 
 // awaitExistingSlip polls the reader for an already-in-flight slip matching the

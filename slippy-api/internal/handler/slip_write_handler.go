@@ -920,6 +920,14 @@ func mapWriteError(err error) error {
 			http.StatusServiceUnavailable,
 			"write contended on the per-slip lock and did not complete; safe to retry",
 		)
+	case errors.Is(err, domain.ErrStoreUnavailable):
+		// Transient store failure (see domain.ErrStoreUnavailable for replay semantics). Sits
+		// above the StepError/SlipError 422 default on purpose: the lib wraps store errors in
+		// those, and a 422 is a non-retryable refusal to the CLI (DEVOPS-314 3c).
+		return huma.NewError(
+			http.StatusServiceUnavailable,
+			"slip store temporarily unavailable; the write may not have completed, safe to retry (state is replay-safe; a replayed write may append a duplicate history entry)",
+		)
 	case errors.Is(err, domain.ErrStatementTimeout):
 		// Server-side statement_timeout fired — a slow query, not a client cancel.
 		return huma.NewError(http.StatusGatewayTimeout, "database statement timeout")
