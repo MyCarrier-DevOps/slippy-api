@@ -1,5 +1,3 @@
-//go:build integration
-
 package main
 
 import (
@@ -38,7 +36,7 @@ const rollbacksE2EPipelineJSON = `{
 func newRollbacksE2EStore(t *testing.T) *slippy.PostgresStore {
 	t.Helper()
 	if testing.Short() {
-		t.Skip("integration test: requires a container runtime")
+		t.Skip("integration test: requires Docker")
 	}
 	ctx := context.Background()
 
@@ -183,7 +181,7 @@ func TestE2E_RollbackRoutes_Postgres(t *testing.T) {
 
 	// (e) the read key must not record, and no credential is refused outright.
 	w = do(http.MethodPost, path, readKey, string(payload))
-	assert.Contains(t, []int{http.StatusUnauthorized, http.StatusForbidden}, w.Code, w.Body.String())
+	assert.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
 	w = do(http.MethodPost, path, "", string(payload))
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
