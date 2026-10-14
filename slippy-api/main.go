@@ -83,6 +83,11 @@ type handlerDeps struct {
 	automationTestResultsReader domain.AutomationTestResultsReader
 	automationTestsReader       domain.AutomationTestsReader
 
+	// rollbackStore backs the rollback record routes (DEVOPS-320). run() passes the Postgres
+	// slip store, which implements domain.RollbackStore directly; nil leaves both routes
+	// unregistered.
+	rollbackStore domain.RollbackStore
+
 	// rateLimiter applies per-identity backoff to failed authentication. Nil disables it,
 	// which is the default until SLIPPY_RATE_LIMIT_ENABLED is set — and also what happens
 	// when Dragonfly is unavailable, since the counters have nowhere shared to live.
@@ -121,6 +126,7 @@ const (
 	// with the same failure mode — it is a mirror, not a link.
 	gateAutomationTests = "automationTestsReader" // autotest_results.* per-test drill-down
 	gateWrites          = "writer"                // slip mutations
+	gateRollbacks       = "rollbackStore"         // slip_rollbacks records (DEVOPS-320)
 )
 
 // clickHouseSessionOrNil converts the concrete session run() receives into the interface
@@ -176,6 +182,7 @@ func gateStatus(deps handlerDeps) map[string]bool {
 		// with no compile-time link — see gateAutomationTests above.
 		gateAutomationTests: automation && deps.automationTestsReader != nil,
 		gateWrites:          deps.writer != nil,
+		gateRollbacks:       deps.rollbackStore != nil,
 	}
 }
 
@@ -261,6 +268,9 @@ var operationTiers = map[string]operationPolicy{
 	"abandon-slip":  {tierWrite, gateWrites},
 	"claim-slip":    {tierWrite, gateWrites},
 	"release-claim": {tierWrite, gateWrites},
+
+	"record-rollback": {tierWrite, gateRollbacks},
+	"list-rollbacks":  {tierRead, gateRollbacks},
 }
 
 // verifyRouteSecurity reports an error when the registered routes contradict the auth
@@ -527,6 +537,12 @@ func buildHandler(deps handlerDeps) (http.Handler, error) {
 		}
 		wh := handler.NewSlipWriteHandler(deps.writer, inv)
 		handler.RegisterWriteRoutes(v1Only, wh)
+	}
+
+	// Rollback records (DEVOPS-320): v1-only, like every route added since the /v1 split.
+	if gates[gateRollbacks] {
+		rh := handler.NewRollbackHandler(deps.rollbackStore)
+		handler.RegisterRollbackRoutes(v1Only, rh)
 	}
 
 	// Fail the wiring rather than the requests: a route that requires no credential
@@ -921,6 +937,7 @@ func run() error {
 		ciJobLogReader:              ciJobLogReader,
 		automationTestResultsReader: automationTestResultsReader,
 		automationTestsReader:       automationTestsReader,
+		rollbackStore:               store,
 		pipelineCfg:                 pipelineCfg,
 		rateLimiter:                 rateLimiter,
 	})
