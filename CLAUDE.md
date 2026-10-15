@@ -213,8 +213,8 @@ Every goLibMyCarrier module releases at one shared version, so bump all of them 
   the store, `UpdateStepWithStatus` wraps that in a `*slippy.StepError`, and `mapWriteError`
   maps any `StepError` to 422. `TestMapWriteError_ReservedStepNameIsAClientError` pins it.
 
-**v1.5.5-feat-devops-320-slip-rollbacks.18 (DEVOPS-320): this bump applies Postgres migration v7 (`slip_rollbacks`, whose rows carry `message` and `outcome`) and widens the startup probe.**
-Bump every goLibMyCarrier module together in both `slippy-api/go.mod` and `slippy-migrator/go.mod`, as for v1.4.0. Re-pin to the release tag once goLibMyCarrier#98 merges.
+**v1.5.5 (DEVOPS-320): this bump applies Postgres migration v7 (`slip_rollbacks`, whose rows carry `message` and `outcome`) and widens the startup probe.**
+Bump every goLibMyCarrier module together in both `slippy-api/go.mod` and `slippy-migrator/go.mod`, as for v1.4.0.
 
 - **Migration v7 creates `slip_rollbacks`.** It holds one row per gitops-rollback attempt, with `ON DELETE CASCADE` from `routing_slips` and UNIQUE (correlation_id, workflow); an `argo retry` of a failed rollback replaces that row's outcome. `slippy-migrator` applies it, as it applied v5 and v6.
   - Its FK takes `SHARE ROW EXCLUSIVE` on `routing_slips`, bounded by a 5 s `lock_timeout`. On a busy database the Job can fail on that timeout; re-run it.
