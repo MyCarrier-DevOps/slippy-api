@@ -15,8 +15,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
 	"github.com/MyCarrier-DevOps/slippy-api/internal/domain"
+
+	"github.com/MyCarrier-DevOps/goLibMyCarrier/slippy"
 )
 
 // DEVOPS-314 3c: transient Postgres store failures must surface as ErrStoreUnavailable (503,

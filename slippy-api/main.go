@@ -83,6 +83,11 @@ type handlerDeps struct {
 	automationTestResultsReader domain.AutomationTestResultsReader
 	automationTestsReader       domain.AutomationTestsReader
 
+	// rollbackStore backs the rollback record routes (DEVOPS-320). run() passes the Postgres
+	// slip store, which implements domain.RollbackStore directly; nil leaves both routes
+	// unregistered.
+	rollbackStore domain.RollbackStore
+
 	// rateLimiter applies per-identity backoff to failed authentication. Nil disables it,
 	// which is the default until SLIPPY_RATE_LIMIT_ENABLED is set — and also what happens
 	// when Dragonfly is unavailable, since the counters have nowhere shared to live.
@@ -121,6 +126,7 @@ const (
 	// with the same failure mode — it is a mirror, not a link.
 	gateAutomationTests = "automationTestsReader" // autotest_results.* per-test drill-down
 	gateWrites          = "writer"                // slip mutations
+	gateRollbacks       = "rollbackStore"         // slip_rollbacks records (DEVOPS-320)
 )
 
 // clickHouseSessionOrNil converts the concrete session run() receives into the interface
@@ -176,6 +182,7 @@ func gateStatus(deps handlerDeps) map[string]bool {
 		// with no compile-time link — see gateAutomationTests above.
 		gateAutomationTests: automation && deps.automationTestsReader != nil,
 		gateWrites:          deps.writer != nil,
+		gateRollbacks:       deps.rollbackStore != nil,
 	}
 }
 
@@ -261,6 +268,9 @@ var operationTiers = map[string]operationPolicy{
 	"abandon-slip":  {tierWrite, gateWrites},
 	"claim-slip":    {tierWrite, gateWrites},
 	"release-claim": {tierWrite, gateWrites},
+
+	"record-rollback": {tierWrite, gateRollbacks},
+	"list-rollbacks":  {tierRead, gateRollbacks},
 }
 
 // verifyRouteSecurity reports an error when the registered routes contradict the auth
@@ -529,6 +539,12 @@ func buildHandler(deps handlerDeps) (http.Handler, error) {
 		handler.RegisterWriteRoutes(v1Only, wh)
 	}
 
+	// Rollback records (DEVOPS-320): v1-only, like every route added since the /v1 split.
+	if gates[gateRollbacks] {
+		rh := handler.NewRollbackHandler(deps.rollbackStore)
+		handler.RegisterRollbackRoutes(v1Only, rh)
+	}
+
 	// Fail the wiring rather than the requests: a route that requires no credential
 	// and is not allowlisted would 401 for everyone, health probes included.
 	//
@@ -764,8 +780,9 @@ func run() error {
 	// Job has applied the schema — the Job must run first.
 	if probeErr := store.ProbeSchema(pgConnectCtx); probeErr != nil {
 		return fmt.Errorf(
-			"routing_slips schema is behind this library; apply migration v6 (slippy-migrator) before serving: %w",
-			probeErr)
+			"routing_slips schema is behind this library; apply the latest migrations (slippy-migrator) before serving: %w",
+			probeErr,
+		)
 	}
 	// A redundant second check, kept deliberately as defence in depth rather than because
 	// ProbeSchema leaves a gap: since DEVOPS-367 that probe already diffs every column the
@@ -921,6 +938,7 @@ func run() error {
 		ciJobLogReader:              ciJobLogReader,
 		automationTestResultsReader: automationTestResultsReader,
 		automationTestsReader:       automationTestsReader,
+		rollbackStore:               store,
 		pipelineCfg:                 pipelineCfg,
 		rateLimiter:                 rateLimiter,
 	})

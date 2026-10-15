@@ -121,6 +121,16 @@ func (s *stubSlipWriter) ReleaseClaim(
 	return domain.ReleaseOutcome{Released: true}, nil
 }
 
+type stubRollbackStore struct{}
+
+func (s *stubRollbackStore) RecordRollback(_ context.Context, _ domain.RollbackRecord) (bool, error) {
+	return true, nil
+}
+
+func (s *stubRollbackStore) ListRollbacks(_ context.Context, _ string) ([]domain.RollbackRecord, error) {
+	return []domain.RollbackRecord{}, nil
+}
+
 type stubCIJobLogReader struct{}
 
 func (s *stubCIJobLogReader) QueryLogs(_ context.Context, _ *domain.CIJobLogQuery) (*domain.CIJobLogResult, error) {
@@ -685,6 +695,7 @@ func buildFullyWiredHandler(t *testing.T, mux humago.Mux) http.Handler {
 		ciJobLogReader:              &stubCIJobLogReader{},
 		automationTestResultsReader: &stubAutomationTestResultsReader{},
 		automationTestsReader:       &stubAutomationTestsReader{},
+		rollbackStore:               &stubRollbackStore{},
 	})
 	require.NoError(t, err)
 	require.NotNil(t, h)
@@ -1170,6 +1181,7 @@ func buildSpecGenerationHandler(t *testing.T) http.Handler {
 		ciJobLogReader:              &stubCIJobLogReader{},
 		automationTestResultsReader: &stubAutomationTestResultsReader{},
 		automationTestsReader:       &stubAutomationTestsReader{},
+		rollbackStore:               &stubRollbackStore{},
 	})
 	require.NoError(t, err)
 	return h
@@ -1609,4 +1621,48 @@ func TestBuildHandler_CorrelationIDRefsAreValidated(t *testing.T) {
 				"%s must be held to the correlation_id character set", tt.field)
 		})
 	}
+}
+
+// TestBuildHandler_RollbackRoutes pins the rollback record routes (DEVOPS-320): the write key
+// records, either key lists, a missing credential is 401, and there is no legacy unversioned
+// path.
+func TestBuildHandler_RollbackRoutes(t *testing.T) {
+	h := buildFullyWiredHandler(t, nil)
+	const body = `{"workflow":"wf-1","environment":"prod","reason":"","source":"","rollout_phase":"",` +
+		`"pod_hash":"","gitops_repo":"","gitops_commit":"","revert_commit":"","status":"success",` +
+		`"forced":false,"message":"","outcome":""}`
+
+	do := func(method, path, key, payload string) int {
+		req := httptest.NewRequest(method, path, strings.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		if key != "" {
+			req.Header.Set("Authorization", "Bearer "+key)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w.Code
+	}
+
+	assert.Equal(t, http.StatusOK, do(http.MethodPost, "/v1/slips/c1/rollbacks", "write-key", body))
+	assert.Equal(t, http.StatusForbidden, do(http.MethodPost, "/v1/slips/c1/rollbacks", "test-key", body),
+		"the read key must not record")
+	assert.Equal(t, http.StatusUnauthorized, do(http.MethodPost, "/v1/slips/c1/rollbacks", "", body))
+	assert.Equal(t, http.StatusOK, do(http.MethodGet, "/v1/slips/c1/rollbacks", "test-key", ""))
+	assert.Equal(t, http.StatusOK, do(http.MethodGet, "/v1/slips/c1/rollbacks", "write-key", ""),
+		"the write key may read, as on every read route")
+	assert.Equal(t, http.StatusNotFound, do(http.MethodGet, "/slips/c1/rollbacks", "test-key", ""),
+		"v1-only: no legacy unversioned path")
+}
+
+// Without a rollback store the routes are simply absent, and the API still boots.
+func TestBuildHandler_RollbackRoutesAbsentWithoutStore(t *testing.T) {
+	cfg := &config.Config{APIKey: "test-key", WriteAPIKey: "write-key", Port: 8080}
+	h, err := buildHandler(handlerDeps{cfg: cfg, reader: newStubSlipReader(), writer: &stubSlipWriter{}})
+	require.NoError(t, err, "a nil rollback store must not stop the API from booting")
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/slips/c1/rollbacks", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusNotFound, w.Code)
 }
