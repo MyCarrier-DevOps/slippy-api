@@ -907,6 +907,34 @@
         ],
         "type": "object"
       },
+      "ListRollbacksOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/ListRollbacksOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "rollbacks": {
+            "description": "Rollback attempts in the order they were recorded",
+            "items": {
+              "$ref": "#/components/schemas/RollbackRecord"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "rollbacks"
+        ],
+        "type": "object"
+      },
       "PipelineConfigResponseBody": {
         "additionalProperties": false,
         "properties": {
@@ -1004,6 +1032,123 @@
         ],
         "type": "object"
       },
+      "RecordRollbackInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/RecordRollbackInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "environment": {
+            "description": "dev, preprod or prod",
+            "maxLength": 16,
+            "type": "string"
+          },
+          "forced": {
+            "description": "Whether --force conflict resolution was used",
+            "type": "boolean"
+          },
+          "gitops_commit": {
+            "description": "Release commit that was reverted",
+            "maxLength": 64,
+            "type": "string"
+          },
+          "gitops_repo": {
+            "description": "GitOps repository the revert targeted",
+            "maxLength": 128,
+            "type": "string"
+          },
+          "message": {
+            "description": "Why the rollback started: the publisher's text",
+            "maxLength": 1000,
+            "type": "string"
+          },
+          "outcome": {
+            "description": "What the attempt did, or why it did not land",
+            "maxLength": 1000,
+            "type": "string"
+          },
+          "pod_hash": {
+            "description": "Aborted ReplicaSet pod-template hash; may be empty",
+            "maxLength": 64,
+            "type": "string"
+          },
+          "reason": {
+            "description": "alert_gate, canary_abort, timeout, manual or unknown; may be empty",
+            "maxLength": 64,
+            "type": "string"
+          },
+          "revert_commit": {
+            "description": "Revert commit; empty when none was made",
+            "maxLength": 64,
+            "type": "string"
+          },
+          "rollout_phase": {
+            "description": "dark, canary, promoted or rolling; may be empty",
+            "maxLength": 64,
+            "type": "string"
+          },
+          "source": {
+            "description": "Publisher of the prod.rollback event; may be empty",
+            "maxLength": 64,
+            "type": "string"
+          },
+          "status": {
+            "description": "success, noop, skipped, failed or dry_run",
+            "maxLength": 16,
+            "type": "string"
+          },
+          "workflow": {
+            "description": "Argo Workflow of the attempt; a repeat for the same slip and workflow is not recorded twice, and replaces the outcome only of a failed record",
+            "maxLength": 253,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "workflow",
+          "environment",
+          "reason",
+          "source",
+          "rollout_phase",
+          "pod_hash",
+          "gitops_repo",
+          "gitops_commit",
+          "revert_commit",
+          "status",
+          "forced",
+          "message",
+          "outcome"
+        ],
+        "type": "object"
+      },
+      "RecordRollbackOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/RecordRollbackOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "inserted": {
+            "description": "True when this call wrote a new record; false when one for this slip and workflow already existed",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "inserted"
+        ],
+        "type": "object"
+      },
       "ReleaseClaimInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -1057,6 +1202,80 @@
         },
         "required": [
           "released"
+        ],
+        "type": "object"
+      },
+      "RollbackRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "correlation_id": {
+            "type": "string"
+          },
+          "environment": {
+            "type": "string"
+          },
+          "forced": {
+            "type": "boolean"
+          },
+          "gitops_commit": {
+            "type": "string"
+          },
+          "gitops_repo": {
+            "type": "string"
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "pod_hash": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "recorded_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "revert_commit": {
+            "type": "string"
+          },
+          "rollout_phase": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "workflow": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "correlation_id",
+          "workflow",
+          "recorded_at",
+          "environment",
+          "reason",
+          "source",
+          "rollout_phase",
+          "pod_hash",
+          "gitops_repo",
+          "gitops_commit",
+          "revert_commit",
+          "status",
+          "forced",
+          "message",
+          "outcome"
         ],
         "type": "object"
       },
@@ -2992,6 +3211,110 @@
           }
         ],
         "summary": "Release a claim once the claimant's run has nothing in flight",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/v1/slips/{correlationID}/rollbacks": {
+      "get": {
+        "operationId": "list-rollbacks",
+        "parameters": [
+          {
+            "description": "Routing slip correlation ID",
+            "in": "path",
+            "name": "correlationID",
+            "required": true,
+            "schema": {
+              "description": "Routing slip correlation ID",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListRollbacksOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "summary": "List the rollback attempts recorded for a routing slip",
+        "tags": [
+          "v1"
+        ]
+      },
+      "post": {
+        "operationId": "record-rollback",
+        "parameters": [
+          {
+            "description": "Routing slip correlation ID",
+            "in": "path",
+            "name": "correlationID",
+            "required": true,
+            "schema": {
+              "description": "Routing slip correlation ID",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecordRollbackInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordRollbackOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "writeApiKey": []
+          }
+        ],
+        "summary": "Record a rollback attempt for a routing slip",
         "tags": [
           "v1"
         ]

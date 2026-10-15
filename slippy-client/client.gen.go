@@ -410,6 +410,15 @@ type ImageTagResult struct {
 	Tags       map[string]string `json:"tags"`
 }
 
+// ListRollbacksOutputBody defines model for ListRollbacksOutputBody.
+type ListRollbacksOutputBody struct {
+	// Schema A URL to the JSON Schema for this object.
+	Schema *string `json:"$schema,omitempty"`
+
+	// Rollbacks Rollback attempts in the order they were recorded
+	Rollbacks *[]RollbackRecord `json:"rollbacks"`
+}
+
 // PipelineConfigResponseBody defines model for PipelineConfigResponseBody.
 type PipelineConfigResponseBody struct {
 	// Schema A URL to the JSON Schema for this object.
@@ -452,6 +461,60 @@ type PromoteSlipInputBody struct {
 	PromotedTo string `json:"promoted_to"`
 }
 
+// RecordRollbackInputBody defines model for RecordRollbackInputBody.
+type RecordRollbackInputBody struct {
+	// Schema A URL to the JSON Schema for this object.
+	Schema *string `json:"$schema,omitempty"`
+
+	// Environment dev, preprod or prod
+	Environment string `json:"environment"`
+
+	// Forced Whether --force conflict resolution was used
+	Forced bool `json:"forced"`
+
+	// GitopsCommit Release commit that was reverted
+	GitopsCommit string `json:"gitops_commit"`
+
+	// GitopsRepo GitOps repository the revert targeted
+	GitopsRepo string `json:"gitops_repo"`
+
+	// Message Why the rollback started: the publisher's text
+	Message string `json:"message"`
+
+	// Outcome What the attempt did, or why it did not land
+	Outcome string `json:"outcome"`
+
+	// PodHash Aborted ReplicaSet pod-template hash; may be empty
+	PodHash string `json:"pod_hash"`
+
+	// Reason alert_gate, canary_abort, timeout, manual or unknown; may be empty
+	Reason string `json:"reason"`
+
+	// RevertCommit Revert commit; empty when none was made
+	RevertCommit string `json:"revert_commit"`
+
+	// RolloutPhase dark, canary, promoted or rolling; may be empty
+	RolloutPhase string `json:"rollout_phase"`
+
+	// Source Publisher of the prod.rollback event; may be empty
+	Source string `json:"source"`
+
+	// Status success, noop, skipped, failed or dry_run
+	Status string `json:"status"`
+
+	// Workflow Argo Workflow of the attempt; a repeat for the same slip and workflow is not recorded twice, and replaces the outcome only of a failed record
+	Workflow string `json:"workflow"`
+}
+
+// RecordRollbackOutputBody defines model for RecordRollbackOutputBody.
+type RecordRollbackOutputBody struct {
+	// Schema A URL to the JSON Schema for this object.
+	Schema *string `json:"$schema,omitempty"`
+
+	// Inserted True when this call wrote a new record; false when one for this slip and workflow already existed
+	Inserted bool `json:"inserted"`
+}
+
 // ReleaseClaimInputBody defines model for ReleaseClaimInputBody.
 type ReleaseClaimInputBody struct {
 	// Schema A URL to the JSON Schema for this object.
@@ -474,6 +537,26 @@ type ReleaseClaimOutputBody struct {
 
 	// Status the slip's status at decision time; a release never changes it
 	Status *string `json:"status,omitempty"`
+}
+
+// RollbackRecord defines model for RollbackRecord.
+type RollbackRecord struct {
+	CorrelationId string    `json:"correlation_id"`
+	Environment   string    `json:"environment"`
+	Forced        bool      `json:"forced"`
+	GitopsCommit  string    `json:"gitops_commit"`
+	GitopsRepo    string    `json:"gitops_repo"`
+	Id            int64     `json:"id"`
+	Message       string    `json:"message"`
+	Outcome       string    `json:"outcome"`
+	PodHash       string    `json:"pod_hash"`
+	Reason        string    `json:"reason"`
+	RecordedAt    time.Time `json:"recorded_at"`
+	RevertCommit  string    `json:"revert_commit"`
+	RolloutPhase  string    `json:"rollout_phase"`
+	Source        string    `json:"source"`
+	Status        string    `json:"status"`
+	Workflow      string    `json:"workflow"`
 }
 
 // SetImageTagInputBody defines model for SetImageTagInputBody.
@@ -680,6 +763,9 @@ type PromoteSlipJSONRequestBody = PromoteSlipInputBody
 // ReleaseClaimJSONRequestBody defines body for ReleaseClaim for application/json ContentType.
 type ReleaseClaimJSONRequestBody = ReleaseClaimInputBody
 
+// RecordRollbackJSONRequestBody defines body for RecordRollback for application/json ContentType.
+type RecordRollbackJSONRequestBody = RecordRollbackInputBody
+
 // CompleteStepJSONRequestBody defines body for CompleteStep for application/json ContentType.
 type CompleteStepJSONRequestBody = StepBody
 
@@ -831,6 +917,14 @@ type ClientInterface interface {
 	ReleaseClaimWithBody(ctx context.Context, correlationID string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	ReleaseClaim(ctx context.Context, correlationID string, body ReleaseClaimJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListRollbacks request
+	ListRollbacks(ctx context.Context, correlationID string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RecordRollbackWithBody request with any body
+	RecordRollbackWithBody(ctx context.Context, correlationID string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	RecordRollback(ctx context.Context, correlationID string, body RecordRollbackJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetStepPrerequisites request
 	GetStepPrerequisites(ctx context.Context, correlationID string, stepName string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -1146,6 +1240,42 @@ func (c *Client) ReleaseClaimWithBody(ctx context.Context, correlationID string,
 
 func (c *Client) ReleaseClaim(ctx context.Context, correlationID string, body ReleaseClaimJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewReleaseClaimRequest(c.Server, correlationID, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListRollbacks(ctx context.Context, correlationID string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListRollbacksRequest(c.Server, correlationID)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RecordRollbackWithBody(ctx context.Context, correlationID string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRecordRollbackRequestWithBody(c.Server, correlationID, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RecordRollback(ctx context.Context, correlationID string, body RecordRollbackJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRecordRollbackRequest(c.Server, correlationID, body)
 	if err != nil {
 		return nil, err
 	}
@@ -2389,6 +2519,87 @@ func NewReleaseClaimRequestWithBody(server string, correlationID string, content
 	return req, nil
 }
 
+// NewListRollbacksRequest generates requests for ListRollbacks
+func NewListRollbacksRequest(server string, correlationID string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "correlationID", correlationID, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/slips/%s/rollbacks", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewRecordRollbackRequest calls the generic RecordRollback builder with application/json body
+func NewRecordRollbackRequest(server string, correlationID string, body RecordRollbackJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewRecordRollbackRequestWithBody(server, correlationID, "application/json", bodyReader)
+}
+
+// NewRecordRollbackRequestWithBody generates requests for RecordRollback with any type of body
+func NewRecordRollbackRequestWithBody(server string, correlationID string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "correlationID", correlationID, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/slips/%s/rollbacks", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewGetStepPrerequisitesRequest generates requests for GetStepPrerequisites
 func NewGetStepPrerequisitesRequest(server string, correlationID string, stepName string) (*http.Request, error) {
 	var err error
@@ -2755,6 +2966,14 @@ type ClientWithResponsesInterface interface {
 	ReleaseClaimWithBodyWithResponse(ctx context.Context, correlationID string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ReleaseClaimResponse, error)
 
 	ReleaseClaimWithResponse(ctx context.Context, correlationID string, body ReleaseClaimJSONRequestBody, reqEditors ...RequestEditorFn) (*ReleaseClaimResponse, error)
+
+	// ListRollbacksWithResponse request
+	ListRollbacksWithResponse(ctx context.Context, correlationID string, reqEditors ...RequestEditorFn) (*ListRollbacksResponse, error)
+
+	// RecordRollbackWithBodyWithResponse request with any body
+	RecordRollbackWithBodyWithResponse(ctx context.Context, correlationID string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RecordRollbackResponse, error)
+
+	RecordRollbackWithResponse(ctx context.Context, correlationID string, body RecordRollbackJSONRequestBody, reqEditors ...RequestEditorFn) (*RecordRollbackResponse, error)
 
 	// GetStepPrerequisitesWithResponse request
 	GetStepPrerequisitesWithResponse(ctx context.Context, correlationID string, stepName string, reqEditors ...RequestEditorFn) (*GetStepPrerequisitesResponse, error)
@@ -3168,6 +3387,52 @@ func (r ReleaseClaimResponse) StatusCode() int {
 	return 0
 }
 
+type ListRollbacksResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *ListRollbacksOutputBody
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r ListRollbacksResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListRollbacksResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RecordRollbackResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *RecordRollbackOutputBody
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r RecordRollbackResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RecordRollbackResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type GetStepPrerequisitesResponse struct {
 	Body                          []byte
 	HTTPResponse                  *http.Response
@@ -3494,6 +3759,32 @@ func (c *ClientWithResponses) ReleaseClaimWithResponse(ctx context.Context, corr
 		return nil, err
 	}
 	return ParseReleaseClaimResponse(rsp)
+}
+
+// ListRollbacksWithResponse request returning *ListRollbacksResponse
+func (c *ClientWithResponses) ListRollbacksWithResponse(ctx context.Context, correlationID string, reqEditors ...RequestEditorFn) (*ListRollbacksResponse, error) {
+	rsp, err := c.ListRollbacks(ctx, correlationID, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListRollbacksResponse(rsp)
+}
+
+// RecordRollbackWithBodyWithResponse request with arbitrary body returning *RecordRollbackResponse
+func (c *ClientWithResponses) RecordRollbackWithBodyWithResponse(ctx context.Context, correlationID string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RecordRollbackResponse, error) {
+	rsp, err := c.RecordRollbackWithBody(ctx, correlationID, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRecordRollbackResponse(rsp)
+}
+
+func (c *ClientWithResponses) RecordRollbackWithResponse(ctx context.Context, correlationID string, body RecordRollbackJSONRequestBody, reqEditors ...RequestEditorFn) (*RecordRollbackResponse, error) {
+	rsp, err := c.RecordRollback(ctx, correlationID, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRecordRollbackResponse(rsp)
 }
 
 // GetStepPrerequisitesWithResponse request returning *GetStepPrerequisitesResponse
@@ -4096,6 +4387,72 @@ func ParseReleaseClaimResponse(rsp *http.Response) (*ReleaseClaimResponse, error
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest ReleaseClaimOutputBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListRollbacksResponse parses an HTTP response from a ListRollbacksWithResponse call
+func ParseListRollbacksResponse(rsp *http.Response) (*ListRollbacksResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListRollbacksResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ListRollbacksOutputBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRecordRollbackResponse parses an HTTP response from a RecordRollbackWithResponse call
+func ParseRecordRollbackResponse(rsp *http.Response) (*RecordRollbackResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RecordRollbackResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RecordRollbackOutputBody
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
