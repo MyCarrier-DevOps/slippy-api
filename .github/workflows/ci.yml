@@ -175,6 +175,8 @@ jobs:
       contents: write
     outputs:
       changed: ${{ steps.check-diff.outputs.changed }}
+      # The regenerated commit, which release-client must tag (github.sha is the commit before it).
+      sha: ${{ steps.commit.outputs.sha }}
     steps:
       - name: Generate GitHub App token
         id: app-token
@@ -223,6 +225,7 @@ jobs:
           fi
 
       - name: Commit regenerated files
+        id: commit
         if: steps.check-diff.outputs.changed == 'true'
         run: |
           git config user.name "${{ steps.app-user.outputs.name }}"
@@ -230,6 +233,7 @@ jobs:
           git add slippy-api/api/ slippy-client/client.gen.go slippy-client/go.mod slippy-client/go.sum
           git commit -m "chore: regenerate API contracts and Go client [skip ci]"
           git push
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   # Tag and release slippy-client when contracts were regenerated with changes
   release-client:
@@ -244,6 +248,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v7
         with:
+          # Tag the regenerated commit, not the push that triggered the run: the client the tag
+          # names must be the one generated from that push's API.
+          ref: ${{ needs.regenerate-client.outputs.sha }}
           fetch-depth: 0
 
       - name: Install GitVersion
