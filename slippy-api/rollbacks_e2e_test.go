@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -185,4 +186,53 @@ func TestE2E_RollbackRoutes_Postgres(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
 	w = do(http.MethodPost, path, "", string(payload))
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
+
+	// (f) on another slip: an argo retry of a failed attempt replaces its outcome, and a
+	// recycled generateName workflow name is a new row, not a lost one.
+	const corr2 = "e2e-rollback-corr-2"
+	require.NoError(t, store.Create(ctx, &slippy.Slip{
+		CorrelationID: corr2,
+		Repository:    "Owner/Repo",
+		Branch:        "main",
+		CommitSHA:     "e2e-sha-2",
+		Status:        slippy.SlipStatusFailed,
+	}))
+	path2 := "/v1/slips/" + corr2 + "/rollbacks"
+	attempt := func(workflow, status, outcome string) string {
+		m := maps.Clone(want)
+		m["workflow"], m["status"], m["outcome"] = workflow, status, outcome
+		raw, marshalErr := json.Marshal(m)
+		require.NoError(t, marshalErr)
+		return string(raw)
+	}
+	w = do(
+		http.MethodPost,
+		path2,
+		writeKey,
+		attempt("gitops-rollback-rt001", "failed", "push rejected after 5 attempts"),
+	)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.True(t, inserted(w))
+	w = do(http.MethodPost, path2, writeKey, attempt("gitops-rollback-rt001", "success", "Successfully rolled back"))
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.False(t, inserted(w), "the retry updates the failed row")
+	w = do(http.MethodPost, path2, writeKey, string(payload))
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.True(t, inserted(w), "the same workflow name on another slip is a new row")
+
+	w = do(http.MethodGet, path2, readKey, "")
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var listed2 struct {
+		Rollbacks []map[string]any `json:"rollbacks"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &listed2))
+	require.Len(t, listed2.Rollbacks, 2)
+	assert.Equal(t, "success", listed2.Rollbacks[0]["status"])
+	assert.Equal(t, "Successfully rolled back", listed2.Rollbacks[0]["outcome"])
+
+	// (g) text Postgres cannot store is a client error, not a 500.
+	w = do(http.MethodPost, path, writeKey, `{"workflow":"gitops-rollback-nul01","environment":"prod","reason":"",`+
+		`"source":"","rollout_phase":"","pod_hash":"","gitops_repo":"","gitops_commit":"","revert_commit":"",`+
+		`"status":"failed","forced":false,"message":"before\u0000after","outcome":""}`)
+	assert.Equal(t, http.StatusUnprocessableEntity, w.Code, w.Body.String())
 }

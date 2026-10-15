@@ -42,7 +42,7 @@ func NewRollbackHandler(store domain.RollbackStore) *RollbackHandler {
 type RecordRollbackInput struct {
 	CorrelationID string `path:"correlationID" doc:"Routing slip correlation ID"`
 	Body          struct {
-		Workflow     string `json:"workflow"      minLength:"1" maxLength:"253" doc:"Argo Workflow of the attempt; a repeat of the same workflow is not recorded twice"`
+		Workflow     string `json:"workflow"      minLength:"1" maxLength:"253" doc:"Argo Workflow of the attempt; a repeat for the same slip and workflow is not recorded twice, and replaces the outcome only of a failed record"`
 		Environment  string `json:"environment"   maxLength:"16"   doc:"dev, preprod or prod"`
 		Reason       string `json:"reason"        maxLength:"64"   doc:"alert_gate, canary_abort, timeout, manual or unknown; may be empty"`
 		Source       string `json:"source"        maxLength:"64"   doc:"Publisher of the prod.rollback event; may be empty"`
@@ -61,7 +61,7 @@ type RecordRollbackInput struct {
 // RecordRollbackOutput reports whether this call wrote the record.
 type RecordRollbackOutput struct {
 	Body struct {
-		Inserted bool `json:"inserted" doc:"True when this call wrote the record; false when one for this workflow already existed"`
+		Inserted bool `json:"inserted" doc:"True when this call wrote a new record; false when one for this slip and workflow already existed"`
 	}
 }
 
