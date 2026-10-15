@@ -149,7 +149,8 @@ func TestRecordRollback_InvalidRecordIs422(t *testing.T) {
 	})
 	w := postRollback(t, h, "corr-001", rollbackBody(t, map[string]any{"status": "error"}))
 	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
-	assert.Contains(t, w.Body.String(), "status")
+	assert.Contains(t, w.Body.String(), "is not one of success, noop, skipped, failed, dry_run",
+		"the library's validation detail reaches the caller")
 }
 
 func TestRecordRollback_MissingRequiredFieldIs422WithoutTouchingTheStore(t *testing.T) {

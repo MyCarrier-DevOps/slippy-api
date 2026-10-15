@@ -50,8 +50,10 @@ func newRollbacksE2EStore(t *testing.T) *slippy.PostgresStore {
 				WithOccurrence(2).WithStartupTimeout(60*time.Second),
 		),
 	)
+	// Registered before the error check: a container that started but never became ready comes
+	// back with the error, and TerminateContainer is a no-op for a nil one.
+	t.Cleanup(func() { _ = testcontainers.TerminateContainer(ctr) })
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = ctr.Terminate(ctx) })
 
 	host, err := ctr.Host(ctx)
 	require.NoError(t, err)
@@ -235,4 +237,5 @@ func TestE2E_RollbackRoutes_Postgres(t *testing.T) {
 		`"source":"","rollout_phase":"","pod_hash":"","gitops_repo":"","gitops_commit":"","revert_commit":"",`+
 		`"status":"failed","forced":false,"message":"before\u0000after","outcome":""}`)
 	assert.Equal(t, http.StatusUnprocessableEntity, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "contains a NUL byte", "the library's message reaches the caller")
 }
