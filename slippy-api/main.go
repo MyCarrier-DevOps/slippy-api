@@ -780,8 +780,9 @@ func run() error {
 	// Job has applied the schema — the Job must run first.
 	if probeErr := store.ProbeSchema(pgConnectCtx); probeErr != nil {
 		return fmt.Errorf(
-			"routing_slips schema is behind this library; apply migration v6 (slippy-migrator) before serving: %w",
-			probeErr)
+			"routing_slips schema is behind this library; apply the latest migrations (slippy-migrator) before serving: %w",
+			probeErr,
+		)
 	}
 	// A redundant second check, kept deliberately as defence in depth rather than because
 	// ProbeSchema leaves a gap: since DEVOPS-367 that probe already diffs every column the
