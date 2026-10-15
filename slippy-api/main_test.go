@@ -1630,7 +1630,7 @@ func TestBuildHandler_RollbackRoutes(t *testing.T) {
 	h := buildFullyWiredHandler(t, nil)
 	const body = `{"workflow":"wf-1","environment":"prod","reason":"","source":"","rollout_phase":"",` +
 		`"pod_hash":"","gitops_repo":"","gitops_commit":"","revert_commit":"","status":"success",` +
-		`"forced":false,"message":""}`
+		`"forced":false,"message":"","outcome":""}`
 
 	do := func(method, path, key, payload string) int {
 		req := httptest.NewRequest(method, path, strings.NewReader(payload))

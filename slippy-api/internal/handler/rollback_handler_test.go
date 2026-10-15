@@ -68,7 +68,7 @@ func rollbackBody(t *testing.T, overrides map[string]any) io.Reader {
 		"workflow": "gitops-rollback-abc12", "environment": "prod", "reason": "canary_abort",
 		"source": "canary-coordinator", "rollout_phase": "canary", "pod_hash": "5d8b9c7f6",
 		"gitops_repo": "GitOps-prod", "gitops_commit": "a1b2c3d", "revert_commit": "e4f5a6b",
-		"status": "success", "forced": false, "message": "reverted",
+		"status": "success", "forced": false, "message": "canary analysis failed", "outcome": "reverted",
 	}
 	for k, v := range overrides {
 		if v == nil {
@@ -117,7 +117,7 @@ func TestRecordRollback_Inserted(t *testing.T) {
 		CorrelationID: "corr-001", Workflow: "gitops-rollback-abc12", Environment: "prod",
 		Reason: "canary_abort", Source: "canary-coordinator", RolloutPhase: "canary", PodHash: "5d8b9c7f6",
 		GitOpsRepo: "GitOps-prod", GitOpsCommit: "a1b2c3d", RevertCommit: "e4f5a6b",
-		Status: slippy.RollbackStatusSuccess, Forced: true, Message: "reverted",
+		Status: slippy.RollbackStatusSuccess, Forced: true, Message: "canary analysis failed", Outcome: "reverted",
 	}, got, "the correlation id comes from the path and every body field is forwarded")
 }
 
@@ -165,15 +165,17 @@ func TestRecordRollback_EmptyWorkflowIs422(t *testing.T) {
 }
 
 // Review Focus 3: the limit is characters, so 1000 two-byte runes pass and 1001 do not.
-func TestRecordRollback_MessageLimitCountsCharacters(t *testing.T) {
+func TestRecordRollback_TextLimitsCountCharacters(t *testing.T) {
 	h := setupRollbackTestAPI(&mockRollbackStore{
 		recordFn: func(context.Context, domain.RollbackRecord) (bool, error) { return true, nil },
 	})
-	w := postRollback(t, h, "corr-001", rollbackBody(t, map[string]any{"message": strings.Repeat("é", 1000)}))
-	assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	for _, field := range []string{"message", "outcome"} {
+		w := postRollback(t, h, "corr-001", rollbackBody(t, map[string]any{field: strings.Repeat("é", 1000)}))
+		assert.Equal(t, http.StatusOK, w.Code, "%s: %s", field, w.Body.String())
 
-	w = postRollback(t, h, "corr-001", rollbackBody(t, map[string]any{"message": strings.Repeat("é", 1001)}))
-	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+		w = postRollback(t, h, "corr-001", rollbackBody(t, map[string]any{field: strings.Repeat("é", 1001)}))
+		assert.Equal(t, http.StatusUnprocessableEntity, w.Code, field)
+	}
 }
 
 // Review Focus 5: an oversized body is refused before it is parsed or stored.
@@ -227,8 +229,20 @@ func TestListRollbacks_OK(t *testing.T) {
 		listFn: func(_ context.Context, id string) ([]domain.RollbackRecord, error) {
 			assert.Equal(t, "corr-001", id)
 			return []domain.RollbackRecord{
-				{ID: 1, CorrelationID: "corr-001", Workflow: "wf-1", Environment: "prod", Status: slippy.RollbackStatusSuccess},
-				{ID: 2, CorrelationID: "corr-001", Workflow: "wf-2", Environment: "prod", Status: slippy.RollbackStatusNoop},
+				{
+					ID:            1,
+					CorrelationID: "corr-001",
+					Workflow:      "wf-1",
+					Environment:   "prod",
+					Status:        slippy.RollbackStatusSuccess,
+				},
+				{
+					ID:            2,
+					CorrelationID: "corr-001",
+					Workflow:      "wf-2",
+					Environment:   "prod",
+					Status:        slippy.RollbackStatusNoop,
+				},
 			}, nil
 		},
 	})

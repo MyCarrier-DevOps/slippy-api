@@ -18,8 +18,9 @@ import (
 )
 
 // maxRollbackBodyBytes bounds the record-rollback body. The largest legitimate body is about
-// 2.5 KiB (a 1000-character message plus short fields), so 16 KiB leaves headroom while
-// refusing anything that is not a rollback record before it is parsed.
+// 9 KiB (a 1000-character message and outcome, up to 4 bytes per character, plus short fields),
+// so 16 KiB leaves headroom while refusing anything that is not a rollback record before it is
+// parsed.
 const maxRollbackBodyBytes = 16 * 1024
 
 // RollbackHandler serves the rollback record routes (DEVOPS-320): gitops-rollback records one
@@ -52,7 +53,8 @@ type RecordRollbackInput struct {
 		RevertCommit string `json:"revert_commit" maxLength:"64"   doc:"Revert commit; empty when none was made"`
 		Status       string `json:"status"        maxLength:"16"   doc:"success, noop, skipped, failed or dry_run"`
 		Forced       bool   `json:"forced"                         doc:"Whether --force conflict resolution was used"`
-		Message      string `json:"message"       maxLength:"1000" doc:"Outcome detail"`
+		Message      string `json:"message"       maxLength:"1000" doc:"Why the rollback started: the publisher's text"`
+		Outcome      string `json:"outcome"       maxLength:"1000" doc:"What the attempt did, or why it did not land"`
 	}
 }
 
@@ -132,6 +134,7 @@ func (h *RollbackHandler) recordRollback(
 		Status:        domain.RollbackStatus(input.Body.Status),
 		Forced:        input.Body.Forced,
 		Message:       input.Body.Message,
+		Outcome:       input.Body.Outcome,
 	})
 	if err != nil {
 		recordHandlerError(span, err)

@@ -129,7 +129,8 @@ func TestE2E_RollbackRoutes_Postgres(t *testing.T) {
 		"revert_commit": "e4f5a6b",
 		"status":        "success",
 		"forced":        true,
-		"message":       "reverted",
+		"message":       "canary analysis failed",
+		"outcome":       "reverted",
 	}
 	payload, err := json.Marshal(want)
 	require.NoError(t, err)
