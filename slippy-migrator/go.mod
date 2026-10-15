@@ -3,8 +3,8 @@ module github.com/MyCarrier-DevOps/slippy-api/slippy-migrator
 go 1.26.6
 
 require (
-	github.com/MyCarrier-DevOps/goLibMyCarrier/postgres v1.5.5-feat-devops-320-slip-rollbacks.14
-	github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.5.5-feat-devops-320-slip-rollbacks.14
+	github.com/MyCarrier-DevOps/goLibMyCarrier/postgres v1.5.5-feat-devops-320-slip-rollbacks.18
+	github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.5.5-feat-devops-320-slip-rollbacks.18
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/stretchr/testify v1.12.1
 )
@@ -12,9 +12,9 @@ require (
 require (
 	dario.cat/mergo v1.0.2 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
-	github.com/MyCarrier-DevOps/goLibMyCarrier/github v1.5.5-feat-devops-320-slip-rollbacks.14 // indirect
-	github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.5.5-feat-devops-320-slip-rollbacks.14 // indirect
-	github.com/MyCarrier-DevOps/goLibMyCarrier/postgresmigrator v1.5.5-feat-devops-320-slip-rollbacks.14 // indirect
+	github.com/MyCarrier-DevOps/goLibMyCarrier/github v1.5.5-feat-devops-320-slip-rollbacks.18 // indirect
+	github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.5.5-feat-devops-320-slip-rollbacks.18 // indirect
+	github.com/MyCarrier-DevOps/goLibMyCarrier/postgresmigrator v1.5.5-feat-devops-320-slip-rollbacks.18 // indirect
 	github.com/ProtonMail/go-crypto v1.5.1 // indirect
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
