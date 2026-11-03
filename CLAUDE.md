@@ -225,6 +225,13 @@ Bump every goLibMyCarrier module together in both `slippy-api/go.mod` and `slipp
   - `POST /v1/slips/{correlationID}/rollbacks` (`record-rollback`, write key, 16 KiB body, always `200 {"inserted": bool}`);
   - `GET /v1/slips/{correlationID}/rollbacks` (`list-rollbacks`, read key, `200 {"rollbacks": [...]}`, empty for an unknown slip).
 
+**v1.5.10 (DEVOPS-521): no migration, and `SlipStore` is unchanged.** Bump every goLibMyCarrier module together in both modules, as for v1.4.0. The only slippy change since v1.5.5 is goLibMyCarrier#103 (v1.5.8); the rest is argocdclient, which slippy-api does not import.
+
+- **`SkipStep` refuses a failed canary step.** When the target is `prod_canary` or `preprod_rollback_test` and its recorded status is `failed`, the library returns `ErrSkipOverFailedCanary` inside a `*slippy.StepError` and writes nothing. `skipped` counts as success, so without this the next release's step-0 skip writer (`create-github-release`) would turn a failed rehearsal or canary into `skipped` and `prod_gate` would pass.
+- **The skip route answers 409 for it, not 422.** `mapWriteError` has a sentinel arm above the `StepError` default; `TestMapWriteError` and `TestSkipStep_FailedCanaryStepIsAConflict` pin it. The Slippy CLI does not retry a 409 on `skip-step`.
+- **The guard lives in the library's `SkipStep`, so the adapter must call it.** A skip through `UpdateStepWithStatus` would bypass it; `TestSlipWriterAdapter_SkipStep_FailedCanaryStep` fails if the adapter does that.
+- **The check is a read and then a write, not one atomic operation.** A failed verdict written between the two can still be overwritten.
+
 ### Behavioral Notes (v1.3.77+)
 
 - `checkPipelineCompletion` short-circuits on `Completed`, `Abandoned`, `Promoted` (was `Completed` only before v1.3.77). Post-`PromoteSlip`/`AbandonSlip` terminal step events no longer overwrite `slip.status`.

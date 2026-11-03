@@ -562,6 +562,30 @@ func TestSkipStep_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// A skip refused because the canary step is recorded as failed writes nothing; the caller must
+// re-run the step to a new verdict instead of skipping it, so it is a 409, not a 422 (DEVOPS-521).
+func TestSkipStep_FailedCanaryStepIsAConflict(t *testing.T) {
+	for _, step := range []string{"prod_canary", "preprod_rollback_test"} {
+		t.Run(step, func(t *testing.T) {
+			w := &mockWriter{
+				skipStepFn: func(_ context.Context, cID, step, comp, _ string) error {
+					return slippy.NewStepError("skip", cID, step, comp, slippy.ErrSkipOverFailedCanary)
+				},
+			}
+			handler := setupWriteTestAPI(w)
+
+			body := `{"reason":"deployment-strategy is not canary"}`
+			req := httptest.NewRequest(http.MethodPost, "/slips/abc-123/steps/"+step+"/skip", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			assert.Equal(t, http.StatusConflict, rec.Code)
+			assert.Contains(t, rec.Body.String(), "failed canary step")
+		})
+	}
+}
+
 func TestSkipStep_InternalError(t *testing.T) {
 	w := &mockWriter{
 		skipStepFn: func(_ context.Context, _, _, _, _ string) error {
@@ -1299,6 +1323,13 @@ func TestMapWriteError(t *testing.T) {
 		{"creation in progress (sentinel)", domain.ErrCreationInProgress, http.StatusConflict},
 		{"claim precondition failed", slippy.ErrClaimPreconditionFailed, http.StatusConflict},
 		{"not claimed", slippy.ErrNotClaimed, http.StatusConflict},
+		{
+			// goLibMyCarrier v1.5.8+ returns the sentinel inside a *StepError, so without its own
+			// arm the StepError default maps a refused skip to 422 (DEVOPS-521).
+			"skip over a failed canary step (wrapped in StepError, as SkipStep returns it)",
+			slippy.NewStepError("skip", "id", "prod_canary", "", slippy.ErrSkipOverFailedCanary),
+			http.StatusConflict,
+		},
 		{
 			"creation in progress (wrapped, as returned by writer)",
 			fmt.Errorf("dedup: slip for repo:sha creation in progress, retry: %w", domain.ErrCreationInProgress),
