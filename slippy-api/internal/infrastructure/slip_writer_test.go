@@ -457,6 +457,51 @@ func TestSlipWriterAdapter_SkipStep_NotFound(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// The adapter must reach the library's SkipStep, which refuses to overwrite a failed canary
+// verdict with skipped (goLibMyCarrier v1.5.8+). A write through UpdateStepWithStatus would
+// bypass that guard, and the next release's step-0 skip would unblock prod_gate (DEVOPS-521 R5).
+func TestSlipWriterAdapter_SkipStep_FailedCanaryStep(t *testing.T) {
+	tests := []struct {
+		step      string
+		recorded  slippy.StepStatus
+		wantWrite bool
+	}{
+		{"prod_canary", slippy.StepStatusFailed, false},
+		{"preprod_rollback_test", slippy.StepStatusFailed, false},
+		{"preprod_rollback_test", slippy.StepStatusAborted, true},
+		{"builds_completed", slippy.StepStatusFailed, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.step+"/"+string(tt.recorded), func(t *testing.T) {
+			var wrote bool
+			store := &mockSlipStore{
+				loadFn: func(_ context.Context, id string) (*slippy.Slip, error) {
+					return &slippy.Slip{
+						CorrelationID: id,
+						Steps:         map[string]slippy.Step{tt.step: {Status: tt.recorded}},
+					}, nil
+				},
+				updateStepWithHistoryFn: func(
+					_ context.Context, _, _, _ string, _ slippy.StepStatus, _ slippy.StateHistoryEntry,
+				) error {
+					wrote = true
+					return nil
+				},
+			}
+			adapter := newTestWriterAdapter(store)
+
+			err := adapter.SkipStep(context.Background(), "abc-123", tt.step, "", "not canary")
+
+			assert.Equal(t, tt.wantWrite, wrote)
+			if tt.wantWrite {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorIs(t, err, slippy.ErrSkipOverFailedCanary)
+		})
+	}
+}
+
 func TestSlipWriterAdapter_SetComponentImageTag_Success(t *testing.T) {
 	var called bool
 	store := &mockSlipStore{

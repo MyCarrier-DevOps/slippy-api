@@ -911,6 +911,15 @@ func mapWriteError(err error) error {
 			http.StatusConflict,
 			"slip is not currently claimed; nothing to release (a terminal status write ends a claim on its own)",
 		)
+	case errors.Is(err, slippy.ErrSkipOverFailedCanary):
+		// Nothing was written. skipped counts as success, so a skip over a failed prod_canary or
+		// preprod_rollback_test would unblock prod_deploy and prod_gate (DEVOPS-521). The library
+		// returns the sentinel inside a *StepError, so this arm must sit above the 422 default.
+		return huma.NewError(
+			http.StatusConflict,
+			"refusing to skip a failed canary step; nothing written — re-run the step to a new verdict instead",
+			err,
+		)
 	case errors.Is(err, domain.ErrWriteContended):
 		// Per-slip write-lock contention that outlasted the DB lock_timeout and the
 		// in-adapter retries (translated from the driver error at the adapter boundary).
