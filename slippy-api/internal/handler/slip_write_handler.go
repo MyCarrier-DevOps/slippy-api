@@ -858,6 +858,18 @@ func (h *SlipWriteHandler) releaseClaim(
 
 // --- Error Mapping -------------------------------------------------------
 
+// skipOverFailedStepDetail is the 409 detail for a skip the library refused with
+// ErrSkipOverFailedCanary. It names the step from the library's *StepError when there is one.
+func skipOverFailedStepDetail(err error) string {
+	const rule = "a failed canary or prod deploy step cannot be skipped; nothing written — " +
+		"re-run the step to a new verdict instead"
+	var stepErr *slippy.StepError
+	if errors.As(err, &stepErr) && stepErr.StepName != "" {
+		return "refusing to skip " + stepErr.StepName + ": the step is failed, and " + rule
+	}
+	return "refusing to skip: " + rule
+}
+
 // mapWriteError converts domain/store errors to huma status errors for write ops.
 func mapWriteError(err error) error {
 	switch {
@@ -913,13 +925,10 @@ func mapWriteError(err error) error {
 		)
 	case errors.Is(err, slippy.ErrSkipOverFailedCanary):
 		// Nothing was written. skipped counts as success, so a skip over a failed prod_canary or
-		// preprod_rollback_test would unblock prod_deploy and prod_gate (DEVOPS-521). The library
+		// preprod_rollback_test would unblock prod_deploy and prod_gate (DEVOPS-521), and one over a
+		// failed prod_deploy or prod_tests would clear that primary failure (DEVOPS-554). The library
 		// returns the sentinel inside a *StepError, so this arm must sit above the 422 default.
-		return huma.NewError(
-			http.StatusConflict,
-			"refusing to skip a failed canary step; nothing written — re-run the step to a new verdict instead",
-			err,
-		)
+		return huma.NewError(http.StatusConflict, skipOverFailedStepDetail(err), err)
 	case errors.Is(err, domain.ErrWriteContended):
 		// Per-slip write-lock contention that outlasted the DB lock_timeout and the
 		// in-adapter retries (translated from the driver error at the adapter boundary).

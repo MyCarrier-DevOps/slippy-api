@@ -562,10 +562,12 @@ func TestSkipStep_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
-// A skip refused because the canary step is recorded as failed writes nothing; the caller must
-// re-run the step to a new verdict instead of skipping it, so it is a 409, not a 422 (DEVOPS-521).
+// A skip refused because the step is recorded as failed writes nothing; the caller must re-run the
+// step to a new verdict instead of skipping it, so it is a 409, not a 422 (DEVOPS-521). The library
+// guards the canary steps and, from goLibMyCarrier v1.5.11, a failed prod_deploy or prod_tests
+// (DEVOPS-554); the detail names the refused step.
 func TestSkipStep_FailedCanaryStepIsAConflict(t *testing.T) {
-	for _, step := range []string{"prod_canary", "preprod_rollback_test"} {
+	for _, step := range []string{"prod_canary", "preprod_rollback_test", "prod_deploy", "prod_tests"} {
 		t.Run(step, func(t *testing.T) {
 			w := &mockWriter{
 				skipStepFn: func(_ context.Context, cID, step, comp, _ string) error {
@@ -581,7 +583,41 @@ func TestSkipStep_FailedCanaryStepIsAConflict(t *testing.T) {
 			handler.ServeHTTP(rec, req)
 
 			assert.Equal(t, http.StatusConflict, rec.Code)
-			assert.Contains(t, rec.Body.String(), "failed canary step")
+			var got huma.ErrorModel
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+			assert.Contains(t, got.Detail, "refusing to skip "+step+":")
+			assert.Contains(t, got.Detail, "a failed canary or prod deploy step cannot be skipped")
+		})
+	}
+}
+
+// The step name comes from the library's *StepError. A bare sentinel (no StepError around it)
+// still maps to 409, with a detail that names no step rather than an empty one.
+func TestMapWriteError_SkipOverFailedCanaryDetail(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantDetail string
+	}{
+		{
+			"wrapped in StepError, as SkipStep returns it",
+			slippy.NewStepError("skip", "c1", "prod_deploy", "", slippy.ErrSkipOverFailedCanary),
+			"refusing to skip prod_deploy: the step is failed, and a failed canary or prod deploy step " +
+				"cannot be skipped; nothing written — re-run the step to a new verdict instead",
+		},
+		{
+			"bare sentinel",
+			slippy.ErrSkipOverFailedCanary,
+			"refusing to skip: a failed canary or prod deploy step cannot be skipped; nothing written — " +
+				"re-run the step to a new verdict instead",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var model *huma.ErrorModel
+			require.ErrorAs(t, mapWriteError(tt.err), &model)
+			assert.Equal(t, http.StatusConflict, model.Status)
+			assert.Equal(t, tt.wantDetail, model.Detail)
 		})
 	}
 }
