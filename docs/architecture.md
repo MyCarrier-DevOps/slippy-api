@@ -17,7 +17,7 @@ slippy-api/
 ├── README.md / CONTRIBUTING.md
 ├── slippy-api/                          # Main Go module
 │   ├── Dockerfile                       # Multi-stage Docker build
-│   ├── go.mod / go.sum                  # Go 1.26, module: github.com/MyCarrier-DevOps/slippy-api
+│   ├── go.mod / go.sum                  # Go 1.27, module: github.com/MyCarrier-DevOps/slippy-api
 │   ├── main.go                          # Entry point and dependency wiring
 │   ├── main_test.go                     # Integration tests for the HTTP server
 │   ├── api/v1/
@@ -55,7 +55,7 @@ slippy-api/
 
 | Component | Technology | Version |
 |-----------|-----------|---------|
-| Language | Go | 1.26 |
+| Language | Go | 1.27 |
 | HTTP Framework | Huma v2 (OpenAPI 3.1 native) | v2.37.3 |
 | Database | ClickHouse | clickhouse-go v2.44.0 |
 | Cache | Dragonfly / Redis (optional) | go-redis v9.18.0 |
@@ -409,7 +409,7 @@ OTel spans distinguish client errors (not-found, invalid input → `Unset` statu
 
 ## 13. Build & Deploy
 
-- **Docker**: Multi-stage build (Go 1.26 builder → Alpine 3.23 runtime), `CGO_ENABLED=0`, port 8080
+- **Docker**: Multi-stage build (Go 1.27 builder → Alpine 3.23 runtime), `CGO_ENABLED=0`, port 8080
 - **CI**: GitHub Actions — unit tests, lint, vuln scan, client generation, client release
 - **Versioning**: GitVersion semantic versioning
 - **Client auto-generation**: OpenAPI spec → oapi-codegen → `slippy-client/client.gen.go`

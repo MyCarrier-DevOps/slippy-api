@@ -458,8 +458,9 @@ func TestSlipWriterAdapter_SkipStep_NotFound(t *testing.T) {
 }
 
 // The adapter must reach the library's SkipStep, which refuses to overwrite a failed canary
-// verdict with skipped (goLibMyCarrier v1.5.8+). A write through UpdateStepWithStatus would
-// bypass that guard, and the next release's step-0 skip would unblock prod_gate (DEVOPS-521 R5).
+// verdict with skipped (goLibMyCarrier v1.5.8+), and a failed prod_deploy or prod_tests
+// (v1.5.11+). A write through UpdateStepWithStatus would bypass that guard, and the next
+// release's step-0 skip would unblock prod_gate (DEVOPS-521 R5).
 func TestSlipWriterAdapter_SkipStep_FailedCanaryStep(t *testing.T) {
 	tests := []struct {
 		step      string
@@ -469,6 +470,11 @@ func TestSlipWriterAdapter_SkipStep_FailedCanaryStep(t *testing.T) {
 		{"prod_canary", slippy.StepStatusFailed, false},
 		{"preprod_rollback_test", slippy.StepStatusFailed, false},
 		{"preprod_rollback_test", slippy.StepStatusAborted, true},
+		// goLibMyCarrier v1.5.11 (DEVOPS-554) widens the guard to a failed prod_deploy or
+		// prod_tests: a canary abort's skip would otherwise clear that primary failure.
+		{"prod_deploy", slippy.StepStatusFailed, false},
+		{"prod_tests", slippy.StepStatusFailed, false},
+		{"prod_deploy", slippy.StepStatusCompleted, true},
 		{"builds_completed", slippy.StepStatusFailed, true},
 	}
 	for _, tt := range tests {

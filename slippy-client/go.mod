@@ -1,6 +1,6 @@
 module github.com/MyCarrier-DevOps/slippy-api/slippy-client
 
-go 1.26.6
+go 1.27.3
 
 require (
 	github.com/oapi-codegen/runtime v1.7.0

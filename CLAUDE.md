@@ -232,6 +232,11 @@ Bump every goLibMyCarrier module together in both `slippy-api/go.mod` and `slipp
 - **The guard lives in the library's `SkipStep`, so the adapter must call it.** A skip through `UpdateStepWithStatus` would bypass it; `TestSlipWriterAdapter_SkipStep_FailedCanaryStep` fails if the adapter does that.
 - **The check is a read and then a write, not one atomic operation.** A failed verdict written between the two can still be overwritten.
 
+**v1.5.11 (DEVOPS-554): no migration, and `SlipStore` is unchanged.** Bump every goLibMyCarrier module together in both modules, as for v1.4.0. The slippy changes are goLibMyCarrier#105. That release also moves every goLibMyCarrier module to `go 1.27.0`, so `go get` raises both modules' `go` line: move them to `go 1.27.3` and both Dockerfiles to `golang:1.27.3` in the same PR, or the 1.26 builder images refuse to build (`GOTOOLCHAIN=local`).
+
+- **`SkipStep` also refuses a failed `prod_deploy` or `prod_tests`,** with the same `ErrSkipOverFailedCanary` and no write. A canary abort's skip would otherwise clear that primary failure. The skip route answers 409 for it, as for a canary step, and the detail names the refused step (`skipOverFailedStepDetail`, pinned by `TestMapWriteError_SkipOverFailedCanaryDetail`). `TestSlipWriterAdapter_SkipStep_FailedCanaryStep` covers all four steps through the adapter.
+- **A canary retry resets the D13 canary skips (scenario H).** Once `prod_canary` is `completed` or `skipped`, `checkPipelineCompletion` returns `prod_deploy`, `prod_tests` and `prod_alert_gate` to `pending` when their latest skip carries a canary reason, whatever the slip status and whatever else has failed. A `POST /v1/slips/{correlationID}/steps/prod_canary/complete` after a canary abort runs the same reset, so `prod_steady_state` then waits until a new release runs those steps or supersedes the slip. Nothing in slippy-api changes for it.
+
 ### Behavioral Notes (v1.3.77+)
 
 - `checkPipelineCompletion` short-circuits on `Completed`, `Abandoned`, `Promoted` (was `Completed` only before v1.3.77). Post-`PromoteSlip`/`AbandonSlip` terminal step events no longer overwrite `slip.status`.

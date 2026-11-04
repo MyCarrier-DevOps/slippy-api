@@ -4,7 +4,7 @@ Thank you for contributing to the Slippy API. This guide covers everything you n
 
 ## Prerequisites
 
-- **Go 1.26+**
+- **Go 1.27+**
 - **Container runtime** (Docker or Podman) -- required for e2e tests
 - **golangci-lint** -- installed automatically by `make install-tools`
 - **oapi-codegen** -- installed automatically by `make install-oapi-codegen` (only needed when changing API contracts)

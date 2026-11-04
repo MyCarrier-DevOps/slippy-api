@@ -9,13 +9,14 @@ BINARIES := slippy-api slippy-migrator
 # slippy-client is generated (oapi-codegen) — lint-only, excluded like in `make test`.
 APPLICATION := slippy-api slippy-migrator
 
-GOLANGCI_VERSION := v2.11.3
-GOLANGCI_INSTALLER_SHA := 6008b81b81c690c046ffc3fd5bce896da715d5fd
+GOLANGCI_VERSION := v2.15.0
+GOLANGCI_INSTALLER_SHA := 25c5369a93aacb8cccea0d46e1569ca4a194564d
 
-# go-devkit template pins. install-tools and check-sec deliberately pin their own
-# versions (see their comments); the mutation targets install mutest at MUTEST_VERSION.
-GOLANGCI_LINT_VERSION := v2.12.2
-GOVULNCHECK_VERSION   := v1.1.4
+# go-devkit template pins. install-tools installs GOLANGCI_VERSION (kept equal to
+# GOLANGCI_LINT_VERSION), check-sec installs GOVULNCHECK_VERSION, and the mutation targets
+# install mutest at MUTEST_VERSION.
+GOLANGCI_LINT_VERSION := v2.15.0
+GOVULNCHECK_VERSION   := v1.9.0
 MUTEST_VERSION        := v0.6.0
 
 MUTATION_BASE      ?= origin/main
@@ -104,15 +105,15 @@ tidy:
 	done
 
 .PHONY: check-sec
-# govulncheck pinned to v1.3.0: v1.4.0 panics ("ForEachElement called on type
-# containing *types.TypeParam") under Go 1.26 generics (huma). Unpin when a
-# govulncheck >v1.4.0 fixes the regression.
+# govulncheck is installed at GOVULNCHECK_VERSION with the Go on PATH, so it is always built by
+# the Go that runs it: a govulncheck built by an older Go cannot load packages that need a
+# newer one. (v1.4.0 panicked on huma's generics under Go 1.26; v1.9.0 does not.)
 check-sec:
 	@echo "Checking security vulnerabilities..."
 	@for dir in $(or $(PKG),$(MODULES)); do \
 		if [ -d "$$dir" ]; then \
 			echo "Checking $$dir module..."; \
-			(cd $$dir && go mod download && go install golang.org/x/vuln/cmd/govulncheck@v1.3.0 && govulncheck -show verbose ./...) || exit 1; \
+			(cd $$dir && go mod download && go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) && govulncheck -show verbose ./...) || exit 1; \
 		else \
 			echo "Directory $$dir not found, skipping..."; \
 		fi; \
@@ -150,11 +151,11 @@ install-oapi-codegen:
 # failure.
 #
 # Why a SHA and not the tag: a tag is a movable ref. golangci-lint does enforce tag
-# protection on ~ALL tags today (repo ruleset 1382708), so retagging v2.11.3 is blocked
+# protection on ~ALL tags today (repo ruleset 1382708), so retagging v2.15.0 is blocked
 # upstream — but that is a policy this consumer cannot verify at fetch time and an org
-# owner can change. A SHA needs no trust in upstream policy at all. 6008b81 is what
-# v2.11.3 points at, and install.sh is byte-identical at both refs (verified:
-# sha256 edfa587f31bde70db161d1e5b783e086a1627d7e2f7c91de5f7cca79bcdf8631). The tag stays
+# owner can change. A SHA needs no trust in upstream policy at all. 25c5369 is what
+# v2.15.0 points at (annotated tag 49ff9b7), and install.sh is byte-identical at both refs
+# (verified: sha256 1022ddb4d87ed252350ed03fc9677e250a4ae95cc6bcd4658c2a20a8a23d390f). The tag stays
 # as the version ARGUMENT, which is what install.sh expects.
 #
 # Scope: this pins the SCRIPT only. install.sh derives TARBALL_URL and CHECKSUM_URL from
