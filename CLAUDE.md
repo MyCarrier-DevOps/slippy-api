@@ -218,7 +218,7 @@ Bump every goLibMyCarrier module together in both `slippy-api/go.mod` and `slipp
 
 - **Migration v7 creates `slip_rollbacks`.** It holds one row per gitops-rollback attempt, with `ON DELETE CASCADE` from `routing_slips` and UNIQUE (correlation_id, workflow); an `argo retry` of a failed rollback replaces that row's outcome. `slippy-migrator` applies it, as it applied v5 and v6.
   - Its FK takes `SHARE ROW EXCLUSIVE` on `routing_slips`, bounded by a 5 s `lock_timeout`. On a busy database the Job can fail on that timeout; re-run it.
-  - The ClickHouse mirror (`ci.slip_rollbacks_pg`, `ci_test.slip_rollbacks_pg`) is applied by hand afterwards from `goLibMyCarrier/slippy/clickhouse/slip_rollbacks_pg.sql`.
+  - The ClickHouse mirror (`ci.slip_rollbacks_pg`, `ci_test.slip_rollbacks_pg`) is applied by hand afterwards from `goLibMyCarrier/slippy/clickhouse/slip_rollbacks_pg.sql`. A repave deletes a slip's rows from the mirror, so rollback reporting reads `ci.slip_rollbacks_retained` and `ci_test.slip_rollbacks_retained` instead: ClickHouse copies of the mirror that nothing deletes from, defined with their apply steps in the `MyCarrier-DevOps/grafana-dashboards` repository under `sql/` (DEVOPS-522).
 - **`ProbeSchema` now requires `slip_rollbacks`,** so an API pod on this library refuses to boot until the migrator has applied v7. The Job runs first as the PreSync hook; the ordering is the operator's.
 - **`SlipStore` is unchanged.** The rollback routes take `domain.RollbackStore`, which `*slippy.PostgresStore` satisfies directly. `z_rollbackstore_interface_test.go` pins that at compile time.
 - **Two routes, `/v1` only, behind `gateRollbacks`:**
