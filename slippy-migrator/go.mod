@@ -1,6 +1,6 @@
 module github.com/MyCarrier-DevOps/slippy-api/slippy-migrator
 
-go 1.26.6
+go 1.27.3
 
 require (
 	github.com/MyCarrier-DevOps/goLibMyCarrier/postgres v1.5.10

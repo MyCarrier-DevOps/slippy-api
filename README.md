@@ -420,7 +420,7 @@ slippy-api/                          # Repository root
 
 ### Prerequisites
 
-- Go 1.26+
+- Go 1.27+
 - Container runtime (Podman or Docker) — for e2e tests
 - ClickHouse — for integration/production
 - Dragonfly/Redis — optional, for caching
