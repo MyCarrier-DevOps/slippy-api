@@ -4,10 +4,10 @@ go 1.27.3
 
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.48.0
-	github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse v1.5.11
-	github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.5.11
-	github.com/MyCarrier-DevOps/goLibMyCarrier/postgres v1.5.11
-	github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.5.11
+	github.com/MyCarrier-DevOps/goLibMyCarrier/clickhouse v1.5.15-0.20261106203754-908785ae2c84
+	github.com/MyCarrier-DevOps/goLibMyCarrier/logger v1.5.15-0.20261106203754-908785ae2c84
+	github.com/MyCarrier-DevOps/goLibMyCarrier/postgres v1.5.15-0.20261106203754-908785ae2c84
+	github.com/MyCarrier-DevOps/goLibMyCarrier/slippy v1.5.15-0.20261106203754-908785ae2c84
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/danielgtaylor/huma/v2 v2.39.1
 	github.com/google/uuid v1.6.0
@@ -32,10 +32,10 @@ require (
 	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
 	github.com/ClickHouse/ch-go v0.74.0 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
-	github.com/MyCarrier-DevOps/goLibMyCarrier/github v1.5.11 // indirect
-	github.com/MyCarrier-DevOps/goLibMyCarrier/postgresmigrator v1.5.11 // indirect
+	github.com/MyCarrier-DevOps/goLibMyCarrier/github v1.5.15-0.20261106203754-908785ae2c84 // indirect
+	github.com/MyCarrier-DevOps/goLibMyCarrier/postgresmigrator v1.5.15-0.20261106203754-908785ae2c84 // indirect
 	github.com/ProtonMail/go-crypto v1.5.1 // indirect
-	github.com/andybalholm/brotli v1.2.4 // indirect
+	github.com/andybalholm/brotli v1.2.7 // indirect
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
@@ -76,7 +76,7 @@ require (
 	github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 // indirect
 	github.com/jferrl/go-githubauth v1.9.1 // indirect
 	github.com/kevinburke/ssh_config v1.6.0 // indirect
-	github.com/klauspost/compress v1.20.0 // indirect
+	github.com/klauspost/compress v1.20.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
 	github.com/lufia/plan9stats v0.0.0-20260330125221-c963978e514e // indirect
 	github.com/magiconair/properties v1.8.10 // indirect
