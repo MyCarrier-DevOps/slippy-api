@@ -237,6 +237,14 @@ Bump every goLibMyCarrier module together in both `slippy-api/go.mod` and `slipp
 - **`SkipStep` also refuses a failed `prod_deploy` or `prod_tests`,** with the same `ErrSkipOverFailedCanary` and no write. A canary abort's skip would otherwise clear that primary failure. The skip route answers 409 for it, as for a canary step, and the detail names the refused step (`skipOverFailedStepDetail`, pinned by `TestMapWriteError_SkipOverFailedCanaryDetail`). `TestSlipWriterAdapter_SkipStep_FailedCanaryStep` covers all four steps through the adapter.
 - **A canary retry resets the D13 canary skips (scenario H).** Once `prod_canary` is `completed` or `skipped`, `checkPipelineCompletion` returns `prod_deploy`, `prod_tests` and `prod_alert_gate` to `pending` when their latest skip carries a canary reason, whatever the slip status and whatever else has failed. A `POST /v1/slips/{correlationID}/steps/prod_canary/complete` after a canary abort runs the same reset, so `prod_steady_state` then waits until a new release runs those steps or supersedes the slip. Nothing in slippy-api changes for it.
 
+**v1.5.15 (DEVOPS-501): this bump applies Postgres migration v8 (`slip_component_states.claimed_by`) and changes `SlipWriter.StartStep`.**
+Bump every goLibMyCarrier module together in both `slippy-api/go.mod` and `slippy-migrator/go.mod`, as for v1.4.0.
+
+- **Migration v8 adds a nullable `claimed_by` column** to `slip_component_states` (no default, no backfill). Every slip read selects it, so the migrator must have applied v8 before any API pod on this library serves: `ProbeSchema` refuses to boot otherwise (`ErrSchemaBehind`), and the ordering is the operator's. Roll the migrator image first, then the API.
+- **`SlipWriter.StartStep` takes `claimedBy` as its last argument.** `mockWriter` in `internal/handler/slip_write_handler_test.go` and `stubSlipWriter` in `main_test.go` implement it. The handler reads the optional `claimed_by` of the start body (validated like the claim endpoint's `claimed_by`: 1-128 characters of `A-Za-z0-9._:/-`) and passes it through; complete ignores the field. `SlipStore` is unchanged.
+- **Read model:** `Step.ClaimedBy` (`claimed_by`) is returned only while the step is running; an unclaimed running step omits it.
+- **Compatibility:** the field is optional, so a CLI that does not send it still works against this API. An API without the field answers 422 ("unexpected property") to a CLI that sends it; the Slippy CLI retries once without the claimant, so roll the API before the CLI where you can, and nothing breaks if the order is reversed.
+
 ### Behavioral Notes (v1.3.77+)
 
 - `checkPipelineCompletion` short-circuits on `Completed`, `Abandoned`, `Promoted` (was `Completed` only before v1.3.77). Post-`PromoteSlip`/`AbandonSlip` terminal step events no longer overwrite `slip.status`.

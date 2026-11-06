@@ -145,8 +145,10 @@ type SlipWriter interface {
 	// including ancestry resolution and ancestor abandonment/promotion.
 	CreateSlipForPush(ctx context.Context, opts PushOptions) (*CreateSlipResult, error)
 
-	// StartStep marks a pipeline step as running.
-	StartStep(ctx context.Context, correlationID, stepName, componentName string) error
+	// StartStep marks a pipeline step as running. claimedBy names the run that starts it
+	// (the CLI's workflow name); empty means the caller named none, and the step is then
+	// reported unclaimed.
+	StartStep(ctx context.Context, correlationID, stepName, componentName, claimedBy string) error
 
 	// CompleteStep marks a pipeline step as completed.
 	CompleteStep(ctx context.Context, correlationID, stepName, componentName string) error

@@ -198,9 +198,25 @@ func TestSlipWriterAdapter_StartStep_Success(t *testing.T) {
 	}
 	adapter := newTestWriterAdapter(store)
 
-	err := adapter.StartStep(context.Background(), "abc-123", "builds_completed", "api")
+	err := adapter.StartStep(context.Background(), "abc-123", "builds_completed", "api", "")
 	require.NoError(t, err)
 	assert.True(t, called)
+}
+
+// The claimant reaches the store on the running history entry, which is how the library
+// records it.
+func TestSlipWriterAdapter_StartStep_PassesTheClaimant(t *testing.T) {
+	var got slippy.StateHistoryEntry
+	store := &mockSlipStore{
+		updateStepWithHistoryFn: func(_ context.Context, _, _, _ string, _ slippy.StepStatus, entry slippy.StateHistoryEntry) error {
+			got = entry
+			return nil
+		},
+	}
+	adapter := newTestWriterAdapter(store)
+
+	require.NoError(t, adapter.StartStep(context.Background(), "abc-123", "dev_deploy", "", "wf-a"))
+	assert.Equal(t, "wf-a", got.ClaimedBy)
 }
 
 func TestSlipWriterAdapter_StartStep_Error(t *testing.T) {
@@ -211,7 +227,7 @@ func TestSlipWriterAdapter_StartStep_Error(t *testing.T) {
 	}
 	adapter := newTestWriterAdapter(store)
 
-	err := adapter.StartStep(context.Background(), "abc-123", "builds_completed", "api")
+	err := adapter.StartStep(context.Background(), "abc-123", "builds_completed", "api", "")
 	assert.Error(t, err)
 }
 
@@ -294,7 +310,7 @@ func TestSlipWriterAdapter_StartStep_SurvivesRequestCancellation(t *testing.T) {
 	reqCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := adapter.StartStep(reqCtx, "abc-123", "builds_completed", "api")
+	err := adapter.StartStep(reqCtx, "abc-123", "builds_completed", "api", "")
 	require.NoError(t, err)
 	assert.NoError(t, seenCtxErr, "store must receive a live, non-cancelled ctx")
 }

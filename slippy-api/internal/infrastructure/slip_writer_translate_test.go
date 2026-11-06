@@ -176,7 +176,7 @@ func TestSlipWriterAdapter_StepWrites_StorePgErrorTranslation(t *testing.T) {
 	ctx := context.Background()
 	calls := map[string]func(a *SlipWriterAdapter) error{
 		"StartStep": func(a *SlipWriterAdapter) error {
-			return a.StartStep(ctx, "corr-1", "push_parsed", "")
+			return a.StartStep(ctx, "corr-1", "push_parsed", "", "")
 		},
 		"CompleteStep": func(a *SlipWriterAdapter) error {
 			return a.CompleteStep(ctx, "corr-1", "push_parsed", "")

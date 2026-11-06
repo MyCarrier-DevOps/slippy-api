@@ -1426,6 +1426,9 @@
           "actor": {
             "type": "string"
           },
+          "claimed_by": {
+            "type": "string"
+          },
           "component": {
             "type": "string"
           },
@@ -1455,6 +1458,9 @@
         "additionalProperties": false,
         "properties": {
           "actor": {
+            "type": "string"
+          },
+          "claimed_by": {
             "type": "string"
           },
           "completed_at": {
@@ -1490,6 +1496,13 @@
             ],
             "format": "uri",
             "readOnly": true,
+            "type": "string"
+          },
+          "claimed_by": {
+            "description": "Run that is starting the step (the CLI's workflow name); shown as the step's claimed_by while it is running. Used by start only",
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._:/-]+$",
             "type": "string"
           },
           "component_name": {

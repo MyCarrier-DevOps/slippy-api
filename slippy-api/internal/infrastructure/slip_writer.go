@@ -239,7 +239,9 @@ func (a *SlipWriterAdapter) CreateSlipForPush(
 	return a.awaitExistingSlip(ctx, span, key, opts)
 }
 
-func (a *SlipWriterAdapter) StartStep(ctx context.Context, correlationID, stepName, componentName string) error {
+func (a *SlipWriterAdapter) StartStep(
+	ctx context.Context, correlationID, stepName, componentName, claimedBy string,
+) error {
 	return a.instrumentedWrite(ctx, "writer.StartStep",
 		[]attribute.KeyValue{
 			attribute.String("slip.correlation_id", correlationID),
@@ -248,7 +250,7 @@ func (a *SlipWriterAdapter) StartStep(ctx context.Context, correlationID, stepNa
 		},
 		func(wctx context.Context, _ trace.Span) error {
 			// Postgres writes the step-status column atomically; no post-write hydration.
-			return a.client.StartStep(wctx, correlationID, stepName, componentName)
+			return a.client.StartStep(wctx, correlationID, stepName, componentName, claimedBy)
 		},
 	)
 }

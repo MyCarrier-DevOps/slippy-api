@@ -97,7 +97,7 @@ func (s *stubSlipWriter) CreateSlipForPush(
 ) (*domain.CreateSlipResult, error) {
 	return &domain.CreateSlipResult{Slip: &domain.Slip{CorrelationID: opts.CorrelationID}}, nil
 }
-func (s *stubSlipWriter) StartStep(_ context.Context, _, _, _ string) error    { return nil }
+func (s *stubSlipWriter) StartStep(_ context.Context, _, _, _, _ string) error { return nil }
 func (s *stubSlipWriter) CompleteStep(_ context.Context, _, _, _ string) error { return nil }
 func (s *stubSlipWriter) FailStep(_ context.Context, _, _, _, _ string) error  { return nil }
 func (s *stubSlipWriter) SkipStep(_ context.Context, _, _, _, _ string) error  { return nil }

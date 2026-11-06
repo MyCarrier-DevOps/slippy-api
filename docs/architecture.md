@@ -114,7 +114,7 @@ The audit's blind spots are `Hidden` operations and routes behind config branche
 | Method | Path | OperationID | Handler | Description |
 |--------|------|-------------|---------|-------------|
 | `POST` | `/v1/slips` | `create-slip` | `SlipWriteHandler.createSlip()` | Create routing slip for a push event |
-| `POST` | `/v1/slips/{correlationID}/steps/{stepName}/start` | `start-step` | `SlipWriteHandler.startStep()` | Mark step as running |
+| `POST` | `/v1/slips/{correlationID}/steps/{stepName}/start` | `start-step` | `SlipWriteHandler.startStep()` | Mark step as running; optional `claimed_by` names the run |
 | `POST` | `/v1/slips/{correlationID}/steps/{stepName}/complete` | `complete-step` | `SlipWriteHandler.completeStep()` | Mark step as completed |
 | `POST` | `/v1/slips/{correlationID}/steps/{stepName}/fail` | `fail-step` | `SlipWriteHandler.failStep()` | Mark step as failed |
 | `PUT` | `/v1/slips/{correlationID}/components/{componentName}/image-tag` | `set-image-tag` | `SlipWriteHandler.setImageTag()` | Record built image tag for a component |
