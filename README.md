@@ -87,7 +87,7 @@ Write endpoints are available on the `/v1` prefix only and require `SLIPPY_WRITE
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/v1/slips` | Create a routing slip for a push event (201 Created) |
-| `POST` | `/v1/slips/{correlationID}/steps/{stepName}/start` | Mark a pipeline step as running (204 No Content). The optional body takes `component_name` and `claimed_by`, the run starting the step (1-128 characters of `A-Za-z0-9._:/-`); the slip read shows it as the step's `claimed_by` while the step is running |
+| `POST` | `/v1/slips/{correlationID}/steps/{stepName}/start` | Mark a pipeline step as running (204 No Content). The optional body takes `component_name` and `claimed_by`, the run starting the step (1-128 characters of `A-Za-z0-9._:/-`); the slip read shows it as the step's `claimed_by` while a step started without `component_name` is running (for a start with `component_name` it shows only on that start's `state_history` entry) |
 | `POST` | `/v1/slips/{correlationID}/steps/{stepName}/complete` | Mark a pipeline step as completed (204 No Content) |
 | `POST` | `/v1/slips/{correlationID}/steps/{stepName}/fail` | Mark a pipeline step as failed (204 No Content) |
 | `PUT` | `/v1/slips/{correlationID}/components/{componentName}/image-tag` | Set the built container image tag for a component (204 No Content) |

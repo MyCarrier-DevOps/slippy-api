@@ -602,7 +602,6 @@ type Slip struct {
 // StateHistoryEntry defines model for StateHistoryEntry.
 type StateHistoryEntry struct {
 	Actor     string    `json:"actor"`
-	ClaimedBy *string   `json:"claimed_by,omitempty"`
 	Component *string   `json:"component,omitempty"`
 	Message   *string   `json:"message,omitempty"`
 	Status    string    `json:"status"`
@@ -613,7 +612,6 @@ type StateHistoryEntry struct {
 // Step defines model for Step.
 type Step struct {
 	Actor       *string    `json:"actor,omitempty"`
-	ClaimedBy   *string    `json:"claimed_by,omitempty"`
 	CompletedAt *time.Time `json:"completed_at,omitempty"`
 	Error       *string    `json:"error,omitempty"`
 	HeldReason  *string    `json:"held_reason,omitempty"`
@@ -625,9 +623,6 @@ type Step struct {
 type StepBody struct {
 	// Schema A URL to the JSON Schema for this object.
 	Schema *string `json:"$schema,omitempty"`
-
-	// ClaimedBy Run that is starting the step (the CLI's workflow name); shown as the step's claimed_by while it is running. Used by start only
-	ClaimedBy *string `json:"claimed_by,omitempty"`
 
 	// ComponentName Component name (required for aggregate steps, empty for pipeline steps)
 	ComponentName *string `json:"component_name,omitempty"`

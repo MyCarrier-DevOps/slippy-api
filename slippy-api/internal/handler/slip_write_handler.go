@@ -126,7 +126,7 @@ type StepBody struct {
 	// ClaimedBy is read by start only; complete ignores it. Validated like the claim
 	// endpoint's claimed_by, but optional: a start that names no run leaves the step
 	// unclaimed, which a reader treats as not any run's own.
-	ClaimedBy string `json:"claimed_by,omitempty" minLength:"1" maxLength:"128" pattern:"^[A-Za-z0-9._:/-]+$" doc:"Run that is starting the step (the CLI's workflow name); shown as the step's claimed_by while it is running. Used by start only"`
+	ClaimedBy string `json:"claimed_by,omitempty" minLength:"1" maxLength:"128" pattern:"^[A-Za-z0-9._:/-]+$" doc:"Run that is starting the step (the CLI's workflow name). The slip read shows it as the step's claimed_by while a step started without component_name is running; for a start with component_name, the read shows it only on that start's state_history entry. Used by start only"`
 }
 
 // StepInput captures path params and optional body for step start/complete.

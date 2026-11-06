@@ -1499,7 +1499,7 @@
             "type": "string"
           },
           "claimed_by": {
-            "description": "Run that is starting the step (the CLI's workflow name); shown as the step's claimed_by while it is running. Used by start only",
+            "description": "Run that is starting the step (the CLI's workflow name). The slip read shows it as the step's claimed_by while a step started without component_name is running; for a start with component_name, the read shows it only on that start's state_history entry. Used by start only",
             "maxLength": 128,
             "minLength": 1,
             "pattern": "^[A-Za-z0-9._:/-]+$",
