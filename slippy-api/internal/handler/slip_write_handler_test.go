@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -24,7 +25,7 @@ import (
 
 type mockWriter struct {
 	createSlipForPushFn    func(ctx context.Context, opts domain.PushOptions) (*domain.CreateSlipResult, error)
-	startStepFn            func(ctx context.Context, correlationID, stepName, componentName string) error
+	startStepFn            func(ctx context.Context, correlationID, stepName, componentName, claimedBy string) error
 	completeStepFn         func(ctx context.Context, correlationID, stepName, componentName string) error
 	failStepFn             func(ctx context.Context, correlationID, stepName, componentName, reason string) error
 	skipStepFn             func(ctx context.Context, correlationID, stepName, componentName, reason string) error
@@ -38,8 +39,8 @@ type mockWriter struct {
 func (m *mockWriter) CreateSlipForPush(ctx context.Context, opts domain.PushOptions) (*domain.CreateSlipResult, error) {
 	return m.createSlipForPushFn(ctx, opts)
 }
-func (m *mockWriter) StartStep(ctx context.Context, cID, step, comp string) error {
-	return m.startStepFn(ctx, cID, step, comp)
+func (m *mockWriter) StartStep(ctx context.Context, cID, step, comp, claimedBy string) error {
+	return m.startStepFn(ctx, cID, step, comp, claimedBy)
 }
 func (m *mockWriter) CompleteStep(ctx context.Context, cID, step, comp string) error {
 	return m.completeStepFn(ctx, cID, step, comp)
@@ -308,7 +309,7 @@ func TestCreateSlip_InternalError(t *testing.T) {
 
 func TestStartStep_Success(t *testing.T) {
 	w := &mockWriter{
-		startStepFn: func(_ context.Context, cID, step, comp string) error {
+		startStepFn: func(_ context.Context, cID, step, comp, _ string) error {
 			assert.Equal(t, "abc-123", cID)
 			assert.Equal(t, "builds_completed", step)
 			assert.Equal(t, "api", comp)
@@ -326,9 +327,73 @@ func TestStartStep_Success(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
+// The run that starts a step is named in the optional claimed_by body field and reaches the
+// writer; a start that names none reaches it empty, so the step is reported unclaimed.
+func TestStartStep_PassesClaimedBy(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, want string
+	}{
+		{"names the run", `{"claimed_by":"render-manual-abc12"}`, "render-manual-abc12"},
+		{"with a component", `{"component_name":"api","claimed_by":"wf.a:b/c_d-1"}`, "wf.a:b/c_d-1"},
+		{"names none", `{"component_name":"api"}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got string
+			w := &mockWriter{
+				startStepFn: func(_ context.Context, _, _, _, claimedBy string) error {
+					got = claimedBy
+					return nil
+				},
+			}
+			req := httptest.NewRequest(
+				http.MethodPost,
+				"/slips/abc-123/steps/dev_deploy/start",
+				strings.NewReader(tc.body),
+			)
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			setupWriteTestAPI(w).ServeHTTP(rec, req)
+
+			assert.Equal(t, http.StatusNoContent, rec.Code)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// claimed_by is validated like the claim endpoint's: 1-128 characters of the adopter alphabet.
+// A rejected value never reaches the writer.
+func TestStartStep_RejectsAnInvalidClaimedBy(t *testing.T) {
+	for name, claimedBy := range map[string]string{
+		"empty":         ``,
+		"too long":      strings.Repeat("a", 129),
+		"bad character": `wf name`,
+		"newline":       "wf\nname",
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := &mockWriter{
+				startStepFn: func(context.Context, string, string, string, string) error {
+					t.Error("the writer must not be called for an invalid claimed_by")
+					return nil
+				},
+			}
+			body := `{"claimed_by":` + strconv.Quote(claimedBy) + `}`
+			req := httptest.NewRequest(
+				http.MethodPost,
+				"/slips/abc-123/steps/dev_deploy/start",
+				strings.NewReader(body),
+			)
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			setupWriteTestAPI(w).ServeHTTP(rec, req)
+
+			assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+		})
+	}
+}
+
 func TestStartStep_NoBody(t *testing.T) {
 	w := &mockWriter{
-		startStepFn: func(_ context.Context, cID, step, comp string) error {
+		startStepFn: func(_ context.Context, cID, step, comp, _ string) error {
 			assert.Equal(t, "abc-123", cID)
 			assert.Equal(t, "push_parsed", step)
 			assert.Equal(t, "", comp)
@@ -346,7 +411,7 @@ func TestStartStep_NoBody(t *testing.T) {
 
 func TestStartStep_NotFound(t *testing.T) {
 	w := &mockWriter{
-		startStepFn: func(_ context.Context, _, _, _ string) error {
+		startStepFn: func(_ context.Context, _, _, _, _ string) error {
 			return slippy.ErrSlipNotFound
 		},
 	}
@@ -362,7 +427,7 @@ func TestStartStep_NotFound(t *testing.T) {
 
 func TestStartStep_StepError(t *testing.T) {
 	w := &mockWriter{
-		startStepFn: func(_ context.Context, _, _, _ string) error {
+		startStepFn: func(_ context.Context, _, _, _, _ string) error {
 			return slippy.NewStepError("update", "abc-123", "build", "api", errors.New("failed"))
 		},
 	}
@@ -1151,7 +1216,7 @@ func TestWriteNotFound_MessageIsActionable(t *testing.T) {
 			"start step",
 			"/slips/abc-123/steps/builds_completed/start",
 			`{"component_name":"api"}`,
-			&mockWriter{startStepFn: func(_ context.Context, _, _, _ string) error {
+			&mockWriter{startStepFn: func(_ context.Context, _, _, _, _ string) error {
 				return slippy.ErrSlipNotFound
 			}},
 		},
@@ -1428,7 +1493,7 @@ func TestMapWriteError(t *testing.T) {
 // incorrectly-added 202 branch.
 func TestStartStep_ContextDeadlineExceeded_Returns504(t *testing.T) {
 	w := &mockWriter{
-		startStepFn: func(_ context.Context, _, _, _ string) error {
+		startStepFn: func(_ context.Context, _, _, _, _ string) error {
 			return context.DeadlineExceeded
 		},
 	}
@@ -1545,7 +1610,7 @@ func TestValidateCorrelationIDFormat_Empty_Returns400(t *testing.T) {
 // exceeding 128 characters is rejected with HTTP 400.
 func TestValidateCorrelationIDFormat_TooLong_Returns400(t *testing.T) {
 	w := &mockWriter{
-		startStepFn: func(_ context.Context, _, _, _ string) error { return nil },
+		startStepFn: func(_ context.Context, _, _, _, _ string) error { return nil },
 	}
 	handler := setupWriteTestAPI(w)
 
@@ -1563,7 +1628,7 @@ func TestValidateCorrelationIDFormat_TooLong_Returns400(t *testing.T) {
 // containing ';' (outside [A-Za-z0-9._:-]) is rejected with HTTP 400.
 func TestValidateCorrelationIDFormat_BadChar_Returns400(t *testing.T) {
 	w := &mockWriter{
-		startStepFn: func(_ context.Context, _, _, _ string) error { return nil },
+		startStepFn: func(_ context.Context, _, _, _, _ string) error { return nil },
 	}
 	handler := setupWriteTestAPI(w)
 
@@ -1581,7 +1646,7 @@ func TestValidateCorrelationIDFormat_BadChar_Returns400(t *testing.T) {
 func TestValidateCorrelationIDFormat_ValidUUIDish_Passes(t *testing.T) {
 	var called bool
 	w := &mockWriter{
-		startStepFn: func(_ context.Context, _, _, _ string) error {
+		startStepFn: func(_ context.Context, _, _, _, _ string) error {
 			called = true
 			return nil
 		},

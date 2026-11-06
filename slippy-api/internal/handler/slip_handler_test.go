@@ -95,6 +95,31 @@ func TestGetSlip_Success(t *testing.T) {
 	assert.Equal(t, "org/repo", body.Repository)
 }
 
+// A running step's claimant is part of the read model: it is returned as the step's claimed_by,
+// and a step that has none leaves the key out.
+func TestGetSlip_ReturnsAStepsClaimant(t *testing.T) {
+	slip := &domain.Slip{
+		CorrelationID: "abc-123",
+		Steps: map[string]slippy.Step{
+			"dev_deploy": {Status: slippy.StepStatusRunning, ClaimedBy: "wf-a"},
+			"builds":     {Status: slippy.StepStatusCompleted},
+		},
+	}
+	mock := &mockReader{loadFn: func(context.Context, string) (*domain.Slip, error) { return slip, nil }}
+
+	req := httptest.NewRequest(http.MethodGet, "/slips/abc-123", nil)
+	w := httptest.NewRecorder()
+	setupTestAPI(mock).ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var body struct {
+		Steps map[string]map[string]any `json:"steps"`
+	}
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&body))
+	assert.Equal(t, "wf-a", body.Steps["dev_deploy"]["claimed_by"])
+	assert.NotContains(t, body.Steps["builds"], "claimed_by")
+}
+
 func TestGetSlip_NotFound(t *testing.T) {
 	mock := &mockReader{
 		loadFn: func(_ context.Context, id string) (*domain.Slip, error) {

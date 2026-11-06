@@ -123,6 +123,10 @@ type CreateSlipOutput struct {
 // StepBody is the optional request body for step start/complete endpoints.
 type StepBody struct {
 	ComponentName string `json:"component_name,omitempty" maxLength:"256" doc:"Component name (required for aggregate steps, empty for pipeline steps)"`
+	// ClaimedBy is read by start only; complete ignores it. Validated like the claim
+	// endpoint's claimed_by, but optional: a start that names no run leaves the step
+	// unclaimed, which a reader treats as not any run's own.
+	ClaimedBy string `json:"claimed_by,omitempty" minLength:"1" maxLength:"128" pattern:"^[A-Za-z0-9._:/-]+$" doc:"Run that is starting the step (the CLI's workflow name). The slip read shows it as the step's claimed_by while a step started without component_name is running; for a start with component_name, the read shows it only on that start's state_history entry. Used by start only"`
 }
 
 // StepInput captures path params and optional body for step start/complete.
@@ -140,6 +144,14 @@ func (s *StepInput) componentName() string {
 		return ""
 	}
 	return s.Body.ComponentName
+}
+
+// claimedBy returns the claimant from the optional body, or empty string if no body.
+func (s *StepInput) claimedBy() string {
+	if s.Body == nil {
+		return ""
+	}
+	return s.Body.ClaimedBy
 }
 
 // FailStepInput captures path params and body for step failure.
@@ -496,7 +508,6 @@ func (h *SlipWriteHandler) createSlip(ctx context.Context, input *CreateSlipInpu
 	return out, nil
 }
 
-//nolint:dupl // startStep and completeStep share intentional parallel structure; the operations are semantically distinct.
 func (h *SlipWriteHandler) startStep(ctx context.Context, input *StepInput) (*struct{}, error) {
 	if err := validateCorrelationIDFormat(input.CorrelationID); err != nil {
 		return nil, err
@@ -507,15 +518,22 @@ func (h *SlipWriteHandler) startStep(ctx context.Context, input *StepInput) (*st
 			attribute.String("slip.correlation_id", input.CorrelationID),
 			attribute.String("slip.step_name", input.StepName),
 			attribute.String("slip.component_name", componentName),
+			attribute.String("slip.claimed_by", input.claimedBy()),
 		),
 	)
 	defer span.End()
 
 	slog.InfoContext(ctx, "step: start",
 		"correlation_id", input.CorrelationID,
-		"step", input.StepName, "component", componentName)
+		"step", input.StepName, "component", componentName, "claimed_by", input.claimedBy())
 
-	if err := h.writer.StartStep(ctx, input.CorrelationID, input.StepName, componentName); err != nil {
+	if err := h.writer.StartStep(
+		ctx,
+		input.CorrelationID,
+		input.StepName,
+		componentName,
+		input.claimedBy(),
+	); err != nil {
 		recordHandlerError(span, err)
 		slog.ErrorContext(ctx, "step: start failed",
 			"correlation_id", input.CorrelationID,
@@ -530,7 +548,6 @@ func (h *SlipWriteHandler) startStep(ctx context.Context, input *StepInput) (*st
 	return &struct{}{}, nil
 }
 
-//nolint:dupl // completeStep and startStep share intentional parallel structure; the operations are semantically distinct.
 func (h *SlipWriteHandler) completeStep(ctx context.Context, input *StepInput) (*struct{}, error) {
 	if err := validateCorrelationIDFormat(input.CorrelationID); err != nil {
 		return nil, err
