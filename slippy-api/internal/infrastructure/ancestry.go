@@ -63,7 +63,7 @@ type SlipResolver interface {
 }
 
 // SlipResolverAdapter wraps the slippy library's ResolveSlip for ancestry-based
-// slip resolution. FindByCommits and FindAllByCommits attempt a direct ClickHouse
+// slip resolution. FindByCommits and FindAllByCommits attempt a direct Postgres
 // reader lookup first and fall back to the library's commit-ancestry walker on miss.
 // LoadByCommit is resolver-first by design — it always walks ancestry — for callers
 // that want "the slip for THIS commit's lineage" (e.g. image-tag fallback, historical
@@ -132,12 +132,12 @@ func (a *SlipResolverAdapter) LoadByCommit(
 	defer span.End()
 
 	// Exact-first for full commit SHAs: when the ref is an unambiguous 40-hex
-	// commit SHA, attempt a direct ClickHouse exact-SHA read BEFORE walking
+	// commit SHA, attempt a direct Postgres exact-SHA read BEFORE walking
 	// GitHub commit-ancestry. This avoids 404 flapping when the resolver's
 	// GitHub GraphQL ancestry walk transiently errors / rate-limits / returns
 	// an empty commit list under CI burst (those collapse into ErrSlipNotFound).
 	// On exact miss we fall back to the ancestry walk (unchanged); on exact
-	// infrastructure errors (e.g. ClickHouse down) we propagate so the handler
+	// infrastructure errors (e.g. Postgres down) we propagate so the handler
 	// yields 5xx rather than masking a live slip as a 404. Non-full-SHA refs
 	// (branch names, short SHAs) skip the exact attempt and go straight to
 	// ancestry, exactly as before.
@@ -159,7 +159,7 @@ func (a *SlipResolverAdapter) LoadByCommit(
 			return exactSlip, nil
 		}
 		if !errors.Is(exactErr, slippy.ErrSlipNotFound) {
-			// Infrastructure error (ClickHouse down, etc.) — do NOT swallow into
+			// Infrastructure error (Postgres down, etc.) — do NOT swallow into
 			// a not-found / 404. Propagate so mapError yields 5xx.
 			slog.ErrorContext(ctx, "ancestry: exact-SHA read failed",
 				"requested_repository", repository, "commit_sha", commitSHA, "error", exactErr)
@@ -213,7 +213,7 @@ func (a *SlipResolverAdapter) LoadByCommit(
 }
 
 // LoadByCommitExact bypasses the resolver-first ancestry walk and returns the LIVE
-// slip for the exact (repository, commitSHA) via the direct ClickHouse store. Returns
+// slip for the exact (repository, commitSHA) via the direct Postgres store. Returns
 // slippy.ErrSlipNotFound when no live slip exists. Use only for dedup-loser polling
 // and other in-flight paths that require exact-SHA semantics.
 func (a *SlipResolverAdapter) LoadByCommitExact(
@@ -254,7 +254,7 @@ func (a *SlipResolverAdapter) FindByCommits(
 	repository string,
 	commits []string,
 ) (foundSlip *domain.Slip, matchedCommit string, err error) {
-	// Try the direct ClickHouse lookup first.
+	// Try the direct Postgres lookup first.
 	slip, matched, err := a.reader.FindByCommits(ctx, repository, commits)
 	if err == nil {
 		return slip, matched, nil
