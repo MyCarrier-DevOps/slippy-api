@@ -245,6 +245,13 @@ Bump every goLibMyCarrier module together in both `slippy-api/go.mod` and `slipp
 - **Read model:** `Step.ClaimedBy` (`claimed_by`) is returned only while a step started without `component_name` is running; an unclaimed running step omits it. A component-scoped start's claimant lives on that component's row, which no read returns (it shows on that start's `state_history` entry). The PR commits the spec only: main's CI regenerates `slippy-client` and tags it, which it skips when the client is already committed (`docs/contract-regeneration.md`).
 - **Compatibility:** the field is optional, so a CLI that does not send it still works against this API. An API without the field answers 422 ("unexpected property") to a CLI that sends it; the Slippy CLI retries once without the claimant, so roll the API before the CLI where you can, and nothing breaks if the order is reversed.
 
+**v1.5.21 (DEVOPS-634): no migration, and `SlipStore` is unchanged.** Bump every goLibMyCarrier module together in both modules, as for v1.4.0. The only slippy changes since v1.5.15 are goLibMyCarrier#124 and a dependency bump. The same change moves the `go` line of all three modules and both Dockerfiles to `go 1.27.4` / `golang:1.27.4` (GO-2026-6859, fixed in 1.27.4), or `make check-sec` fails.
+
+- **Deploy this release only after the rehearsal step has left the live pipeline config on both instances (DEVOPS-635).** Before that, the library's example configs and skip guard no longer match the live config.
+- **The library tolerates a step that is not in the loaded config.** Reads and prerequisites follow the loaded config, and a write to an unknown step name returns nil: the store records the event in `slip_component_states` and `state_history` and writes no status column. `STATE_MACHINE_V3.md` has the section "Steps that leave the pipeline config".
+- **The migrator never drops a step column.** A step that leaves the config keeps its `<step>_status` column as `NOT NULL DEFAULT 'pending'`, so new slips read `pending` in it.
+- **The skip guard covers `prod_canary`, `prod_deploy` and `prod_tests`.** `TestSlipWriterAdapter_SkipStep_FailedCanaryStep` and `TestSkipStep_FailedCanaryStepIsAConflict` pin the set through the adapter and the 409 route.
+
 ### Behavioral Notes (v1.3.77+)
 
 - `checkPipelineCompletion` short-circuits on `Completed`, `Abandoned`, `Promoted` (was `Completed` only before v1.3.77). Post-`PromoteSlip`/`AbandonSlip` terminal step events no longer overwrite `slip.status`.
