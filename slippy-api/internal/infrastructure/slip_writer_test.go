@@ -484,8 +484,10 @@ func TestSlipWriterAdapter_SkipStep_FailedCanaryStep(t *testing.T) {
 		wantWrite bool
 	}{
 		{"prod_canary", slippy.StepStatusFailed, false},
-		{"preprod_rollback_test", slippy.StepStatusFailed, false},
-		{"preprod_rollback_test", slippy.StepStatusAborted, true},
+		{"prod_canary", slippy.StepStatusAborted, true},
+		// The retired rehearsal step is not guarded: it is not in the pipeline config, so a skip
+		// of it hides nothing.
+		{"preprod_rollback_test", slippy.StepStatusFailed, true},
 		// goLibMyCarrier v1.5.11 (DEVOPS-554) widens the guard to a failed prod_deploy or
 		// prod_tests: a canary abort's skip would otherwise clear that primary failure.
 		{"prod_deploy", slippy.StepStatusFailed, false},
