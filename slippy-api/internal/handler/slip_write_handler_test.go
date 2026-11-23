@@ -629,10 +629,10 @@ func TestSkipStep_NotFound(t *testing.T) {
 
 // A skip refused because the step is recorded as failed writes nothing; the caller must re-run the
 // step to a new verdict instead of skipping it, so it is a 409, not a 422 (DEVOPS-521). The library
-// guards the canary steps and, from goLibMyCarrier v1.5.11, a failed prod_deploy or prod_tests
+// guards a failed prod_canary and, from goLibMyCarrier v1.5.11, a failed prod_deploy or prod_tests
 // (DEVOPS-554); the detail names the refused step.
 func TestSkipStep_FailedCanaryStepIsAConflict(t *testing.T) {
-	for _, step := range []string{"prod_canary", "preprod_rollback_test", "prod_deploy", "prod_tests"} {
+	for _, step := range []string{"prod_canary", "prod_deploy", "prod_tests"} {
 		t.Run(step, func(t *testing.T) {
 			w := &mockWriter{
 				skipStepFn: func(_ context.Context, cID, step, comp, _ string) error {
